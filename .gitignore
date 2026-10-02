@@ -1,0 +1,24 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.jupyter/
+.env
+.env.*
+!.env.example
+data/
+artifacts/
+outputs/
+checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.log
+.DS_Store
+
+# Lab storage links (see ~/STARTUP.md)
+/data
+/scratch
+/.venv
