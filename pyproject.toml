@@ -1,7 +1,7 @@
 [project]
 name = "loop-steer"
 version = "0.1.0"
-description = "Activation steering experiments with ByteDance Ouro"
+description = "Refusal-direction ablation and steering for looped reasoning models (Ouro, Nanbeige)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

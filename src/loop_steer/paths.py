@@ -1,10 +1,11 @@
-"""Storage locations and job environment (lab layout, see ~/STARTUP.md).
+"""Storage locations and job environment.
 
-Code lives in the repo (backed-up HOME). Run artifacts go through the repo's
-``data`` link (-> /data/$USER/projects/loop_steer); datasets live in the
-user-global $DATA_DIR/datasets; per-job temporary files go to a
-timestamp/project-stamped directory under the ``scratch`` link
-(-> /scr/$USER/tmp). Model weights come from the shared Hugging Face cache.
+Run artifacts go to ``<data>/runs/<model>`` where ``<data>`` is ``$LOOP_STEER_DATA`` or the repo's
+``data/`` directory (a symlink to bulk storage works well). Prompt CSVs are found via
+``$LOOP_STEER_PROMPTS``, ``$DATA_DIR/datasets/reasoning-manipulation/prompts`` or ``data/prompts``.
+Per-job temporary files go to a stamped directory under ``scratch/`` (also a symlink-friendly
+location). Model weights come from the Hugging Face cache. On a shared server with a storage profile
+at ``/etc/profile.d/lab-storage.sh``, ``setup_job_env`` loads it; elsewhere that step is skipped.
 """
 
 import os
@@ -41,7 +42,7 @@ def setup_job_env() -> Path:
     """
     os.umask(0o077)
     _load_lab_profile()
-    data_dir = Path(os.environ.get("DATA_DIR", f"/data/{os.environ.get('USER', '')}"))
+    data_dir = _data_dir()
     os.environ.setdefault("VLLM_CACHE_ROOT", str(data_dir / ".cache" / "vllm"))
     # Inductor defaults to $TMPDIR/torchinductor_$USER; vLLM's compile cache records that
     # absolute path, so a per-job TMPDIR would be re-created by later jobs. Keep it stable.
@@ -50,15 +51,25 @@ def setup_job_env() -> Path:
         return Path(os.environ["LOOP_STEER_JOB_TMP"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tmp = SCRATCH_ROOT.resolve() / f"{stamp}--{PROJECT}--{uuid.uuid4().hex[:8]}"
-    tmp.mkdir()
+    tmp.mkdir(parents=True)
     os.environ["TMPDIR"] = os.environ["LOOP_STEER_JOB_TMP"] = str(tmp)
     return tmp
 
 
+def _data_dir() -> Path:
+    """Root for caches: $DATA_DIR if set (shared servers), else the repo's data/ directory."""
+    return Path(os.environ["DATA_DIR"]) if os.environ.get("DATA_DIR") else DATA_ROOT
+
+
 def dataset_dir() -> Path:
-    """Upstream reasoning-manipulation prompt CSVs (user-global datasets/)."""
-    data_dir = Path(os.environ.get("DATA_DIR", f"/data/{os.environ.get('USER', '')}"))
-    return data_dir / "datasets" / "reasoning-manipulation" / "prompts"
+    """Upstream reasoning-manipulation prompt CSVs (``train_harmful_prompts.csv`` etc.)."""
+    candidates = []
+    if os.environ.get("LOOP_STEER_PROMPTS"):
+        candidates.append(Path(os.environ["LOOP_STEER_PROMPTS"]))
+    if os.environ.get("DATA_DIR"):
+        candidates.append(Path(os.environ["DATA_DIR"]) / "datasets" / "reasoning-manipulation" / "prompts")
+    candidates.append(DATA_ROOT / "prompts")
+    return next((c for c in candidates if c.is_dir()), candidates[-1])
 
 
 def run_dir(model_name: str) -> Path:

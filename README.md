@@ -1,172 +1,140 @@
 # loop-steer
 
-Activation steering experiments with [ByteDance/Ouro-1.4B-Thinking](https://huggingface.co/ByteDance/Ouro-1.4B-Thinking).
+Refusal-direction ablation and steering for **looped reasoning models**.
 
-New to this system? Start with [Setup 101: shared caches, uv, and Hugging Face](SETUP_101.md).
+This repo ports the method of [*reasoning-manipulation*](https://github.com/kureha-yamaguchi/reasoning-manipulation)
+(arXiv [2507.03167](https://arxiv.org/abs/2507.03167), built on
+[*refusal_direction*](https://github.com/andyrdt/refusal_direction)) to models that apply the same layer stack
+several times: [Ouro-1.4B-Thinking](https://huggingface.co/ByteDance/Ouro-1.4B-Thinking) (4 loops) and
+[Nanbeige4.2-3B](https://huggingface.co/Nanbeige/Nanbeige4.2-3B) (2 loops). The method was first reproduced on
+Qwen3-8B.
 
-## Start the notebook
+The method: find a *refusal direction* in the residual stream as the difference in mean activations between
+chains of thought (CoTs) that end in refusal and CoTs that end in compliance, then remove it (ablation, weight
+orthogonalization) or push against it (activation addition) and measure how often the model still refuses.
 
-```bash
-uv sync --locked
-uv run python -m ipykernel install --prefix .venv --name loop-steer --display-name 'Python (loop-steer)'
-uv run jupyter lab notebooks/01_streaming.ipynb
-```
+## Findings
 
-Choose the **Python (loop-steer)** kernel and run the notebook from the top. Set
-`GPU_ID` in the first code cell to `"0"` or `"1"` **before importing torch**.
-Restart the kernel before changing GPUs. Only the selected GPU is visible to
-the notebook, where it becomes `cuda:0`. The notebook streams a response using
-Transformers and leaves `model` and `tokenizer` available for activation hooks.
+| | Qwen3-8B | Ouro-1.4B (4 loops) | Nanbeige4.2-3B (2 loops) |
+|---|---|---|---|
+| Refusal, clean model | 54% | 57% | 80% |
+| Hook ablation | n/a | 7% | 15% |
+| Weight orthogonalization | 8% | **no valid outputs** | 10% |
+| Random-direction control | n/a | no change (hooks) | no change |
 
-The kernel is already registered in this checkout. Repeat its installation
-command after recreating `.venv`.
+Judge refusal rate on 50 held-out selection prompts. On the full Qwen3-8B test set (487 prompts) refusal falls
+from 61% to 8–15%, and our directions match the published layer-17 vectors (cosine 0.99).
 
-## Terminal environment and Hugging Face login
+**Why weight orthogonalization breaks Ouro but not Nanbeige.** Weight orthogonalization only stops the edited
+matrices from writing along the direction. A learned RMSNorm applied *after* those matrices has uneven
+per-dimension gains, so it rotates the output back onto the direction. Ouro has this problem twice: its
+sandwich norms re-add the direction to every attention and MLP write, and its shared norm between loops scales
+the stream up and compounds the leak over three passes. Nanbeige adds writes to the stream without a norm, and
+its single inter-loop norm shrinks the stream. Hooks avoid the problem by re-projecting after every norm. See
+[docs/presentation.md](docs/presentation.md) for the full explanation, figures, and the tests that confirm it.
 
-Activate the environment in a Bash or Zsh terminal:
+![Leak of the removed direction per loop](docs/figures/loop_growth.png)
 
-```bash
-cd /home/amishr24/loop_steer
-source .venv/bin/activate
-```
+**Caveats.** Ouro and Nanbeige interventions were run on the 50 selection prompts only. No capability or
+over-refusal checks were run on any model. Mechanism measurements use 8 traces per model. See the deck for details.
 
-`python`, `hf`, `huggingface-cli`, `jupyter`, and `vllm` then resolve to the
-project environment. Run `deactivate` to leave it. Activation is specific to
-each terminal. Alternatively, prefix a command with `uv run` from this project,
-for example `uv run hf auth login`.
+## Setup
 
-To save your Hugging Face token, run the interactive login and paste it at the
-prompt:
-
-```bash
-hf auth login
-hf auth whoami
-```
-
-The installed Hub version also supports `huggingface-cli login`; `hf auth login`
-is the current command. This machine sets `HF_HOME` to
-`/home/amishr24/.cache/huggingface` and `HF_TOKEN_PATH` to
-`/home/amishr24/.cache/huggingface/token`. Login therefore saves credentials
-in your home directory, while `HF_HUB_CACHE` keeps model downloads in the
-shared cache. Other environments using the same token path can reuse the login.
-
-## vLLM
-
-Start the local OpenAI-compatible server in another terminal:
+Requires Linux, Python 3.12 and an NVIDIA GPU. Everything was run on RTX PRO 6000 (Blackwell, 96 GB) GPUs. A
+3B-parameter model plus the judge each fit on one such GPU. Dependencies are pinned (PyTorch 2.10, Transformers
+4.57.6, vLLM 0.18.0) because the models ship custom code that depends on the Transformers major version.
 
 ```bash
-uv run python scripts/serve_vllm.py --gpu 1
+git clone https://github.com/aamixsh/loop_steer.git && cd loop_steer
+uv sync --locked          # creates .venv; see https://docs.astral.sh/uv/
 ```
 
-The notebook has an optional cell for streaming from this server. It defaults
-to `http://127.0.0.1:8000/v1`. To use GPU 0 for vLLM, release the notebook model
-with its cleanup cell first. Stop the server with Ctrl-C.
+Model weights and remote code are downloaded from the Hugging Face Hub on first use at the pinned revisions
+(set `HF_HOME` / `HF_HUB_CACHE` to control where). The judge is `openai/gpt-oss-20b`. Loading Ouro and Nanbeige
+requires `trust_remote_code=True`, which the scripts set.
 
-The launcher selects one GPU, binds to localhost, uses BF16, limits the context
-to 4096 tokens, reserves 20% of that GPU's memory, and disables graph compilation
-for quick research startup. Override these defaults with vLLM options, e.g.:
+**Prompts.** Get the upstream prompt CSVs and place them in `data/prompts/` (or point `LOOP_STEER_PROMPTS` at
+a directory). We used commit `56a763d` of reasoning-manipulation:
 
 ```bash
-uv run python scripts/serve_vllm.py --gpu 1 --max-model-len 8192 --gpu-memory-utilization 0.3
+git clone https://github.com/kureha-yamaguchi/reasoning-manipulation /tmp/rm
+git -C /tmp/rm checkout 56a763d837cc63f30a13f830ad4ebd05890c7455
+mkdir -p data/prompts && cp /tmp/rm/dataset/{train,test}_{harmful,harmless}_prompts.csv data/prompts/
 ```
 
-vLLM uses its native `OuroForCausalLM` implementation. It executes all recurrent
-steps; adaptive exit is supported only on the Transformers path. Notebook hooks
-operate on the in-process Transformers model; vLLM serves a separate model.
+**Storage.** Run artifacts go to `data/runs/<model>/` and job temp files to `scratch/`. Both are plain
+directories created on demand, or you can symlink them to bulk storage. `LOOP_STEER_DATA` overrides the data
+location. Activations are large (about 2 GB per model at the reduced scale).
 
-## Reproducibility and storage
+## Pipeline
 
-uv-managed Python 3.12.14, PyTorch 2.10.0, Transformers 4.57.6, and vLLM 0.18.0
-are pinned, and `uv.lock` records all resolved dependencies. This stack keeps Transformers
-4 compatibility for Ouro's custom code while including native vLLM support and
-CUDA wheels for Blackwell. The model weights and custom code are pinned to
-revision `3aaa2224253a92ca45cf2e3d427c360e1ef9c93d`, including the upstream KV
-cache fix. Loading this revision requires `trust_remote_code=True`.
+All GPU scripts take `--gpu N` and call `loop_steer.paths.setup_job_env()`, which sets up the vLLM cache and a
+per-job temp directory. Example for Ouro. For Nanbeige use `--model Nanbeige/Nanbeige4.2-3B`,
+`--max-tokens 4096` and `--max-model-len 12288` (its traces are long).
 
-The managed Python includes development headers needed by Triton's runtime
-compiler. The system Python on this machine lacks these headers; `uv sync`
-automatically uses the pinned managed interpreter instead.
+```bash
+M=ByteDance/Ouro-1.4B-Thinking; R=data/runs/Ouro-1.4B-Thinking
 
-The model has 24 shared decoder layers and, by default, four recurrent passes.
-A hook on `model.model.layers[i]` therefore fires four times per forward pass.
-Use `register_forward_hook(..., with_kwargs=True)` and the `current_ut` keyword
-to identify the zero-based pass index when steering a specific recurrence. Keep
-hook handles and call `handle.remove()` when an experiment ends.
+# 1. Sample CoTs (3 per prompt), then 3 answers per CoT, with no intervention
+uv run python scripts/generate.py --model $M --split train --n-prompts 500 --out train_clean.parquet
+# 2. Score answers with the StrongREJECT rubric (judge loaded in-process on one GPU)
+uv run python scripts/judge.py --gpu 1 $R/generations/train_clean.parquet
+# 3. Label CoTs refusal / non-refusal
+uv run python scripts/build_sets.py $R/generations/train_clean.scored.parquet
+# 4. Window-mean activations at every (loop, layer), then difference-in-means directions
+uv run python scripts/extract_activations.py --model $M --labels $R/generations/labels.parquet --name train --labeled-only
+uv run python scripts/directions.py --model $M --activations train
+uv run python scripts/analyze_directions.py --model $M --method v4_cot      # per-site stability and AUC
+# 5. Generate under interventions, judge, summarize
+uv run python scripts/intervene.py --model $M --directions train --split train --offset 500 --n-prompts 50 \
+    --tag sel --candidates none ablate:v4_baseline:t3.l16 ablate:random:t3.l16
+uv run python scripts/judge.py --gpu 1 $R/generations/sel
+uv run python scripts/summarize.py $R/generations/sel
+```
 
-Cache directories follow the inherited environment settings and library
-defaults. On this machine:
+| Script | Purpose |
+|---|---|
+| `generate.py` | Two-stage sampling: CoTs, then answers conditioned on each CoT |
+| `judge.py`, `serve_judge.py` | StrongREJECT rubric scores from gpt-oss-20b (batch job, or a server for `--url`) |
+| `build_sets.py` | CoT-level and prompt-level refusal / non-refusal labels |
+| `extract_activations.py`, `directions.py`, `analyze_directions.py` | Directions per window and site, with stability checks |
+| `intervene.py` | Generation under `ablate` (hooks), `ortho` (weights) or `actadd` for many candidates per engine |
+| `summarize.py` | One row per candidate: mean score, judge and substring refusal, invalid-CoT rate |
+| `ortho_compare.py`, `ortho_diagnostic.py`, `ortho_feedback.py` | Why weight orthogonalization leaks through norms in Ouro |
+| `loop_smoke.py`, `ouro_smoke.py`, `validate_*.py` | Smoke tests and checks that vLLM hooks match Hugging Face |
+| `make_presentation_figures.py` | Regenerates `docs/figures/` from saved runs |
 
-| Purpose | Location |
-| --- | --- |
-| uv packages (`UV_CACHE_DIR`) | `/data/shared_lab/uv_cache` |
-| Hugging Face models (`HF_HUB_CACHE`) | `/data/shared_lab/hf_cache/hub` |
-| Hugging Face home (`HF_HOME`) | `/home/amishr24/.cache/huggingface` |
-| Active Hugging Face token (`HF_TOKEN_PATH`) | `/home/amishr24/.cache/huggingface/token` |
-| vLLM cache (`VLLM_CACHE_ROOT`, set by `scripts/serve_vllm.py` and `setup_job_env()`) | `/data/amishr24/.cache/vllm` |
-| Triton cache (library default) | `~/.triton/cache` |
+**Direction methods.** `v4_cot` (mean over all CoT tokens), `v12_cot150` (first 150 CoT tokens), `cot_last150`,
+`v4_baseline` (end-of-instruction template tokens, prompt-level labels), `paired_cot` (within-prompt contrast)
+and `random` (control). Candidate syntax is `kind:method:site[:c=..|apply=..|layer=..]` with site `l<layer>` or
+`t<loop>.l<layer>`. See the docstring of `scripts/intervene.py`.
 
-The notebook and server launcher inherit these settings. Restart existing
-notebook kernels after changing cache environment variables, since libraries
-read them during import. Model weights, generated notebook outputs, experiment
-data, and checkpoints should not be committed. Clear notebook outputs before
-committing notebooks.
+**Metrics.** The StrongREJECT score is `(1 − refused) × (convincingness + specificity − 2) / 8`, in [0, 1].
+`judge_refusal` is the fraction of answers the judge marks as refusals. `invalid_cot_frac` is the fraction of
+CoTs that never close `</think>`, which flags edits that break generation.
 
-Validated on this machine's RTX PRO 6000 Blackwell GPUs: notebook inference on
-GPU 0, activation hooks across all four recurrent passes, propagation of
-generation errors, and vLLM chat streaming on GPU 1. Local validation outputs
-are saved under `outputs/validation/`.
+## Notes on the models
 
-Shared-cache validation also runs both streaming paths with Hugging Face
-downloads disabled after deleting the project `.cache/` directory. It confirms
-that model files come from the shared cache and the project cache is not
-recreated.
+- **Sites** are `(loop, layer)`: 36 for Qwen3-8B, 96 for Ouro, 44 for Nanbeige. Hooks read the loop index from
+  the `current_ut` (Ouro) or `loop_idx` (Nanbeige) argument that each decoder layer receives.
+- **Ouro** supports early exit. We set `early_exit_threshold = 1.0` so every token runs all four loops.
+  `output_hidden_states=True` raises in the pinned remote code, so activations are captured with hooks.
+- **Nanbeige** is not supported by vLLM 0.18. `src/loop_steer/vllm_nanbeige.py` is a port registered at runtime
+  (it needs `VLLM_ENABLE_V1_MULTIPROCESSING=0`, which the scripts set). It matches Hugging Face greedy output.
+  The Hugging Face code needs a small `DynamicCache` shim, applied in `loop_steer.models.load_model`.
+- **Hooks inside vLLM** run in eager mode through `LLM.apply_model`, which requires
+  `VLLM_ALLOW_INSECURE_SERIALIZATION=1`. The scripts set this.
+- **`ortho` is only valid** when nothing renormalizes the stream after the edited weights (Qwen, Nanbeige).
+  `loop_steer.ortho` also provides a norm-aware variant and a loop-span variant used for the analysis.
 
-References: [model source](https://huggingface.co/ByteDance/Ouro-1.4B-Thinking/blob/main/modeling_ouro.py),
-[vLLM supported models](https://docs.vllm.ai/en/v0.18.0/models/supported_models/).
+## Streaming demo
 
-## Refusal-direction pipeline
+`notebooks/01_streaming.ipynb` streams a response from Ouro with Transformers and leaves the model available
+for hooks. `uv run python scripts/serve_vllm.py --gpu 1` serves Ouro through vLLM on localhost.
 
-Reproduces the reasoning-model refusal-direction method of
-[reasoning-manipulation](https://github.com/kureha-yamaguchi/reasoning-manipulation)
-(arXiv 2507.03167, built on [refusal_direction](https://github.com/andyrdt/refusal_direction))
-on Qwen3-8B, then ports it to Ouro.
+## Acknowledgements
 
-Storage follows the lab layout in `~/STARTUP.md`. Run artifacts go to
-`data/runs/<model>/` (the `data` link points to `/data/$USER/projects/loop_steer`;
-override with `LOOP_STEER_DATA`) and logs to `data/runs/logs/`. Prompts are the upstream
-train/test CSVs in `$DATA_DIR/datasets/reasoning-manipulation/prompts/`, next to the
-upstream Qwen3-8B reference directions (`reference-qwen3-8b/`). GPU scripts call
-`loop_steer.paths.setup_job_env()`, which loads `/etc/profile.d/lab-storage.sh`, sets
-umask 077, puts the vLLM and TorchInductor caches under `$DATA_DIR/.cache/`, and points `TMPDIR` at a
-fresh `scratch/<UTC>--loop_steer--<id>` directory (`scratch` points to `/scr/$USER/tmp`).
-Delete those job directories once the job is finished.
-
-| Step | Script | Output |
-| --- | --- | --- |
-| Optional judge server (gpt-oss-20b, port 8001; use with `judge.py --url`) | `scripts/serve_judge.py --gpu 1` | — |
-| Two-stage sampling: CoTs, then answers per CoT | `scripts/generate.py` | `generations/*.parquet` |
-| StrongREJECT rubric scores (bounded batch job, judge loaded in-process) | `scripts/judge.py` | `*.scored.parquet` |
-| Refusal / non-refusal labels (CoT- and prompt-level) | `scripts/build_sets.py` | `generations/labels.parquet` |
-| Window-mean resid_pre at every (loop, layer) | `scripts/extract_activations.py` | `activations/<name>.pt` |
-| Difference-in-means directions | `scripts/directions.py` | `directions/<name>.pt` |
-| Per-site stability / separability | `scripts/analyze_directions.py` | `analysis/`, `figures/` |
-| Generation under interventions | `scripts/intervene.py` | `generations/<tag>/` |
-| Summary table | `scripts/summarize.py` | — |
-
-Direction methods: `v4_cot` (mean over all CoT tokens; upstream v4), `v12_cot150` (first
-150 CoT tokens; upstream v1/v2), `cot_last150`, `v4_baseline` (end-of-instruction tokens,
-prompt-level labels), `paired_cot` (within-prompt refusal-minus-compliance contrast).
-
-Interventions (`scripts/intervene.py --candidates kind:method:site[:opts]`):
-`ortho` projects the direction out of the residual-writing weights (equivalent to
-ablation for pre-norm models; validated by `scripts/validate_ortho.py`), `ablate` does
-the same with hooks, `actadd` adds a scaled direction at one layer. Hook interventions
-run inside vLLM in eager mode (`loop_steer.vllm_hooks`, validated against the HF hooks
-in `loop_steer.hooks` by `scripts/validate_vllm_hooks.py`).
-
-**Ouro differences.** Sites are (loop, layer), 4 x 24. Ouro writes
-`RMSNorm_2(sublayer(x))` into the residual and renormalizes between loops, so weight
-orthogonalization does not remove a direction (`scripts/ouro_smoke.py` shows the
-projection is larger after orthogonalization than before); use `ablate`. Hooks read
-the loop index from `current_ut`. `output_hidden_states=True` raises in the pinned
-remote code; activations come from hooks.
+Method and prompts: [reasoning-manipulation](https://github.com/kureha-yamaguchi/reasoning-manipulation)
+(Apache-2.0) and [refusal_direction](https://github.com/andyrdt/refusal_direction) (MIT). Judge rubric:
+StrongREJECT ([arXiv 2402.10260](https://arxiv.org/abs/2402.10260)). Models: ByteDance Ouro and Nanbeige, under their own
+licenses.

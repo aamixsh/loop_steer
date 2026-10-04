@@ -18,7 +18,7 @@ checkpoints/
 *.log
 .DS_Store
 
-# Lab storage links (see ~/STARTUP.md)
+# Local storage links (data/ and scratch/ may be symlinks to bulk storage)
 /data
 /scratch
 /.venv

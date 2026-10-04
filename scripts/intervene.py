@@ -2,8 +2,9 @@
 """Two-stage generation under residual-stream interventions, many candidates per vLLM engine.
 
 Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
-  kind    ortho  (project direction out of weights; pre-norm models only, e.g. Qwen)
-          ablate (hooks on every residual write; works for Ouro)
+  kind    ortho  (project direction out of weights; only valid when nothing renormalizes the stream
+                 after the edited weights, e.g. Qwen, Nanbeige; breaks Ouro)
+          ablate (hooks on every residual write; works for all models, incl. Ouro)
           actadd (add c * raw mean-diff vector at resid_pre of the site's layer)
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
   site    l<layer> or t<loop>.l<layer> -- where the direction was extracted
