@@ -48,8 +48,8 @@ def main():
     from vllm import LLM, SamplingParams
 
     from loop_steer.cot import load_prompts
-    from loop_steer.models import load_tokenizer, vllm_kwargs
-    from loop_steer.sampling import two_stage
+    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs
+    from loop_steer.sampling import two_stage, vllm_generator
 
     tok_name = args.tokenizer or args.model
     out = Path(args.out)
@@ -61,6 +61,7 @@ def main():
     if args.n_prompts is not None:
         prompts = prompts[: args.n_prompts]
     tokenizer = load_tokenizer(tok_name)
+    as_ids = prepare_vllm(tok_name)
     llm = LLM(
         model=args.model, tokenizer=tok_name, seed=args.seed,
         gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len,
@@ -68,8 +69,8 @@ def main():
     )
     sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature,
                               top_p=args.top_p, skip_special_tokens=False)
-    df = two_stage(llm, tokenizer, prompts, cot_reps=args.cot_reps, out_reps=args.out_reps,
-                   sampling=sampling, prompt_offset=args.offset)
+    df = two_stage(vllm_generator(llm, sampling, tokenizer if as_ids else None), tokenizer, prompts, cot_reps=args.cot_reps,
+                   out_reps=args.out_reps, prompt_offset=args.offset)
     invalid = df.attrs.pop("invalid")
     if len(invalid):  # kept outside the scored dir's *.parquet glob
         (out.parent / "invalid").mkdir(exist_ok=True)

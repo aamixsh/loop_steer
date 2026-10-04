@@ -47,6 +47,7 @@ def main():
 
     from loop_steer.hooks import capture_window_means
     from loop_steer.models import eoi_length, load_model, load_tokenizer
+    from loop_steer.models import n_loops as n_loops_of
 
     tok = load_tokenizer(args.model)
     model = load_model(args.model)
@@ -68,7 +69,7 @@ def main():
     df["n_prompt_tokens"] = [len(p) for p, _ in seqs]
     df["n_cot_tokens"] = [len(c) for _, c in seqs]
 
-    n_loops = getattr(model.config, "total_ut_steps", 1)
+    n_loops = n_loops_of(model.config)
     n_layers = model.config.num_hidden_layers
     sites = [(t, l) for t in range(n_loops) for l in range(n_layers)]
     D = model.config.hidden_size
@@ -98,7 +99,7 @@ def main():
             for w, (s, e) in enumerate(window_bounds(len(p_ids), len(c_ids), k_eoi)[n] for n in WINDOWS):
                 weights[w, b, s:e] = 1.0 / max(e - s, 1)
         with torch.inference_mode(), capture_window_means(model, weights) as out:
-            model(input_ids=ids.to(model.device), attention_mask=mask.to(model.device), use_cache=False)
+            model.model(input_ids=ids.to(model.device), attention_mask=mask.to(model.device), use_cache=False)  # skip lm_head
         for s_idx, site in enumerate(sites):
             acts[batch, :, s_idx] = out[site].transpose(0, 1).to(torch.float16)  # [B, W, D]
 

@@ -37,7 +37,7 @@ def main():
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, load_prompts
     from loop_steer.hooks import ablation_hooks, actadd_hooks, hooked
-    from loop_steer.models import load_model, load_tokenizer, vllm_kwargs
+    from loop_steer.models import load_model, load_tokenizer, prepare_vllm, vllm_kwargs
 
     loops = None if args.loops is None else [int(x) for x in args.loops.split(",")]
     tok = load_tokenizer(args.model)
@@ -79,6 +79,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
+    as_ids = prepare_vllm(args.model)
     llm = LLM(model=args.model, gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
               **vllm_kwargs(args.model))
     sp = SamplingParams(max_tokens=args.max_tokens, temperature=0)
@@ -91,7 +92,8 @@ def main():
     for name, spec in specs.items():
         llm.apply_model(functools.partial(vllm_hooks.install, specs=spec))
         llm.reset_prefix_cache()
-        vl[name] = [list(o.outputs[0].token_ids) for o in llm.generate(prompts, sp)]
+        inputs = [{"prompt_token_ids": tok(t, add_special_tokens=False).input_ids} for t in prompts] if as_ids else prompts
+        vl[name] = [list(o.outputs[0].token_ids) for o in llm.generate(inputs, sp)]
     llm.apply_model(vllm_hooks.clear)
 
     def prefix(a, b):

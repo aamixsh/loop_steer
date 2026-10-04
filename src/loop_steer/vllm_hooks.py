@@ -2,7 +2,7 @@
 
 Shipped to the worker with ``LLM.apply_model(functools.partial(install, specs=...))``.
 vLLM decoder layers use the fused-residual convention: layer ``l`` is called as
-``layer(positions, hidden_states, [current_ut,] residual)`` and the residual
+``layer(positions, hidden_states, [loop_idx,] residual)`` and the residual
 stream entering it is ``hidden_states + residual`` (``residual`` is None for
 the first layer of each pass, where ``hidden_states`` is the full stream).
 
@@ -21,6 +21,11 @@ def _is_ouro(model) -> bool:
     return hasattr(model.model.layers[0], "input_layernorm_2")
 
 
+def _is_looped(model) -> bool:
+    """Layers take (positions, hidden, loop_idx, residual): Ouro, or the Nanbeige port."""
+    return _is_ouro(model) or hasattr(model.model, "num_loops")
+
+
 def clear(model):
     for h in getattr(model, "_ls_handles", []):
         h.remove()
@@ -33,18 +38,19 @@ def install(model, specs):
     clear(model)
     layers = model.model.layers
     ouro = _is_ouro(model)
+    looped = _is_looped(model)
     device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
     state = {"loop": 0}
 
     def unpack(args):  # -> (hidden, loop, residual, rebuild)
-        if ouro:
+        if looped:
             pos, h, loop, res = args[0], args[1], args[2], args[3] if len(args) > 3 else None
             return h, loop, res, lambda h2, r2: (pos, h2, loop, r2, *args[4:])
         pos, h, res = args[0], args[1], args[2] if len(args) > 2 else None
         return h, 0, res, lambda h2, r2: (pos, h2, r2, *args[3:])
 
     def track(module, args):
-        state["loop"] = args[2] if ouro else 0
+        state["loop"] = args[2] if looped else 0
 
     handles = [layer.register_forward_pre_hook(track) for layer in layers]
     for spec in specs:

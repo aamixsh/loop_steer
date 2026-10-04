@@ -1,9 +1,9 @@
-"""Residual-stream hooks for standard and looped (Ouro) HF decoder models.
+"""Residual-stream hooks for standard and looped (Ouro, Nanbeige) HF decoder models.
 
-Sites are ``(loop, layer)``. Standard models have one loop (loop=0). Ouro
-applies the same ``model.model.layers`` stack ``total_ut_steps`` times and
-passes the zero-based loop index as the ``current_ut`` kwarg, so every hook
-here reads it to tell loops apart.
+Sites are ``(loop, layer)``. Standard models have one loop (loop=0). Looped models
+apply the same ``model.model.layers`` stack several times and pass the zero-based
+loop index to each decoder layer as a kwarg (Ouro: ``current_ut``, Nanbeige:
+``loop_idx``), so every hook here reads it to tell loops apart.
 
 All hooks act on the *residual stream*:
 - capture / add: input to decoder layer ``layer`` in loop ``loop`` (resid_pre).
@@ -16,7 +16,8 @@ import torch
 
 
 def _loop(kwargs) -> int:
-    return kwargs.get("current_ut", 0)
+    """Zero-based loop index passed to a decoder layer (Ouro: current_ut, Nanbeige: loop_idx)."""
+    return kwargs.get("current_ut", kwargs.get("loop_idx", 0))
 
 
 def _layer_input(args, kwargs) -> torch.Tensor:
@@ -101,13 +102,22 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
         return ouro_ablation_hooks(model, direction, loops=loops)
     unit = direction / direction.norm()
     blocks = decoder_layers(model)
+    state = {"loop": 0}  # set by each layer's tracker pre-hook; sublayers run inside that call
+
+    def active():
+        return loops is None or state["loop"] in loops
+
+    def track(module, args, kwargs):
+        state["loop"] = _loop(kwargs)
 
     def pre(module, args, kwargs):
-        if loops is not None and _loop(kwargs) not in loops:
+        if not active():
             return None
         return _replace_layer_input(args, kwargs, _project_out(_layer_input(args, kwargs), unit))
 
     def post(module, args, output):
+        if not active():
+            return None
         if isinstance(output, tuple):
             return (_project_out(output[0], unit), *output[1:])
         return _project_out(output, unit)
@@ -115,6 +125,7 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
     def register():
         handles = []
         for block in blocks:
+            handles.append(block.register_forward_pre_hook(track, with_kwargs=True))  # first: sets the loop
             if "resid_pre" in sites:
                 handles.append(block.register_forward_pre_hook(pre, with_kwargs=True))
             if "attn" in sites:
