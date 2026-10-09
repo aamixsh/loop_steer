@@ -9,7 +9,9 @@ location). On a shared server with a storage profile at ``/etc/profile.d/lab-sto
 Face, vLLM, Triton, torch, XDG) defaults to ``<data>/.cache``, so a checkout is self-contained.
 """
 
+import atexit
 import os
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -53,10 +55,40 @@ def setup_job_env() -> Path:
     if os.environ.get("LOOP_STEER_JOB_TMP"):  # already set up (e.g. in a parent process)
         return Path(os.environ["LOOP_STEER_JOB_TMP"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    tmp = SCRATCH_ROOT.resolve() / f"{stamp}--{PROJECT}--{uuid.uuid4().hex[:8]}"
+    job_id = uuid.uuid4().hex[:8]
+    tmp = SCRATCH_ROOT.resolve() / f"{stamp}--{PROJECT}--{job_id}"
     tmp.mkdir(parents=True)
     os.environ["TMPDIR"] = os.environ["LOOP_STEER_JOB_TMP"] = str(tmp)
+    atexit.register(_prune_empty_dirs, tmp)
+    _short_ipc_dir(job_id)
     return tmp
+
+
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove ``root`` and its subdirectories if they hold no files (jobs often leave only empty cache dirs)."""
+    for dirpath, _, _ in os.walk(root, topdown=False):
+        try:
+            os.rmdir(dirpath)
+        except OSError:  # not empty: keep whatever the job left there
+            pass
+
+
+def _short_ipc_dir(job_id: str) -> None:
+    """Give vLLM a socket directory whose paths fit the 107-character Unix socket limit.
+
+    vLLM binds its IPC sockets as ``$VLLM_RPC_BASE_PATH/<uuid4>`` (36 characters) and defaults the base to
+    ``$TMPDIR``, which the stamped job directory makes too long in a deeply nested checkout. Use a short
+    per-job directory under ``scratch/`` and remove it (and the sockets vLLM leaves in it) at exit. If even that is
+    too long, leave vLLM's default (the system temp dir). An explicit ``VLLM_RPC_BASE_PATH`` wins.
+    """
+    if "VLLM_RPC_BASE_PATH" in os.environ:
+        return
+    ipc = SCRATCH_ROOT.resolve() / f"ipc-{job_id}"
+    if len(str(ipc)) + 1 + 36 > 107:
+        return
+    ipc.mkdir()
+    os.environ["VLLM_RPC_BASE_PATH"] = str(ipc)
+    atexit.register(shutil.rmtree, ipc, ignore_errors=True)
 
 
 def contain_caches(cache: Path) -> None:

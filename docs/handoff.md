@@ -43,6 +43,10 @@ README. Results and the explanation of the weight-orthogonalization difference a
   parameter, grep every caller.
 - Hooks inside vLLM need `VLLM_ALLOW_INSECURE_SERIALIZATION=1` and eager mode; Nanbeige needs its in-process port
   (`vllm_nanbeige.py`, `VLLM_ENABLE_V1_MULTIPROCESSING=0`). The scripts set both.
+- vLLM binds Unix sockets at `$VLLM_RPC_BASE_PATH/<uuid>`, which must stay under 107 characters. `setup_job_env()`
+  points it at a short `scratch/ipc-<id>` directory (removed at exit); a deeply nested checkout otherwise fails at
+  engine start with "ipc path ... is longer than 107 characters". Scripts must call `setup_job_env()` before vLLM.
+- `validate_vllm_hooks.py` defaults to `--vllm-mem 0.1`, too small for the 3B and 8B models; use 0.3.
 - Sampling is temperature 0.6, top_p 1.0, no top_k, for every model.
 - The judge (gpt-oss-20b) and Qwen3-8B are pinned in code to the snapshots used for the reported numbers. Changing
   them changes the numbers.
