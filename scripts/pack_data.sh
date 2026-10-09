@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bundle the run artifacts (and prompt CSVs) for moving to another machine.
-#   scripts/pack_data.sh OUT.tar.zst [--with-activations] [--dry-run]
+#   scripts/pack_data.sh OUT.tar.zst|OUT.tar.gz [--with-activations] [--dry-run]   (.gz if the target has no zstd)
 # Included: data/runs/<model>/{directions,generations,analysis,figures}, data/runs/logs, the prompt CSVs.
 # Left out by default: activations (about 6.3 GB; only needed to recompute directions) and the stamped
 # job/validation directories under data/runs. A .sha256 file is written next to the bundle.
@@ -36,7 +36,11 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
-tar -I 'zstd -T0 -3' -cf "$OUT" "${ARGS[@]}"
+case "$OUT" in
+  *.zst) tar -I 'zstd -T0 -3' -cf "$OUT" "${ARGS[@]}" ;;
+  *.gz)  tar -czf "$OUT" "${ARGS[@]}" ;;
+  *) echo "OUT must end in .tar.zst or .tar.gz" >&2; exit 2 ;;
+esac
 ( cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256" )
 ls -lh "$OUT" "$OUT.sha256"
 echo "copy with:  rsync -avP $OUT $OUT.sha256 USER@HOST:DEST/"

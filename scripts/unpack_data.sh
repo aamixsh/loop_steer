@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unpack a bundle made by scripts/pack_data.sh into the data directory (default: ./data, or $LOOP_STEER_DATA).
-#   scripts/unpack_data.sh BUNDLE.tar.zst [DEST]
+#   scripts/unpack_data.sh BUNDLE.tar.zst|BUNDLE.tar.gz [DEST]
 # Existing files are not overwritten (tar --keep-old-files), so it is safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -13,6 +13,10 @@ else
   echo "warning: no $BUNDLE.sha256, skipping the checksum" >&2
 fi
 mkdir -p "$DEST"
-tar -I zstd -xf "$BUNDLE" -C "$DEST" --keep-old-files
+case "$BUNDLE" in
+  *.zst) tar -I zstd -xf "$BUNDLE" -C "$DEST" --keep-old-files ;;
+  *.gz)  tar -xzf "$BUNDLE" -C "$DEST" --keep-old-files ;;
+  *) echo "BUNDLE must end in .tar.zst or .tar.gz" >&2; exit 2 ;;
+esac
 echo "unpacked into $DEST: $(ls "$DEST" | tr '\n' ' ')"
 ls "$DEST/runs"
