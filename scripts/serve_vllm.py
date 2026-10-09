@@ -6,6 +6,7 @@ import os
 import sys
 
 from loop_steer import MODEL_ID, MODEL_REVISION
+from loop_steer.paths import setup_job_env
 
 
 def main() -> None:
@@ -17,9 +18,7 @@ def main() -> None:
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-    # Keep vLLM's compile cache on /data instead of the backed-up home directory.
-    data_dir = os.environ.get("DATA_DIR", f"/data/{os.environ.get('USER', '')}")
-    os.environ.setdefault("VLLM_CACHE_ROOT", f"{data_dir}/.cache/vllm")
+    setup_job_env()  # vLLM compile cache, Hugging Face cache and TMPDIR, as in the other scripts
     command = [
         sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", MODEL_ID,
         "--revision", MODEL_REVISION,
