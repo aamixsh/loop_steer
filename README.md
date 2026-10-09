@@ -145,19 +145,23 @@ stopped by themselves without thinking (`direct_frac`; about 20% of clean Ouro s
 
 ## Moving to another machine
 
-The code, lock file and docs are in git; run artifacts and models are not. On the new machine:
+The code, lock file and docs are in git; run artifacts and models are not. A checkout is self-contained: `data/`
+(run artifacts and every tool cache) and `scratch/` (temp files) are plain git-ignored directories inside it.
+`scripts/env.sh` points uv, Hugging Face, vLLM, Triton and torch at them (and the Python scripts do the same by
+default when there is no lab storage profile). On the new machine:
 
 ```bash
 git clone https://github.com/aamixsh/loop_steer.git && cd loop_steer
-scripts/setup_remote.sh                       # checks driver and uv, uv sync --locked, prompts, models at pinned revisions
-scripts/unpack_data.sh /path/to/bundle.tar.zst   # optional: previous runs, so nothing has to be regenerated
+source scripts/env.sh                         # in every new shell; keeps all caches and temp files in this directory
+scripts/setup_remote.sh --install-uv          # driver check, uv into data/.cache/bin, uv sync --locked, prompts, models
+scripts/unpack_data.sh /path/to/bundle.tar.zst   # optional: previous runs (or rsync data/runs and data/prompts directly)
 ```
 
 On the old machine, `scripts/pack_data.sh bundle.tar.zst` writes the bundle (directions, generations, analysis,
 logs and prompts, about 0.6 GB compressed; `--with-activations` adds the 6.3 GB of activations, which are only needed
 to recompute directions) and a `.sha256`. Copy it with `rsync -avP`. Model weights (about 40 GB) are downloaded at
-the pinned revisions by `scripts/prefetch_models.py`; set `HF_HOME` first to choose where they go. The locked
-environment needs a driver that supports CUDA 12.8. Pass `--gpu N` to the scripts; the `run_*.sh` chains read `GPU=`.
+the pinned revisions by `scripts/prefetch_models.py` into `data/.cache/huggingface`. The locked environment needs a
+driver that supports CUDA 12.8. Pass `--gpu N` to the scripts; the `run_*.sh` chains read `GPU=`.
 Do not copy SSH keys or Hugging Face tokens (all models and the prompts are public). `docs/handoff.md` lists the
 open items.
 

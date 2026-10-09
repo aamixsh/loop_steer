@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Set up a fresh machine for loop-steer. Run from the repo root after cloning.
-#   scripts/setup_remote.sh [--skip-models] [--no-sync]
+#   scripts/setup_remote.sh [--install-uv] [--skip-models] [--no-sync]
 # 1. checks the GPU driver and uv, 2. `uv sync --locked`, 3. fetches the prompt CSVs at the pinned upstream
 # commit if data/prompts is missing, 4. downloads the models at the pinned revisions, 5. checks that vLLM sees the GPUs.
-# Do NOT run this on a machine where jobs already use .venv: it can change the environment.
+# Everything is installed inside this checkout (see scripts/env.sh). Do NOT run it on a machine where jobs
+# already use .venv: it can change the environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MODELS=1; SYNC=1
+MODELS=1; SYNC=1; INSTALL_UV=0
 for a in "$@"; do
-  case "$a" in --skip-models) MODELS=0 ;; --no-sync) SYNC=0 ;; *) echo "unknown option $a" >&2; exit 2 ;; esac
+  case "$a" in
+    --skip-models) MODELS=0 ;; --no-sync) SYNC=0 ;; --install-uv) INSTALL_UV=1 ;;
+    *) echo "unknown option $a" >&2; exit 2 ;;
+  esac
 done
-umask 077
+source scripts/env.sh   # caches, uv's Python and temp files all stay inside this checkout
 
 echo "== GPU"
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: need an NVIDIA driver (CUDA 12.8 or newer)" >&2; exit 1; }
@@ -18,7 +22,14 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,nohea
 echo "(the locked environment uses torch 2.10.0+cu128 and vLLM 0.18.0; needs a driver that supports CUDA 12.8)"
 
 echo "== uv"
-command -v uv >/dev/null || { echo "uv not found: install it first, see https://docs.astral.sh/uv/" >&2; exit 1; }
+if ! command -v uv >/dev/null; then
+  if [ "$INSTALL_UV" = 1 ]; then  # installs uv into data/.cache/bin, touches no shell profile
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$LOOP_STEER_ROOT/data/.cache/bin" sh
+  else
+    echo "uv not found. Re-run with --install-uv (puts it in data/.cache/bin), or see https://docs.astral.sh/uv/" >&2
+    exit 1
+  fi
+fi
 if [ "$SYNC" = 1 ]; then uv sync --locked; fi
 
 echo "== prompts"

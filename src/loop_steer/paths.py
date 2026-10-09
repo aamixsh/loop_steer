@@ -4,8 +4,9 @@ Run artifacts go to ``<data>/runs/<model>`` where ``<data>`` is ``$LOOP_STEER_DA
 ``data/`` directory (a symlink to bulk storage works well). Prompt CSVs are found via
 ``$LOOP_STEER_PROMPTS``, ``$DATA_DIR/datasets/reasoning-manipulation/prompts`` or ``data/prompts``.
 Per-job temporary files go to a stamped directory under ``scratch/`` (also a symlink-friendly
-location). Model weights come from the Hugging Face cache. On a shared server with a storage profile
-at ``/etc/profile.d/lab-storage.sh``, ``setup_job_env`` loads it; elsewhere that step is skipped.
+location). On a shared server with a storage profile at ``/etc/profile.d/lab-storage.sh``,
+``setup_job_env`` loads it and the profile decides where caches live. Elsewhere every cache (Hugging
+Face, vLLM, Triton, torch, XDG) defaults to ``<data>/.cache``, so a checkout is self-contained.
 """
 
 import os
@@ -43,6 +44,8 @@ def setup_job_env() -> Path:
     os.umask(0o077)
     _load_lab_profile()
     data_dir = _data_dir()
+    if not LAB_PROFILE.exists():
+        contain_caches(data_dir / ".cache")
     os.environ.setdefault("VLLM_CACHE_ROOT", str(data_dir / ".cache" / "vllm"))
     # Inductor defaults to $TMPDIR/torchinductor_$USER; vLLM's compile cache records that
     # absolute path, so a per-job TMPDIR would be re-created by later jobs. Keep it stable.
@@ -54,6 +57,13 @@ def setup_job_env() -> Path:
     tmp.mkdir(parents=True)
     os.environ["TMPDIR"] = os.environ["LOOP_STEER_JOB_TMP"] = str(tmp)
     return tmp
+
+
+def contain_caches(cache: Path) -> None:
+    """Point the tool caches under ``cache`` unless already set (existing values win)."""
+    for key, sub in (("HF_HOME", "huggingface"), ("XDG_CACHE_HOME", "xdg"), ("TRITON_CACHE_DIR", "triton"),
+                     ("TORCH_HOME", "torch")):
+        os.environ.setdefault(key, str(cache / sub))
 
 
 def _data_dir() -> Path:

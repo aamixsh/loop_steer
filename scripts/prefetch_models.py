@@ -8,7 +8,11 @@ Set HF_HOME / HF_HUB_CACHE first to choose where they go. Re-running skips files
 
 import argparse
 
-from huggingface_hub import snapshot_download
+from loop_steer.paths import setup_job_env
+
+setup_job_env()  # before importing huggingface_hub: caches go under data/.cache unless the environment says otherwise
+
+from huggingface_hub import snapshot_download  # noqa: E402
 
 from loop_steer import MODEL_ID as OURO_ID
 from loop_steer import MODEL_REVISION as OURO_REVISION
