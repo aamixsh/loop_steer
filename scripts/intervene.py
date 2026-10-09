@@ -14,6 +14,11 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
 Examples: ortho:v4_cot:l23   actadd:v12_cot150:l17:c=-1.5   ablate:v4_cot:t3.l12:apply=3
 
 Weights are restored / hooks removed between candidates.
+
+``--extend-from TAG`` instead continues the stage-1 responses that hit the token cap in an earlier run
+(``generations/TAG/invalid/<candidate>.parquet``, written with ``--max-tokens ORIG``) for ``--extend-tokens``
+more tokens under the same intervention, then samples answers for those that now close. Only the
+continued samples are written (to ``--tag``); ``summarize.py --cont`` merges them with the original run.
 """
 
 import argparse
@@ -57,7 +62,10 @@ def main():
     ap.add_argument("--n-prompts", type=int, default=None)
     ap.add_argument("--cot-reps", type=int, default=3)
     ap.add_argument("--out-reps", type=int, default=3)
-    ap.add_argument("--max-tokens", type=int, default=2048)
+    ap.add_argument("--max-tokens", type=int, default=2048, help="Stage-1 (CoT) token cap")
+    ap.add_argument("--answer-max-tokens", type=int, default=None, help="Stage-2 (answer) cap; default --max-tokens")
+    ap.add_argument("--extend-from", default=None, help="Tag of an earlier run whose capped CoTs to continue")
+    ap.add_argument("--extend-tokens", type=int, default=6144, help="Extra tokens when extending")
     ap.add_argument("--max-model-len", type=int, default=8192, help="vLLM context; >= prompt + 2 x max-tokens")
     ap.add_argument("--temperature", type=float, default=0.6)
     ap.add_argument("--seed", type=int, default=0)
@@ -81,7 +89,9 @@ def main():
     from loop_steer.cot import load_prompts
     from loop_steer.models import load_tokenizer
     from loop_steer.ortho import orthogonalize_
-    from loop_steer.sampling import hf_generator, two_stage, vllm_generator
+    import pandas as pd
+
+    from loop_steer.sampling import extend_capped, hf_generator, two_stage, vllm_generator
 
     rd = run_dir(args.model)
     if any(c["kind"] != "none" for c in cands) and not args.directions:
@@ -104,8 +114,10 @@ def main():
         as_ids = prepare_vllm(args.model)
         llm = LLM(model=args.model, seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
                   max_model_len=args.max_model_len, enforce_eager=uses_hooks, **vllm_kwargs(args.model))
-        sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature,
-                                  skip_special_tokens=False)
+
+        def make_generate(n_tokens):
+            sampling = SamplingParams(max_tokens=n_tokens, temperature=args.temperature, skip_special_tokens=False)
+            return vllm_generator(llm, sampling, tok if as_ids else None)
 
         def prepare(c, vec):
             if weights_dirty[0] or c["kind"] == "ortho":
@@ -122,13 +134,14 @@ def main():
             llm.reset_prefix_cache()
             return contextlib.nullcontext()
 
-        generate = vllm_generator(llm, sampling, tok if as_ids else None)
     else:
         from loop_steer.hooks import ablation_hooks, actadd_hooks, hooked
         from loop_steer.models import load_model
 
         model = load_model(args.model)
-        generate = hf_generator(model, tok, max_new_tokens=args.max_tokens, temperature=args.temperature,
+
+        def make_generate(n_tokens):
+            return hf_generator(model, tok, max_new_tokens=n_tokens, temperature=args.temperature,
                                 batch_size=args.hf_batch_size, seed=args.seed)
 
         def prepare(c, vec):
@@ -143,14 +156,25 @@ def main():
             return contextlib.nullcontext()
 
     weights_dirty = [False]
+    generate_answer = make_generate(args.answer_max_tokens or args.max_tokens)
+    generate = generate_answer if args.answer_max_tokens in (None, args.max_tokens) else make_generate(args.max_tokens)
     for c in cands:
         out = out_dir / f"{c['name']}.parquet"
         if args.skip_existing and out.exists():
             continue
         vec = None if c["kind"] == "none" else dirs[c["method"]]["dirs"][site_index[c["site"]]]
-        with prepare(c, vec):
-            df = two_stage(generate, tok, prompts, cot_reps=args.cot_reps, out_reps=args.out_reps,
-                           prompt_offset=args.offset)
+        if args.extend_from:
+            src = rd / "generations" / args.extend_from / "invalid" / f"{c['name']}.parquet"
+            if not src.exists():
+                print(f"[{c['name']}] no stage-1 responses saved in {src}; skipping", flush=True)
+                continue
+            with prepare(c, vec):
+                df = extend_capped(make_generate(args.extend_tokens), generate_answer, tok, pd.read_parquet(src),
+                                   cap=args.max_tokens, out_reps=args.out_reps)
+        else:
+            with prepare(c, vec):
+                df = two_stage(generate, tok, prompts, cot_reps=args.cot_reps, out_reps=args.out_reps,
+                               prompt_offset=args.offset, generate_answer=generate_answer)
         df["candidate"] = c["name"]
         df["n_cot_total"], df["n_invalid_cot"] = df.attrs["n_cot_total"], df.attrs["n_invalid_cot"]
         invalid = df.attrs.pop("invalid")

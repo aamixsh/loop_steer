@@ -53,10 +53,10 @@ def loop_span(model, direction: torch.Tensor, n_loops: int) -> torch.Tensor:
 
 
 @torch.no_grad()
-def orthogonalize_(model, directions: torch.Tensor | None, norm_aware: bool = False):
-    """Restore original weights, then (if ``directions`` is not None) project them out in place.
+def orthogonalize_(model, direction: torch.Tensor | None, norm_aware: bool = False):
+    """Restore original weights, then (if ``direction`` is not None) project it out in place.
 
-    ``directions``: ``[d]`` (one direction) or ``[k, d]`` (a subspace; see ``loop_span``).
+    ``direction``: ``[d]`` (one direction) or ``[k, d]`` (a subspace; see ``loop_span``).
     ``norm_aware``: for writers followed by a sandwich norm with gain ``g``, project out
     ``g * direction`` instead, so the *normed* write is orthogonal to ``direction``.
     """
@@ -64,10 +64,10 @@ def orthogonalize_(model, directions: torch.Tensor | None, norm_aware: bool = Fa
         model._ls_original = {name: w.detach().to("cpu", copy=True) for name, w, _, _ in _residual_writers(model)}
     for name, w, kind, gain in _residual_writers(model):
         orig = model._ls_original[name]
-        if directions is None:
+        if direction is None:
             w.copy_(orig)
             continue
-        D = directions.to(device=w.device, dtype=torch.float32)
+        D = direction.to(device=w.device, dtype=torch.float32)
         D = D.unsqueeze(0) if D.dim() == 1 else D  # [k, d]
         if norm_aware and gain is not None:
             D = gain.detach().float() * D
