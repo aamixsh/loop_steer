@@ -5,6 +5,6 @@ cd "$(dirname "$0")/.."
 L=data/runs/logs
 N=data/runs/Nanbeige4.2-3B/generations
 while [ ! -f $L/extend_gpu1.done ]; do sleep 30; done
-.venv/bin/python scripts/judge.py --gpu 1 $N/test_int_ext $N/test_int_ext/invalid $N/clean_test_ext \
+.venv/bin/python scripts/judge.py --gpu ${GPU:-1} $N/test_int_ext $N/test_int_ext/invalid $N/clean_test_ext \
     > $L/judge_nanbeige_ext.log 2>&1
 echo done > $L/judge_nanbeige_ext.done

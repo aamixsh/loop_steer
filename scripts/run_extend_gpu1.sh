@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/.."
 PY=.venv/bin/python
 L=data/runs/logs
-G=1
+G=${GPU:-1}  # GPU index (override: GPU=0 scripts/run_extend_gpu1.sh)
 Q=data/runs/Qwen3-8B/generations
 O=data/runs/Ouro-1.4B-Thinking/generations
 N=data/runs/Nanbeige4.2-3B/generations

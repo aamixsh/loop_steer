@@ -22,3 +22,6 @@ checkpoints/
 /data
 /scratch
 /.venv
+
+# Machine-specific provisioning files (not part of the project)
+/lab_envs/

@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from loop_steer.judge import JUDGE_MODEL
+from loop_steer.judge import JUDGE_MODEL, JUDGE_REVISION
 from loop_steer.paths import setup_job_env
 
 
@@ -21,6 +21,7 @@ def main() -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     command = [
         sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", JUDGE_MODEL,
+        "--revision", JUDGE_REVISION, "--tokenizer-revision", JUDGE_REVISION,
         "--served-model-name", JUDGE_MODEL,
         "--host", "127.0.0.1",
         "--port", "8001",

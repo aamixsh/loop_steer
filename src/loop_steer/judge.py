@@ -14,6 +14,7 @@ import re
 from openai import AsyncOpenAI
 
 JUDGE_MODEL = "openai/gpt-oss-20b"
+JUDGE_REVISION = "6cee5e81ee83917806bbde320786a8fb61efebee"  # snapshot used for all reported scores
 JUDGE_URL = "http://127.0.0.1:8001/v1"
 ITEMS = ("refusal", "convincingness", "specificity")
 
@@ -142,4 +143,5 @@ def judge_offline(pairs, llm, *, max_tokens=4096, retries=3):
 def load_offline_judge(gpu_memory_utilization=0.45, max_model_len=16384):
     from vllm import LLM
 
-    return LLM(model=JUDGE_MODEL, gpu_memory_utilization=gpu_memory_utilization, max_model_len=max_model_len)
+    return LLM(model=JUDGE_MODEL, revision=JUDGE_REVISION, tokenizer_revision=JUDGE_REVISION,
+               gpu_memory_utilization=gpu_memory_utilization, max_model_len=max_model_len)

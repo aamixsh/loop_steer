@@ -5,6 +5,8 @@ import torch
 from loop_steer import MODEL_ID as OURO_ID
 from loop_steer import MODEL_REVISION as OURO_REVISION
 
+QWEN_ID = "Qwen/Qwen3-8B"
+QWEN_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"  # snapshot used for all reported runs
 NANBEIGE_ID = "Nanbeige/Nanbeige4.2-3B"
 NANBEIGE_REVISION = "b82e54bd609793562a75cbf9337970a93369eab5"
 
@@ -31,6 +33,8 @@ def n_loops(config) -> int:
 def _remote_kwargs(model_name: str) -> dict:
     if model_name in LOOPED:
         return {"revision": LOOPED[model_name][0], "trust_remote_code": True}
+    if model_name == QWEN_ID:
+        return {"revision": QWEN_REVISION}
     return {"trust_remote_code": True} if is_ouro(model_name) else {}
 
 
@@ -79,7 +83,7 @@ def eoi_length(tokenizer, **template_kwargs) -> int:
 
 
 def vllm_kwargs(model_name: str) -> dict:
-    """Extra ``vllm.LLM`` kwargs (pinned revision + remote code for the looped models)."""
+    """Extra ``vllm.LLM`` kwargs (pinned revisions; remote code for the looped models)."""
     if model_name == OURO_ID:
         return {"revision": OURO_REVISION, "code_revision": OURO_REVISION,
                 "tokenizer_revision": OURO_REVISION, "trust_remote_code": True}
@@ -87,6 +91,8 @@ def vllm_kwargs(model_name: str) -> dict:
         return {"revision": NANBEIGE_REVISION, "code_revision": NANBEIGE_REVISION,
                 "tokenizer_revision": NANBEIGE_REVISION, "trust_remote_code": True,
                 "tokenizer_mode": "slow"}  # same SentencePiece tokenizer as the HF path
+    if model_name == QWEN_ID:
+        return {"revision": QWEN_REVISION, "tokenizer_revision": QWEN_REVISION}
     return {}
 
 

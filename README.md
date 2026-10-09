@@ -143,6 +143,24 @@ stopped by themselves without thinking (`direct_frac`; about 20% of clean Ouro s
 - **`ortho` is only valid** when nothing renormalizes the stream after the edited weights (Qwen, Nanbeige).
   `loop_steer.ortho` also provides a norm-aware variant and a loop-span variant used for the analysis.
 
+## Moving to another machine
+
+The code, lock file and docs are in git; run artifacts and models are not. On the new machine:
+
+```bash
+git clone https://github.com/aamixsh/loop_steer.git && cd loop_steer
+scripts/setup_remote.sh                       # checks driver and uv, uv sync --locked, prompts, models at pinned revisions
+scripts/unpack_data.sh /path/to/bundle.tar.zst   # optional: previous runs, so nothing has to be regenerated
+```
+
+On the old machine, `scripts/pack_data.sh bundle.tar.zst` writes the bundle (directions, generations, analysis,
+logs and prompts, about 0.6 GB compressed; `--with-activations` adds the 6.3 GB of activations, which are only needed
+to recompute directions) and a `.sha256`. Copy it with `rsync -avP`. Model weights (about 40 GB) are downloaded at
+the pinned revisions by `scripts/prefetch_models.py`; set `HF_HOME` first to choose where they go. The locked
+environment needs a driver that supports CUDA 12.8. Pass `--gpu N` to the scripts; the `run_*.sh` chains read `GPU=`.
+Do not copy SSH keys or Hugging Face tokens (all models and the prompts are public). `docs/handoff.md` lists the
+open items.
+
 ## Streaming demo
 
 `notebooks/01_streaming.ipynb` streams a response from Ouro with Transformers and leaves the model available
