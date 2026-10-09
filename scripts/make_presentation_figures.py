@@ -217,36 +217,54 @@ def fig_loop_count():
 
 
 # ---------------------------------------------------------------- 5. headline results
+def _test_row(model, run, name, cap, ext=None):
+    """Summary row of a test-set candidate, with its continuations (``ext``) merged in."""
+    from summarize import summarize
+
+    g = RUNS / model / "generations"
+    return summarize(g / run / f"{name}.scored.parquet", max_tokens=cap, cont_dir=None if ext is None else g / ext)
+
+
 def fig_results():
-    # (label, judge refusal %, invalid CoT %, kind); values from analysis CSVs / summarize.py
+    q, o, n = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B"
+    # (label, summary row, kind); all on the 487 test prompts, 3 CoTs x 3 answers, continuations merged
     data = {
-        "Qwen3-8B\nv4_baseline, layer 17": [("clean", 54.2, 0.7, "clean"), ("weight ortho", 8.3, 3.3, "ortho"),
-                     ("act-add\nc = −2", 4.7, 0.7, "actadd")],
-        "Ouro-1.4B\nv4_baseline, loop 3 layer 16": [("clean", 57.0, 10.2, "clean"), ("hook,\nrandom u", 56.7, 19.3, "random"),
-                      ("hook\nablation", 6.6, 19.3, "hook"),
-                      ("weight\northo", np.nan, 100.0, "ortho")],
-        "Nanbeige4.2-3B\nv4_baseline, loop 1 layer 15": [("clean", 80.3, 0.7, "clean"), ("hook,\nrandom u", 80.7, 0.0, "random"),
-                           ("ortho,\nrandom u", 76.9, 0.0, "random"),
-                           ("hook\nablation", 14.9, 7.3, "hook"),
-                           ("weight\northo", 10.5, 13.3, "ortho"),
-                           ("act-add\nc = −1", 55.1, 3.3, "actadd")],
+        "Qwen3-8B (weight edits)": [
+            ("clean", _test_row(q, "clean_test_8k", "none", 8192), "clean"),
+            ("random u", _test_row(q, "test_ortho", "ortho_random_l17", 2048, "test_ortho_ext"), "random"),
+            ("v4_baseline\nlayer 21", _test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "ortho"),
+            ("v12_cot150\nlayer 17", _test_row(q, "test_ortho", "ortho_v12_cot150_l17", 2048, "test_ortho_ext"), "ortho"),
+            ("v4_cot\nlayer 15", _test_row(q, "test_ortho", "ortho_v4_cot_l15", 2048, "test_ortho_ext"), "ortho")],
+        "Ouro-1.4B (hooks)": [
+            ("clean", _test_row(o, "clean_test_8k", "none", 8192), "clean"),
+            ("random u", _test_row(o, "test_hooks", "ablate_random_t3.l16", 2048, "test_hooks_ext"), "random"),
+            ("v4_baseline\nloop 3, L8", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l8", 2048, "test_hooks_ext"), "hook"),
+            ("v4_baseline\nloop 3, L16", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l16", 2048, "test_hooks_ext"), "hook"),
+            ("weight edit,\n50 prompts", None, "ortho")],
+        "Nanbeige4.2-3B": [
+            ("clean", _test_row(n, "clean_test", "none", 4096, "clean_test_ext"), "clean"),
+            ("hook,\nrandom u", _test_row(n, "test_int", "ablate_random_t0.l14", 4096, "test_int_ext"), "random"),
+            ("weights,\nrandom u", _test_row(n, "test_int", "ortho_random_t0.l14", 4096, "test_int_ext"), "random"),
+            ("hook\nv4_baseline", _test_row(n, "test_int", "ablate_v4_baseline_t1.l15", 4096, "test_int_ext"), "hook"),
+            ("hook\nv4_cot", _test_row(n, "test_int", "ablate_v4_cot_t0.l14", 4096, "test_int_ext"), "hook"),
+            ("weight edit\nv4_baseline", _test_row(n, "test_int", "ortho_v4_baseline_t1.l15", 4096, "test_int_ext"), "ortho")],
     }
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), gridspec_kw={"width_ratios": [3, 4, 6]}, sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), gridspec_kw={"width_ratios": [5, 6, 6]}, sharey=True)
     for ax, (model, rows) in zip(axes, data.items()):
         x = np.arange(len(rows))
-        ref = [r[1] for r in rows]
-        ax.bar(x, np.nan_to_num(ref), color=[C[r[3]] for r in rows])
-        for i, r in enumerate(rows):
-            if np.isnan(r[1]):
+        ref = [np.nan if r is None else 100 * r["all_refusal"] for _, r, _ in rows]
+        ax.bar(x, np.nan_to_num(ref), color=[C[k] for _, _, k in rows])
+        for i, (_, r, _) in enumerate(rows):
+            if r is None:
                 ax.text(i, 3, "no valid\noutputs", ha="center", color=C["ortho"], fontsize=9)
-            else:
-                ax.text(i, r[1] + 1.5, f"{r[1]:.0f}%", ha="center", fontsize=10)
-            ax.text(i, -18, f"invalid {r[2]:.0f}%", ha="center", fontsize=8, color="#555")
-        ax.set_xticks(x); ax.set_xticklabels([r[0] for r in rows], fontsize=9)
+                continue
+            ax.text(i, ref[i] + 1.5, f"{ref[i]:.0f}%", ha="center", fontsize=10)
+            ax.text(i, -18, f"unclosed {100 * r['invalid_cot_frac']:.0f}%", ha="center", fontsize=8, color="#555")
+        ax.set_xticks(x); ax.set_xticklabels([lab for lab, _, _ in rows], fontsize=9)
         ax.set_title(model); ax.set_ylim(0, 95)
-    axes[0].set_ylabel("judge refusal rate (%)")
-    fig.suptitle("Refusal on the 50 selection prompts (StrongREJECT judge). "
-                 "'invalid' = CoTs that never close </think>", fontsize=11)
+    axes[0].set_ylabel("judge refusal rate, all samples (%)")
+    fig.suptitle("Refusal on the 487 test prompts (3 CoTs x 3 answers, StrongREJECT judge). "
+                 "'unclosed' = CoTs without </think> (loops, or Ouro answering directly)", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "results.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 

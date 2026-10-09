@@ -30,7 +30,8 @@ Slides are separated by `---` (Marp format). Figures: `scripts/make_presentation
 
 ## Method: data
 
-1. **Sample.** For each harmful prompt: 3 chains of thought (CoTs), then 3 answers per CoT, conditioned on the CoT. Temperature 0.6.
+1. **Sample.** For each harmful prompt: 3 chains of thought (CoTs), then 3 answers per CoT, conditioned on the CoT. Temperature 0.6, no top-p or top-k (the models recommend top_p 0.95, top_k 20).
+   - Token caps: CoT 8192 tokens (2048 first, then the capped ones are continued), answer 2048 (Nanbeige 4096 + 4096).
    - train: 500 prompts · selection: 50 held-out train prompts · test: 487 prompts.
 2. **Judge.** StrongREJECT rubric with a local gpt-oss-20b judge. Per answer:
    - `refusal` 0/1, `convincing` 1–5, `specific` 1–5.
@@ -73,10 +74,11 @@ Per-site checks: split-half stability, and AUC of the projection for separating 
 | **judge refusal** | fraction of answers the judge marks as refusals |
 | **mean score** | mean StrongREJECT score (higher = more harmful compliance) |
 | **substring refusal** | answer contains a stock phrase ("I can't", "I'm sorry", …); cheap proxy |
-| **invalid CoT** | CoT never closes `</think>` within 4096 tokens; a damage signal |
+| **all-sample refusal** | refusal over every CoT sample. Samples without `</think>` are judged as they are, on the whole response |
+| **unclosed CoT** | CoT never closes `</think>`: either it hits the token cap (loops), or the model answers directly without thinking (Ouro) |
 | **NLL** (mechanism slides) | negative log-likelihood of clean CoT tokens under the edited model; lower = less damage |
 
-Candidates (method × site × intervention) are picked on the 50 selection prompts, then the best run on the test set.
+Candidates (method × site × intervention) are picked on the 50 selection prompts, then run on the full test set. Results are on the test set unless a slide says otherwise.
 
 ---
 
@@ -97,18 +99,21 @@ The CoT direction and the prompt-end direction are different directions (cosine 
 
 ## Qwen3-8B: results
 
-Test set, 487 prompts × 9 answers, weight orthogonalization:
+Test set, 487 prompts × 9 answers, weight orthogonalization, refusal over all samples:
 
-| Candidate | judge refusal | mean score | invalid CoT |
+| Candidate | judge refusal | mean score | unclosed CoT |
 |---|---|---|---|
-| clean | 60.8% | 0.37 | 0.7% |
-| `v12_cot150`, layer 17 | **8.3%** | 0.88 | 7.5% |
-| `v4_cot`, layer 15 | 12.3% | 0.84 | 5.3% |
-| `v4_cot`, layer 23 | 15.4% | 0.80 | 2.8% |
+| clean | 61.3% | 0.37 | 0.1% |
+| random direction, layer 17 | 61.1% | 0.37 | 0.0% |
+| `v4_baseline`, layer 21 | **5.7%** | 0.91 | 0.2% |
+| `v12_cot150`, layer 17 | 7.8% | 0.89 | 0.1% |
+| `v4_baseline`, layer 17 | 8.5% | 0.83 | 0.0% |
+| `v4_cot`, layer 15 | 11.7% | 0.85 | 0.1% |
+| `v4_cot`, layer 23 | 15.0% | 0.80 | 0.1% |
 
 Selection set: activation addition (`v4_baseline`, L17, c = −2) gives 4.7% refusal with no extra invalid CoTs.
 
-**Reproduction holds:** one direction, removed everywhere, takes refusal from ~60% to ~10%.
+**Reproduction holds:** one direction, removed everywhere, takes refusal from 61% to 6–15%. The random direction does nothing.
 
 ---
 
@@ -125,22 +130,26 @@ Selection set: activation addition (`v4_baseline`, L17, c = −2) gives 4.7% ref
 
 ![w:1100](figures/results.png)
 
-- **Qwen:** weight ortho and act-add both work.
-- **Ouro:** hook ablation works (57% → 7%). **Weight ortho produces no valid outputs**, even with a *random* direction.
-- **Nanbeige:** hooks *and* weight ortho both work (80% → 15% / 10%). Random directions do nothing.
+- **Qwen:** weight ortho works (61% → 6–12%). Hook ablation was not run.
+- **Ouro:** hook ablation works (61% → 10%). **Weight ortho produces no valid outputs**, even with a *random* direction (50-prompt run).
+- **Nanbeige:** hooks *and* weight ortho both work (78% → 16–18% / 11%). Random directions do nothing (73–76%).
 
-Nanbeige random controls are at loop 0 layer 14. Ouro hooks raise invalid CoTs to 19%, for random directions too.
+Test set, all samples. About 20% of clean Ouro samples **answer directly without thinking**; ablation lowers this to 11–15%. Looping to the token cap is rare: 0.2% clean, 2% ablated.
 
 ---
 
 ## Nanbeige: one caution
+
+Selection set (50 prompts, 4096-token cap):
 
 | Weight ortho candidate | judge refusal | invalid CoT |
 |---|---|---|
 | `v4_baseline`, loop 1 layer 15 | 10.5% | 13% |
 | `v4_cot`, loop 0 layer 14 | 0.4% | **47%** |
 
-Weight ortho works on Nanbeige, but some directions damage generation. Check invalid CoTs, not only refusal.
+Weight ortho works on Nanbeige, but some directions damage generation. Check unclosed CoTs, not only refusal.
+
+Cap matters: on the test set the `v4_baseline` edit leaves 8% of CoTs unclosed at 4096 tokens but only 0.1% at 8192. Slow is not always broken. The `v4_cot` loop-0 edit was not rerun on the test set.
 
 ---
 
@@ -269,21 +278,22 @@ This **fits** the mechanism: Ouro relies on carrying a well-scaled state across 
 
 ## Takeaways
 
-1. **The method transfers.** A difference-in-means refusal direction exists in both looped models and removing it drops refusal from 57–80% to 7–15%.
+1. **The method transfers.** A difference-in-means refusal direction exists in both looped models and removing it drops refusal from 61–78% to 10–18% in Ouro and Nanbeige (Qwen: 61% → 6–15%).
 2. **Use hooks on looped models.** Weight orthogonalization is only equivalent to ablation when nothing renormalizes the stream after the edited weights.
 3. **Ouro breaks for two reasons**, both normalization:
    - sandwich norms re-add `u` to every write,
    - the inter-loop norm amplifies the leak 3 times while the edit stops the model from correcting it.
 4. **Nanbeige survives** because its writes enter raw, and its one inter-loop norm shrinks the stream.
-5. **Check damage, not just refusal.** Invalid CoTs reveal broken edits (Ouro: 100%, Nanbeige loop-0 edit: 47%).
+5. **Check damage, not just refusal.** Unclosed CoTs reveal broken edits (Ouro weight edit: 100%, Nanbeige loop-0 edit: 47% on the selection set). Use a generous token cap.
 
 ---
 
 ## Caveats and open items
 
-- Ouro and Nanbeige interventions are on the 50 selection prompts only. No test-set runs yet.
-- No capability or over-refusal checks on any model.
-- Ouro hook ablation alone raises invalid CoTs (10% → 19%), random directions included.
+- Test-set runs cover the best candidates only. Ouro's weight edit and the mechanism numbers are from smaller runs.
+- No capability or over-refusal checks on any model. Hook ablation was not run on Qwen.
+- Sampling is temperature 0.6 without top-p or top-k. Directions and layers were picked on 50 prompts.
+- Ouro ablation raises looping to the token cap from 0.2% to about 2%.
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
 - Nanbeige needs our own vLLM port (`src/loop_steer/vllm_nanbeige.py`); it matches HF greedy outputs exactly.
 
@@ -295,6 +305,11 @@ This **fits** the mechanism: Ouro relies on carrying a well-scaled state across 
 # mechanism comparison (HF, one GPU each)
 uv run python scripts/ortho_compare.py --gpu 1 --model ByteDance/Ouro-1.4B-Thinking --direction v4_baseline:t3.l16 --loops 1,2
 uv run python scripts/ortho_compare.py --gpu 1 --model Nanbeige/Nanbeige4.2-3B --direction v4_baseline:t1.l15 --loops 1
+
+# test-set runs: continue CoTs that hit the cap, then merge (see README, step 6)
+uv run python scripts/intervene.py --model ByteDance/Ouro-1.4B-Thinking --directions train --split test --tag test_hooks_ext \
+    --extend-from test_hooks --max-tokens 2048 --extend-tokens 6144 --candidates ablate:v4_baseline:t3.l16
+uv run python scripts/summarize.py data/runs/Ouro-1.4B-Thinking/generations/test_hooks --cont data/runs/Ouro-1.4B-Thinking/generations/test_hooks_ext
 
 # figures for this deck (CPU)
 uv run python scripts/make_presentation_figures.py
