@@ -11,7 +11,13 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
   opts    c=<coeff>      actadd coefficient (default -1.0: subtract the refusal direction)
           apply=<t,t..>  loops to intervene in (default: all loops)
           layer=<l>      actadd at a different layer than the extraction site
+          na=1           ortho only: norm-aware weight edit (project g*u, g = gain of the sandwich norm after each
+                         writer, instead of u; see loop_steer.ortho). Matters for Ouro.
+          dir=perloop    take the direction of each loop's own site (loop t, the site's layer) and apply it only in
+                         loop t, instead of the site's single direction in every selected loop (ablate / actadd only;
+                         the site's loop number is then ignored)
 Examples: ortho:v4_cot:l23   actadd:v12_cot150:l17:c=-1.5   ablate:v4_cot:t3.l12:apply=3
+          ablate:v4_baseline:t3.l16:dir=perloop   actadd:v4_baseline:t3.l16:c=-1:apply=0,1:dir=perloop
 
 Weights are restored / hooks removed between candidates.
 
@@ -30,13 +36,14 @@ import re
 
 def parse_candidate(text):
     if text == "none":
-        return {"name": "none", "kind": "none"}
+        return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False}
     kind, method, site, *opts = text.split(":")
     m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", site)
     if m is None:
         raise ValueError(f"bad site {site!r}")
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-"), "kind": kind, "method": method,
-            "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None, "layer": None}
+            "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None, "layer": None,
+            "perloop": False, "norm_aware": False}
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -45,9 +52,33 @@ def parse_candidate(text):
             cand["apply"] = [int(x) for x in val.split(",")]
         elif key == "layer":
             cand["layer"] = int(val)
+        elif key == "dir" and val == "perloop":
+            cand["perloop"] = True
+        elif key == "na":
+            cand["norm_aware"] = bool(int(val))
         else:
             raise ValueError(f"unknown option {key!r}")
     return cand
+
+
+def intervention_specs(c, dirs, site_index):
+    """Hook specs (``loop_steer.vllm_hooks`` format) for an ablate / actadd candidate.
+
+    One spec with the site's direction (restricted to ``apply`` loops), or with ``dir=perloop`` one spec per loop
+    using that loop's own direction at the site's layer, active only in that loop.
+    """
+    if c["kind"] not in ("ablate", "actadd"):
+        return []
+    table = dirs[c["method"]]["dirs"]
+    if c["perloop"]:
+        n_loops = max(t for t, _ in dirs["sites"]) + 1
+        groups = [([t], table[site_index[(t, c["site"][1])]]) for t in (c["apply"] or range(n_loops))]
+    else:
+        groups = [(c["apply"], table[site_index[c["site"]]])]
+    layer = c["layer"] if c["layer"] is not None else c["site"][1]
+    if c["kind"] == "ablate":
+        return [{"kind": "ablate", "dir": vec, "loops": loops} for loops, vec in groups]
+    return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer} for loops, vec in groups]
 
 
 def main():
@@ -119,16 +150,11 @@ def main():
             sampling = SamplingParams(max_tokens=n_tokens, temperature=args.temperature, skip_special_tokens=False)
             return vllm_generator(llm, sampling, tok if as_ids else None)
 
-        def prepare(c, vec):
+        def prepare(c, vec, specs):
             if weights_dirty[0] or c["kind"] == "ortho":
-                llm.apply_model(functools.partial(orthogonalize_, direction=vec if c["kind"] == "ortho" else None))
+                llm.apply_model(functools.partial(orthogonalize_, direction=vec if c["kind"] == "ortho" else None,
+                                                  norm_aware=c["norm_aware"]))
                 weights_dirty[0] = c["kind"] == "ortho"
-            specs = []
-            if c["kind"] == "ablate":
-                specs = [{"kind": "ablate", "dir": vec, "loops": c["apply"]}]
-            elif c["kind"] == "actadd":
-                specs = [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": c["apply"],
-                          "layer": c["layer"] if c["layer"] is not None else c["site"][1]}]
             if uses_hooks:
                 llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
             llm.reset_prefix_cache()
@@ -144,16 +170,18 @@ def main():
             return hf_generator(model, tok, max_new_tokens=n_tokens, temperature=args.temperature,
                                 batch_size=args.hf_batch_size, seed=args.seed)
 
-        def prepare(c, vec):
+        def prepare(c, vec, specs):
             if weights_dirty[0] or c["kind"] == "ortho":
-                orthogonalize_(model, vec if c["kind"] == "ortho" else None)
+                orthogonalize_(model, vec if c["kind"] == "ortho" else None, norm_aware=c["norm_aware"])
                 weights_dirty[0] = c["kind"] == "ortho"
-            if c["kind"] == "ablate":
-                return hooked(ablation_hooks(model, vec, loops=c["apply"]))
-            if c["kind"] == "actadd":
-                layer = c["layer"] if c["layer"] is not None else c["site"][1]
-                return hooked(actadd_hooks(model, vec, layer, coeff=c["coeff"], loops=c["apply"]))
-            return contextlib.nullcontext()
+            stack = contextlib.ExitStack()
+            for spec in specs:
+                if spec["kind"] == "ablate":
+                    stack.enter_context(hooked(ablation_hooks(model, spec["dir"], loops=spec["loops"])))
+                else:
+                    stack.enter_context(hooked(actadd_hooks(model, spec["vec"], spec["layer"], coeff=spec["coeff"],
+                                                            loops=spec["loops"])))
+            return stack
 
     weights_dirty = [False]
     generate_answer = make_generate(args.answer_max_tokens or args.max_tokens)
@@ -162,17 +190,20 @@ def main():
         out = out_dir / f"{c['name']}.parquet"
         if args.skip_existing and out.exists():
             continue
-        vec = None if c["kind"] == "none" else dirs[c["method"]]["dirs"][site_index[c["site"]]]
+        if c["perloop"] and c["kind"] not in ("ablate", "actadd"):
+            ap.error(f"dir=perloop only applies to ablate / actadd candidates, not {c['kind']}")
+        vec = dirs[c["method"]]["dirs"][site_index[c["site"]]] if c["kind"] == "ortho" else None  # weight edit
+        specs = intervention_specs(c, dirs, site_index)
         if args.extend_from:
             src = rd / "generations" / args.extend_from / "invalid" / f"{c['name']}.parquet"
             if not src.exists():
                 print(f"[{c['name']}] no stage-1 responses saved in {src}; skipping", flush=True)
                 continue
-            with prepare(c, vec):
+            with prepare(c, vec, specs):
                 df = extend_capped(make_generate(args.extend_tokens), generate_answer, tok, pd.read_parquet(src),
                                    cap=args.max_tokens, out_reps=args.out_reps)
         else:
-            with prepare(c, vec):
+            with prepare(c, vec, specs):
                 df = two_stage(generate, tok, prompts, cot_reps=args.cot_reps, out_reps=args.out_reps,
                                prompt_offset=args.offset, generate_answer=generate_answer)
         df["candidate"] = c["name"]
