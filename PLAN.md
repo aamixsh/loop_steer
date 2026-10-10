@@ -26,26 +26,25 @@ and why weight orthogonalization fails on Ouro.
   far): 80.6% clean, 80.4 to 81.6% under ablation, 77.0% under actadd c=-1 (-3.6 points, noise is about 2).
 - Code from this session is committed; run data is in `data/` (not in git); summary tables are in `results/`.
 
-## Running now (all on GPU 0, one job at a time; GPU 1 belongs to another project's jobs)
+## Running now (GPU 0 only; GPU 1 belongs to another project's jobs)
 
-1. `scripts/queue_followups.sh`, last step `capability`: MATH-500 is done for Ouro and Nanbeige; Nanbeige AIME 2025
-   (5 candidates x 8 samples) is running. Progress: `data/runs/logs/followups_progress.log`, `nanbeige_capability_aime25.log`.
-   New jobs go through `scripts/gpuq.py add` (a runner for GPU 0 is up; it waits for items 1 and 2 to finish first).
-2. Queued behind it: the full Ouro AIME 2025 rerun (its first attempt died with its vLLM engine and left a hung process).
-   It has an idle watchdog (kills and retries when the log is silent for 30 min) and writes
-   `data/runs/logs/ouro_aime_rerun.status` and `ouro_aime_rerun.done`; then `scripts/capability_summary.py` writes
-   `data/runs/capability_summary.csv`. Ouro is slow (about 55 min per 500 MATH-500 samples: 4 loops, 790 KB of KV cache
-   per token so only about 35 sequences fit, and hooks force eager mode), so expect about 5 hours for AIME.
+Everything runs through one FIFO runner, `scripts/gpuq.py` (state in `data/queue/gpu0`, logs in `data/runs/logs/gpuq/`;
+`scripts/gpuq.py list` shows it). Queued in order: Nanbeige AIME 2025 (5 candidates x 8 samples, resumes after the saved
+clean candidate), the full Ouro AIME 2025 run, then `capability_summary.py` (writes `data/runs/capability_summary.csv`).
+The earlier chain (`queue_followups.sh`) was stopped after its MATH-500 and layer-map steps had finished. Add new jobs
+with `scripts/gpuq.py add -n NAME -- CMD ...`; the runner starts them when the GPU is free.
 
-Known issue: AIME 2025 at the 8192-token CoT cap leaves about 70% of Nanbeige's clean samples unclosed, so its accuracy
-mostly measures what finishes under the cap. MATH-500 is the informative capability result.
+Ouro is slow (about 55 min per 500 MATH-500 samples: 4 loops, 790 KB of KV cache per token so only about 35 sequences
+fit, and hooks force eager mode), so expect about 5 hours for its AIME run. Known issue: AIME 2025 at the 8192-token CoT
+cap leaves about 70% of Nanbeige's clean samples unclosed, so its accuracy mostly measures what finishes under the cap;
+MATH-500 is the informative capability result.
 
 ## Next TODO (in order)
 
-1. [ ] **When both capability jobs finish** (`ouro_aime_rerun.done`): `scripts/export_results.sh`, add the capability
+1. [ ] **When the capability jobs finish** (`gpuq.py list`: capability-summary done): `scripts/export_results.sh`, add the capability
    rows (MATH-500 now, AIME) to the README findings and the deck's caveats slide, commit `results/`, push.
-2. [ ] Make the queue scripts source `scripts/env.sh`, add an idle watchdog to `run_followups.sh`, and use
-   `capability_summary.py` in its capability step (only after the queue has finished: do not edit running scripts).
+2. [ ] Retire `queue_*.sh` and `run_followups.sh` in favour of `gpuq.py` jobs (keep `run_followups.sh` steps as the
+   record of how the follow-up experiments were run, or turn them into gpuq job lists).
 3. [ ] **Nanbeige test-set confirmation** of the loop configs (ablate loop 2 only, loop 1 only; actadd `c=-2`) with
    continuations, as done for Ouro (`run_followups.sh` step `confirm` is the template).
 4. [ ] **Two-loop Ouro with norm-aware ortho** (the handoff prediction: leak 2 needs several passes). Needs a loop-count
@@ -71,7 +70,7 @@ mostly measures what finishes under the cap. MATH-500 is the informative capabil
 ```bash
 source scripts/env.sh && scripts/verify_setup.sh --no-gpu           # environment and data check
 cat data/runs/logs/followups_progress.log; nvidia-smi                 # what finished, what runs
-scripts/gpuq.py list                                                  # GPU 0 job queue (runner holds until run_followups.sh ends)
+scripts/gpuq.py list                                                  # GPU 0 job queue
 scripts/gpuq.py add -n NAME -- .venv/bin/python scripts/X.py --gpu '$GPU' ...   # queue a job behind the running ones
 scripts/run_followups.sh <step> ...                                   # steps: see the header of that script
 GPU=0 ACTADD_C=-1 VARIANT=shared|perloop scripts/run_loop_sweep.sh   # loop-subset sweep (MODEL_KEY=ouro|nanbeige)

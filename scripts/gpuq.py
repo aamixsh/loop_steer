@@ -9,7 +9,7 @@
 Typical use: ``scripts/gpuq.py add -n ouro-aime -- .venv/bin/python scripts/capability.py --gpu '$GPU' ...`` then
 ``scripts/gpuq.py start`` once. Jobs run in the checkout directory with ``GPU`` (and ``GPUQ_GPU``) set to the queue's
 GPU, so write ``--gpu $GPU`` (single-quote it when adding so your shell does not expand it) or use scripts that read
-``${GPU}``. Command text is run by ``bash -c``, so ``;`` and ``&&`` chains work when quoted as one argument.
+``${GPU}``. Each job first sources scripts/env.sh. Command text is run by ``bash -c``, so ``;`` and ``&&`` chains work when quoted as one argument.
 
 * Order is first in, first out; jobs can be added while the runner works. Logs: data/runs/logs/gpuq/<id>-<name>.log.
 * Before each job the runner waits until the GPU holds less than ``--free-mb`` MiB (default 2000), so it does not collide
@@ -153,8 +153,11 @@ def run_attempt(job: dict, log_path: Path, gpu: str, cancel_file: Path) -> dict:
     start = time.time()
     with open(log_path, "a") as log:
         log.write(f"\n=== attempt {len(job['attempts']) + 1} {now()}: {job['cmd']}\n"); log.flush()
-        proc = subprocess.Popen(["bash", "-c", job["cmd"]], cwd=job["cwd"], env=env, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
+        # scripts/env.sh (caches and temp dirs inside the checkout unless already set) so a job behaves the same
+        # however the runner was started (nohup, cron, agent tools do not read ~/.bashrc)
+        prelude = f'[ -f "{job["cwd"]}/scripts/env.sh" ] && source "{job["cwd"]}/scripts/env.sh" > /dev/null 2>&1; '
+        proc = subprocess.Popen(["bash", "-c", prelude + job["cmd"]], cwd=job["cwd"], env=env, stdout=log,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         att = {"start": now(), "pid": proc.pid}
         job["attempts"].append(att)
         write(job["_path"], {k: v for k, v in job.items() if k != "_path"})
