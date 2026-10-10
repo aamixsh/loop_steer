@@ -61,6 +61,8 @@ and needs your own token and license acceptance). After a copy, `scripts/export_
   Triton, torch, vLLM and Inductor caches stay in `data/.cache`. Job temp files: `scratch/`.
 - Every GPU script takes `--gpu N` (batch chains: `GPU=N`), calls `loop_steer.paths.setup_job_env()` and is
   skip-existing, so re-running resumes. Batch chains and queues: `scripts/run_*.sh`, `scripts/queue_*.sh`.
+  To run experiments back to back on a GPU: `scripts/gpuq.py start -g N` once, then `scripts/gpuq.py add -n NAME -- CMD ...`
+  for each job (FIFO, free-GPU wait, idle watchdog with retries; `scripts/gpuq.py list`). Stdlib only.
 
 ## 5. Pitfalls (each one cost time once)
 

@@ -30,6 +30,7 @@ and why weight orthogonalization fails on Ouro.
 
 1. `scripts/queue_followups.sh`, last step `capability`: MATH-500 is done for Ouro and Nanbeige; Nanbeige AIME 2025
    (5 candidates x 8 samples) is running. Progress: `data/runs/logs/followups_progress.log`, `nanbeige_capability_aime25.log`.
+   New jobs go through `scripts/gpuq.py add` (a runner for GPU 0 is up; it waits for items 1 and 2 to finish first).
 2. Queued behind it: the full Ouro AIME 2025 rerun (its first attempt died with its vLLM engine and left a hung process).
    It has an idle watchdog (kills and retries when the log is silent for 30 min) and writes
    `data/runs/logs/ouro_aime_rerun.status` and `ouro_aime_rerun.done`; then `scripts/capability_summary.py` writes
@@ -70,6 +71,8 @@ mostly measures what finishes under the cap. MATH-500 is the informative capabil
 ```bash
 source scripts/env.sh && scripts/verify_setup.sh --no-gpu           # environment and data check
 cat data/runs/logs/followups_progress.log; nvidia-smi                 # what finished, what runs
+scripts/gpuq.py list                                                  # GPU 0 job queue (runner holds until run_followups.sh ends)
+scripts/gpuq.py add -n NAME -- .venv/bin/python scripts/X.py --gpu '$GPU' ...   # queue a job behind the running ones
 scripts/run_followups.sh <step> ...                                   # steps: see the header of that script
 GPU=0 ACTADD_C=-1 VARIANT=shared|perloop scripts/run_loop_sweep.sh   # loop-subset sweep (MODEL_KEY=ouro|nanbeige)
 scripts/loop_sweep_summary.py loop_sweep loop_sweep_perloop --model Ouro-1.4B-Thinking

@@ -141,6 +141,7 @@ uv run python scripts/summarize.py $R/generations/test_hooks --cont $R/generatio
 | `capability.py` | MATH-500 / AIME 2025 accuracy under the same candidates as `intervene.py` |
 | `run_followups.sh`, `queue_*.sh` | Queued follow-up experiments (over-refusal, test-set confirmation, norm-aware ortho, capability) |
 | `run_*.sh` | The batch chains used for the test-set runs (generation, continuation, judging) |
+| `gpuq.py` | FIFO job queue per GPU: `add` commands, one runner executes them in order with a free-GPU wait, idle watchdog and retries |
 | `setup_remote.sh`, `verify_setup.sh`, `pack_data.sh`, `unpack_data.sh`, `export_results.sh` | New-machine setup and checks, data bundles, summary tables for git (see `docs/handoff.md`) |
 
 **Direction methods.** `v4_cot` (mean over all CoT tokens), `v12_cot150` (first 150 CoT tokens), `cot_last150`,
