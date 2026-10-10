@@ -26,18 +26,25 @@ and why weight orthogonalization fails on Ouro.
   far): 80.6% clean, 80.4 to 81.6% under ablation, 77.0% under actadd c=-1 (-3.6 points, noise is about 2).
 - Code from this session is committed; run data is in `data/` (not in git); summary tables are in `results/`.
 
-## Running now
+## Running now (all on GPU 0, one job at a time; GPU 1 belongs to another project's jobs)
 
-`scripts/queue_followups.sh` (GPU 0) is in its last step, `capability`: MATH-500 and AIME 2025 for Ouro and Nanbeige
-(clean, ablate all loops, loop-restricted, actadd). Progress: `data/runs/logs/followups_progress.log`,
-`ouro_capability_*.log`, `nanbeige_capability_*.log`; outputs `data/runs/<model>/capability/<dataset>/cap/*.parquet`.
-It writes `data/runs/logs/followups.done` and `data/runs/capability_summary.csv` at the end.
+1. `scripts/queue_followups.sh`, last step `capability`: MATH-500 is done for Ouro and Nanbeige; Nanbeige AIME 2025
+   (5 candidates x 8 samples) is running. Progress: `data/runs/logs/followups_progress.log`, `nanbeige_capability_aime25.log`.
+2. Queued behind it: the full Ouro AIME 2025 rerun (its first attempt died with its vLLM engine and left a hung process).
+   It has an idle watchdog (kills and retries when the log is silent for 30 min) and writes
+   `data/runs/logs/ouro_aime_rerun.status` and `ouro_aime_rerun.done`; then `scripts/capability_summary.py` writes
+   `data/runs/capability_summary.csv`. Ouro is slow (about 55 min per 500 MATH-500 samples: 4 loops, 790 KB of KV cache
+   per token so only about 35 sequences fit, and hooks force eager mode), so expect about 5 hours for AIME.
+
+Known issue: AIME 2025 at the 8192-token CoT cap leaves about 70% of Nanbeige's clean samples unclosed, so its accuracy
+mostly measures what finishes under the cap. MATH-500 is the informative capability result.
 
 ## Next TODO (in order)
 
-1. [ ] **When the queue finishes:** `scripts/export_results.sh`, add the capability row to the README findings and the
-   deck's caveats slide, commit `results/`, push.
-2. [ ] Make the queue scripts source `scripts/env.sh` (only after the queue has finished: do not edit running scripts).
+1. [ ] **When both capability jobs finish** (`ouro_aime_rerun.done`): `scripts/export_results.sh`, add the capability
+   rows (MATH-500 now, AIME) to the README findings and the deck's caveats slide, commit `results/`, push.
+2. [ ] Make the queue scripts source `scripts/env.sh`, add an idle watchdog to `run_followups.sh`, and use
+   `capability_summary.py` in its capability step (only after the queue has finished: do not edit running scripts).
 3. [ ] **Nanbeige test-set confirmation** of the loop configs (ablate loop 2 only, loop 1 only; actadd `c=-2`) with
    continuations, as done for Ouro (`run_followups.sh` step `confirm` is the template).
 4. [ ] **Two-loop Ouro with norm-aware ortho** (the handoff prediction: leak 2 needs several passes). Needs a loop-count
