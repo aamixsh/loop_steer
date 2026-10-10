@@ -229,17 +229,23 @@ def fig_results():
     q, o, n = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B"
     # (label, summary row, kind); all on the 487 test prompts, 3 CoTs x 3 answers, continuations merged
     data = {
-        "Qwen3-8B (weight edits)": [
+        "Qwen3-8B": [
             ("clean", _test_row(q, "clean_test_8k", "none", 8192), "clean"),
             ("random u", _test_row(q, "test_ortho", "ortho_random_l17", 2048, "test_ortho_ext"), "random"),
             ("v4_baseline\nlayer 21", _test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "ortho"),
             ("v12_cot150\nlayer 17", _test_row(q, "test_ortho", "ortho_v12_cot150_l17", 2048, "test_ortho_ext"), "ortho"),
-            ("v4_cot\nlayer 15", _test_row(q, "test_ortho", "ortho_v4_cot_l15", 2048, "test_ortho_ext"), "ortho")],
+            ("v4_cot\nlayer 15", _test_row(q, "test_ortho", "ortho_v4_cot_l15", 2048, "test_ortho_ext"), "ortho"),
+            ("hook\nv4_baseline\nL21", _test_row(q, "test_hooks", "ablate_v4_baseline_l21", 2048, "test_hooks_ext"), "hook"),
+            ("actadd L17\nc=-2", _test_row(q, "test_hooks", "actadd_v4_baseline_l17_c-2", 2048, "test_hooks_ext"), "actadd")],
         "Ouro-1.4B (hooks)": [
             ("clean", _test_row(o, "clean_test_8k", "none", 8192), "clean"),
             ("random u", _test_row(o, "test_hooks", "ablate_random_t3.l16", 2048, "test_hooks_ext"), "random"),
             ("v4_baseline\nloop 3, L8", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l8", 2048, "test_hooks_ext"), "hook"),
-            ("v4_baseline\nloop 3, L16", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l16", 2048, "test_hooks_ext"), "hook"),
+            ("v4_baseline\nall loops, L16", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l16", 2048, "test_hooks_ext"), "hook"),
+            ("loops 1,2\nonly", _test_row(o, "test_loops", "ablate_v4_baseline_t3.l16_apply0-1", 2048, "test_loops_ext"), "hook"),
+            ("loop 3\nonly", _test_row(o, "test_loops", "ablate_v4_baseline_t3.l16_apply2", 2048, "test_loops_ext"), "hook"),
+            ("loop 1\nonly", _test_row(o, "test_loops", "ablate_v4_baseline_t3.l16_apply0", 2048, "test_loops_ext"), "hook"),
+            ("actadd L16\nc=-1", _test_row(o, "test_loops", "actadd_v4_baseline_t3.l16_c-1", 2048, "test_loops_ext"), "actadd"),
             ("weight edit,\n50 prompts", None, "ortho")],
         "Nanbeige4.2-3B": [
             ("clean", _test_row(n, "clean_test", "none", 4096, "clean_test_ext"), "clean"),
@@ -249,7 +255,7 @@ def fig_results():
             ("hook\nv4_cot", _test_row(n, "test_int", "ablate_v4_cot_t0.l14", 4096, "test_int_ext"), "hook"),
             ("weight edit\nv4_baseline", _test_row(n, "test_int", "ortho_v4_baseline_t1.l15", 4096, "test_int_ext"), "ortho")],
     }
-    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), gridspec_kw={"width_ratios": [5, 6, 6]}, sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 4.8), gridspec_kw={"width_ratios": [7, 10, 6]}, sharey=True)
     for ax, (model, rows) in zip(axes, data.items()):
         x = np.arange(len(rows))
         ref = [np.nan if r is None else 100 * r["all_refusal"] for _, r, _ in rows]
@@ -293,7 +299,20 @@ def fig_sites():
     fig.savefig(OUT / "sites.png", dpi=150); plt.close(fig)
 
 
+def copy_sweep_figures():
+    """Loop-subset sweep and loop x layer map figures (made by scripts/loop_sweep_summary.py and
+    scripts/loop_layer_summary.py under data/runs/<model>/figures) -> docs/figures."""
+    import shutil
+
+    for model, name, out in (("Ouro-1.4B-Thinking", "loop_sweep_perloop_compare", "loops_ouro.png"),
+                             ("Nanbeige4.2-3B", "loop_sweep_perloop_compare", "loops_nanbeige.png"),
+                             ("Ouro-1.4B-Thinking", "loop_layer_map", "loop_layer_map.png")):
+        src = RUNS / model / "figures" / f"{name}.png"
+        if src.exists():
+            shutil.copy(src, OUT / out)
+
+
 if __name__ == "__main__":
     fig_interventions(); fig_norm_leak(); fig_loop_growth(); fig_compounding(); fig_loop_count()
-    fig_results(); fig_sites()
+    fig_results(); fig_sites(); copy_sweep_figures()
     print("figures ->", OUT)

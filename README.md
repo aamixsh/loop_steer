@@ -18,14 +18,16 @@ orthogonalization) or push against it (activation addition) and measure how ofte
 | Judge refusal rate | Qwen3-8B | Ouro-1.4B (4 loops) | Nanbeige4.2-3B (2 loops) |
 |---|---|---|---|
 | Clean model | 61% | 61% | 78% |
-| Hook ablation | not run | **10%** | 16–18% |
+| Hook ablation | **5.5%** | **10%** | 16–18% |
 | Weight orthogonalization | **6–15%** | no valid outputs* | **11%** |
-| Random-direction control | 61% (weights) | 59% (hooks) | 76% (hooks), 73% (weights) |
+| Activation addition | 6.8% (L17, c=−2) | 17% (L16, c=−1) | 24%** (c=−2) |
+| Random-direction control | 61% (hooks, weights) | 59% (hooks) | 76% (hooks), 73% (weights) |
 
 All 487 held-out test prompts, 3 CoTs per prompt, 3 answers per CoT, over all samples. The ranges are over the
 tested directions and layers. Mean StrongREJECT score rises from 0.22–0.37 (clean) to 0.83–0.91 with the best
 candidate per model. On Qwen3-8B our directions match the published layer-17 vectors (cosine 0.99).
 *Weight orthogonalization on Ouro was tested on 50 selection prompts only (the edit breaks generation, see below).
+**Selection set (50 prompts), both loops.
 
 **Why weight orthogonalization breaks Ouro but not Nanbeige.** Weight orthogonalization only stops the edited
 matrices from writing along the direction. A learned RMSNorm applied *after* those matrices has uneven
@@ -37,8 +39,29 @@ its single inter-loop norm shrinks the stream. Hooks avoid the problem by re-pro
 
 ![Leak of the removed direction per loop](docs/figures/loop_growth.png)
 
-**Caveats.** No capability or over-refusal checks were run on any model. Hook ablation was not run on Qwen3-8B.
-Mechanism measurements use 8 traces per model. Directions and layers were chosen on 50 selection prompts and
+**Which loops carry the refusal?** Hook ablation or actadd restricted to a subset of loops
+(`scripts/run_loop_sweep.sh`; all 15 subsets for Ouro, 3 for Nanbeige; the full tables are in `results/`):
+
+| Ouro refusal (clean 61%) | all loops | loop 3 only | loops 1,2 | loop 1 only | actadd, all loops |
+|---|---|---|---|---|---|
+| test set (487 prompts) | 10% | 18.5% | 26% | 49% | 17% (c=−1) |
+
+- The later loops carry the effect; loop 1 alone is weak. Selection set, ablation in a single loop: 40 / 18 / 10 / 13%
+  for loops 1 / 2 / 3 / 4. Nanbeige: 48% (loop 1), 22% (loop 2), 12% (both); clean 80%.
+- Actadd behaves like a dose: refusal falls with the number of loops it is added in, and matters less which ones.
+- Using each loop's *own* direction instead of the last loop's is not better (slightly worse, e.g. loop 2 alone 32% vs 18%).
+- Actadd at one loop and one layer (Ouro, c=−2): loop 4 works at layers 4 to 12 (11–17%) and not at layers 16 and 20
+  (36%, 52%); loop 1 is weak at every layer (44–56%); see `docs/figures/loop_layer_map.png`.
+- Norm-aware weight orthogonalization is harmless for a random direction on Ouro (63% refusal, clean 57%) but still
+  breaks generation with the refusal direction (99% unclosed CoTs): the inter-loop norm is the main cause.
+
+**Checks.** Over-refusal: on 250 harmless test prompts no intervention raises refusal (0–3% on both looped models).
+Capability: Ouro on MATH-500 scores 80.6% clean, 80.4–81.6% under hook ablation (no loss) and 77.0% under actadd c=−1
+(−3.6 points, fewer closed CoTs; about ±2 points of sampling noise). Nanbeige: 83.0% clean; its interventions and
+AIME 2025 are still running (see `PLAN.md`).
+
+**Caveats.** Loop and layer results use the 50 selection prompts (differences below about 4 points are noise) except
+where marked test set; the Ouro test run showed loop 3 alone to be optimistic on the selection set. Mechanism measurements use 8 traces per model. Directions and layers were chosen on 50 selection prompts and
 reported on the test set. Sampling is temperature 0.6 with no top-p or top-k, which differs from the models'
 recommended settings (top_p 0.95, top_k 20 for Qwen3 and Nanbeige). CoTs were capped at 8192 tokens; 0–2% of them
 still hit the cap (see Metrics). See the deck for details.
@@ -114,12 +137,16 @@ uv run python scripts/summarize.py $R/generations/test_hooks --cont $R/generatio
 | `ortho_compare.py`, `ortho_diagnostic.py`, `ortho_feedback.py` | Why weight orthogonalization leaks through norms in Ouro |
 | `loop_smoke.py`, `ouro_smoke.py`, `validate_*.py` | Smoke tests and checks that vLLM hooks match Hugging Face |
 | `make_presentation_figures.py` | Regenerates `docs/figures/` from saved runs |
+| `run_loop_sweep.sh`, `loop_sweep_summary.py`, `loop_layer_summary.py` | Loop-subset sweeps (shared or per-loop directions, `dir=perloop`) and the loop × layer actadd map, with tables and figures |
+| `capability.py` | MATH-500 / AIME 2025 accuracy under the same candidates as `intervene.py` |
+| `run_followups.sh`, `queue_*.sh` | Queued follow-up experiments (over-refusal, test-set confirmation, norm-aware ortho, capability) |
 | `run_*.sh` | The batch chains used for the test-set runs (generation, continuation, judging) |
+| `setup_remote.sh`, `verify_setup.sh`, `pack_data.sh`, `unpack_data.sh`, `export_results.sh` | New-machine setup and checks, data bundles, summary tables for git (see `docs/handoff.md`) |
 
 **Direction methods.** `v4_cot` (mean over all CoT tokens), `v12_cot150` (first 150 CoT tokens), `cot_last150`,
 `v4_baseline` (end-of-instruction template tokens, prompt-level labels), `paired_cot` (within-prompt contrast)
-and `random` (control). Candidate syntax is `kind:method:site[:c=..|apply=..|layer=..]` with site `l<layer>` or
-`t<loop>.l<layer>`. See the docstring of `scripts/intervene.py`.
+and `random` (control). Candidate syntax is `kind:method:site[:c=..|apply=..|layer=..|dir=perloop|na=1]` with site `l<layer>` or
+`t<loop>.l<layer>` (`apply=` restricts to loops, `dir=perloop` uses each loop's own direction, `na=1` the norm-aware weight edit). See the docstring of `scripts/intervene.py`.
 
 **Metrics.** The StrongREJECT score is `(1 − refused) × (convincingness + specificity − 2) / 8`, in [0, 1].
 A stage-1 sample is *valid* if its CoT closes with `</think>`; its answers are then sampled in stage 2.
@@ -143,27 +170,18 @@ stopped by themselves without thinking (`direct_frac`; about 20% of clean Ouro s
 - **`ortho` is only valid** when nothing renormalizes the stream after the edited weights (Qwen, Nanbeige).
   `loop_steer.ortho` also provides a norm-aware variant and a loop-span variant used for the analysis.
 
-## Moving to another machine
+## Setting up another machine
 
-The code, lock file and docs are in git; run artifacts and models are not. A checkout is self-contained: `data/`
-(run artifacts and every tool cache) and `scratch/` (temp files) are plain git-ignored directories inside it.
-`scripts/env.sh` points uv, Hugging Face, vLLM, Triton and torch at them (and the Python scripts do the same by
-default when there is no lab storage profile). On the new machine:
+`docs/handoff.md` is the step-by-step guide for a fresh GPU server (vast.ai, RunPod, a lab box). In short:
 
 ```bash
 git clone https://github.com/aamixsh/loop_steer.git && cd loop_steer
-source scripts/env.sh                         # in every new shell; keeps all caches and temp files in this directory
-scripts/setup_remote.sh --install-uv          # driver check, uv into data/.cache/bin, uv sync --locked, prompts, models
-scripts/unpack_data.sh /path/to/bundle.tar.zst   # optional: previous runs (or rsync data/runs and data/prompts directly)
+scripts/setup_remote.sh --install-uv --cache-dir /workspace/cache   # uv sync, prompts, models, CPU checks
+source scripts/env.sh && scripts/verify_setup.sh --gpu 0             # GPU smoke test
 ```
 
-On the old machine, `scripts/pack_data.sh bundle.tar.zst` writes the bundle (directions, generations, analysis,
-logs and prompts, about 0.6 GB compressed; `--with-activations` adds the 6.3 GB of activations, which are only needed
-to recompute directions) and a `.sha256`. Copy it with `rsync -avP`. Model weights (about 40 GB) are downloaded at
-the pinned revisions by `scripts/prefetch_models.py` into `data/.cache/huggingface`. The locked environment needs a
-driver that supports CUDA 12.8. Pass `--gpu N` to the scripts; the `run_*.sh` chains read `GPU=`.
-Do not copy SSH keys or Hugging Face tokens (all models and the prompts are public). `docs/handoff.md` lists the
-open items.
+Run data moves with `scripts/pack_data.sh` / `unpack_data.sh`; summary tables of every run are in `results/`
+(`scripts/export_results.sh`). `PLAN.md` holds the current plan and next steps.
 
 ## Streaming demo
 

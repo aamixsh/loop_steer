@@ -64,6 +64,8 @@ Per-site checks: split-half stability, and AUC of the projection for separating 
 - **Ablation (hooks):** project `u` out of the stream entering every layer and out of every attention/MLP write, in every loop.
 - **Weight orthogonalization:** edit `embed`, `o_proj`, `down_proj` once so they cannot write along `u`. Exactly equals ablation in a standard pre-norm model.
 - **Activation addition:** add `c · r` (raw mean difference) at one layer; `c < 0` pushes away from refusal.
+- **Loop-restricted:** hooks can act in a chosen subset of loops only (`apply=`), with one direction for all of them or
+  each loop's own direction (`dir=perloop`). Weight edits cannot: the weights are shared by all loops.
 
 ---
 
@@ -111,9 +113,10 @@ Test set, 487 prompts × 9 answers, weight orthogonalization, refusal over all s
 | `v4_cot`, layer 15 | 11.7% | 0.85 | 0.1% |
 | `v4_cot`, layer 23 | 15.0% | 0.80 | 0.1% |
 
-Selection set: activation addition (`v4_baseline`, L17, c = −2) gives 4.7% refusal with no extra invalid CoTs.
+Same test set, hooks instead of weights: ablation (`v4_baseline`, L21) **5.5%**, activation addition (`v4_baseline`, L17,
+c = −2) **6.8%**, random direction ablation 60.9%. Hooks equal the weight edit, as they should in a standard pre-norm model.
 
-**Reproduction holds:** one direction, removed everywhere, takes refusal from 61% to 6–15%. The random direction does nothing.
+**Reproduction holds, with all three methods:** one direction, removed everywhere, takes refusal from 61% to 6–15%. The random direction does nothing.
 
 ---
 
@@ -130,8 +133,8 @@ Selection set: activation addition (`v4_baseline`, L17, c = −2) gives 4.7% ref
 
 ![w:1100](figures/results.png)
 
-- **Qwen:** weight ortho works (61% → 6–12%). Hook ablation was not run.
-- **Ouro:** hook ablation works (61% → 10%). **Weight ortho produces no valid outputs**, even with a *random* direction (50-prompt run).
+- **Qwen:** weight ortho, hooks and actadd all work (61% → 6–12%).
+- **Ouro:** hook ablation works (61% → 10%), actadd 17%. **Weight ortho produces no valid outputs**, even with a *random* direction (50-prompt run). Loop-restricted hooks: next slides.
 - **Nanbeige:** hooks *and* weight ortho both work (78% → 16–18% / 11%). Random directions do nothing (73–76%).
 
 Test set, all samples. About 20% of clean Ouro samples **answer directly without thinking**; ablation lowers this to 11–15%. Looping to the token cap is rare: 0.2% clean, 2% ablated.
@@ -150,6 +153,29 @@ Selection set (50 prompts, 4096-token cap):
 Weight ortho works on Nanbeige, but some directions damage generation. Check unclosed CoTs, not only refusal.
 
 Cap matters: on the test set the `v4_baseline` edit leaves 8% of CoTs unclosed at 4096 tokens but only 0.1% at 8192. Slow is not always broken. The `v4_cot` loop-0 edit was not rerun on the test set.
+
+---
+
+## Which loops carry the refusal?
+
+![w:690](figures/loops_ouro.png) ![w:420](figures/loops_nanbeige.png)
+
+Hooks in every subset of loops, 50 selection prompts (Ouro clean 57%, Nanbeige 80%); light = one direction (last loop) in all selected loops, dark = each loop's own direction.
+
+- **Later loops carry it, loop 1 alone is weak.** Ouro ablation in one loop: 40 / 18 / 10 / 13% (loops 1–4); Nanbeige: 48% (loop 1), 22% (loop 2), 12% (both).
+- **Test set, Ouro:** all loops 10%, loop 3 only 18.5%, loops 1,2 26%, loop 1 only 49% (`results.png`): loop 3 alone is not enough.
+- **Actadd is a dose:** refusal falls with the *number* of loops it is added in (one loop ≈ 40–50%, all four 16%).
+- **Per-loop directions do not help** (loop 2 alone 32% vs 18%): the last loop's direction works in every loop.
+
+---
+
+## Where within a loop? (Ouro actadd, one loop × one layer)
+
+![w:880](figures/loop_layer_map.png)
+
+- Effect grows with the loop index; loop 1 is weak at every layer (44–56%, clean 57%).
+- In **loop 4 only layers 4–12 work** (11–17%); layers 16 and 20 do not (36%, 52%). Late injections come too late.
+- c = −2 once per cell, 50 prompts: differences of a few points are noise.
 
 ---
 
@@ -240,6 +266,8 @@ Two fixes, each targeting one leak:
 
 - Plain ortho with a random direction hurts at every loop count → leak 1.
 - Norm-aware ortho matches hooks at 1–2 loops, degrades at 4 → leak 2 needs several passes.
+- With the *refusal* direction at 4 loops, norm-aware ortho still leaves 99% of CoTs unclosed (random direction: harmless,
+  63% refusal vs 57% clean; 50 prompts) → the inter-loop norm, not the sandwich norms, is the main cause.
 
 ---
 
@@ -284,14 +312,16 @@ This **fits** the mechanism: Ouro relies on carrying a well-scaled state across 
    - sandwich norms re-add `u` to every write,
    - the inter-loop norm amplifies the leak 3 times while the edit stops the model from correcting it.
 4. **Nanbeige survives** because its writes enter raw, and its one inter-loop norm shrinks the stream.
-5. **Check damage, not just refusal.** Unclosed CoTs reveal broken edits (Ouro weight edit: 100%, Nanbeige loop-0 edit: 47% on the selection set). Use a generous token cap.
+5. **Steering acts late.** In both looped models the later loops carry the refusal; loop 1 alone barely moves it, and the last loop's direction works in every loop. Actadd works at early to middle layers of the late loops.
+6. **Check damage, not just refusal.** Unclosed CoTs reveal broken edits (Ouro weight edit: 100%, Nanbeige loop-0 edit: 47% on the selection set). Use a generous token cap.
+7. **No collateral found so far:** no extra refusal on 250 harmless prompts; Ouro MATH-500 80.6% clean, 80.4–81.6% under ablation, 77.0% under actadd (−3.6).
 
 ---
 
 ## Caveats and open items
 
-- Test-set runs cover the best candidates only. Ouro's weight edit and the mechanism numbers are from smaller runs.
-- No capability or over-refusal checks on any model. Hook ablation was not run on Qwen.
+- Test-set runs cover the best candidates and four Ouro loop configs. Loop subsets, per-loop directions, the layer map and Ouro's weight edit use 50 selection prompts (±4 points).
+- Capability: Ouro on MATH-500 only so far (Nanbeige and AIME 2025 running). Over-refusal is only a weak check, since our interventions lower refusal.
 - Sampling is temperature 0.6 without top-p or top-k. Directions and layers were picked on 50 prompts.
 - Ouro ablation raises looping to the token cap from 0.2% to about 2%.
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
@@ -311,8 +341,13 @@ uv run python scripts/intervene.py --model ByteDance/Ouro-1.4B-Thinking --direct
     --extend-from test_hooks --max-tokens 2048 --extend-tokens 6144 --candidates ablate:v4_baseline:t3.l16
 uv run python scripts/summarize.py data/runs/Ouro-1.4B-Thinking/generations/test_hooks --cont data/runs/Ouro-1.4B-Thinking/generations/test_hooks_ext
 
+# loop-subset sweeps (selection prompts) and the loop x layer map; tables and figures under data/runs/<model>/
+GPU=0 ACTADD_C=-1 VARIANT=shared  scripts/run_loop_sweep.sh      # then VARIANT=perloop; MODEL_KEY=nanbeige ACTADD_C=-2
+uv run python scripts/loop_sweep_summary.py loop_sweep loop_sweep_perloop --model Ouro-1.4B-Thinking
+scripts/run_followups.sh layermap capability                      # layer map, MATH-500 / AIME 2025
+
 # figures for this deck (CPU)
 uv run python scripts/make_presentation_figures.py
 ```
 
-Results: `data/runs/<model>/analysis/ortho_compare_*.json`, `analysis/*.csv`, judged generations in `data/runs/<model>/generations/`.
+Results: summary tables in `results/<model>/*.csv` (git), `data/runs/<model>/analysis/ortho_compare_*.json`, judged generations in `data/runs/<model>/generations/`.
