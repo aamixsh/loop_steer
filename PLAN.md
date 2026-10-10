@@ -29,10 +29,10 @@ and why weight orthogonalization fails on Ouro.
 ## Running now (GPU 0 only; GPU 1 belongs to another project's jobs)
 
 Everything runs through one FIFO runner, `scripts/gpuq.py` (state in `data/queue/gpu0`, logs in `data/runs/logs/gpuq/`;
-`scripts/gpuq.py list` shows it). Queued in order: Nanbeige AIME 2025 (5 candidates x 8 samples, resumes after the saved
-clean candidate), the full Ouro AIME 2025 run, then `capability_summary.py` (writes `data/runs/capability_summary.csv`).
-The earlier chain (`queue_followups.sh`) was stopped after its MATH-500 and layer-map steps had finished. Add new jobs
-with `scripts/gpuq.py add -n NAME -- CMD ...`; the runner starts them when the GPU is free.
+`scripts/gpuq.py list` shows it). Queued in order: Nanbeige AIME 2025 (running), Nanbeige test-set loop configs (ablate
+loop 2 only, loop 1 only, actadd all loops; `run_test_set.sh`, tag `test_loops`), Ouro test-set loop configs (loop 2 only,
+loop 4 only, loops 3+4 added to the existing `test_loops`), the full Ouro AIME 2025 run, then `capability_summary.py` and
+`export_results.sh` (refreshes `results/`). Add jobs with `scripts/gpuq.py add -n NAME -- CMD ...`.
 
 Ouro is slow (about 55 min per 500 MATH-500 samples: 4 loops, 790 KB of KV cache per token so only about 35 sequences
 fit, and hooks force eager mode), so expect about 5 hours for its AIME run. Known issue: AIME 2025 at the 8192-token CoT
@@ -45,8 +45,8 @@ MATH-500 is the informative capability result.
    rows (MATH-500 now, AIME) to the README findings and the deck's caveats slide, commit `results/`, push.
 2. [ ] Retire `queue_*.sh` and `run_followups.sh` in favour of `gpuq.py` jobs (keep `run_followups.sh` steps as the
    record of how the follow-up experiments were run, or turn them into gpuq job lists).
-3. [ ] **Nanbeige test-set confirmation** of the loop configs (ablate loop 2 only, loop 1 only; actadd `c=-2`) with
-   continuations, as done for Ouro (`run_followups.sh` step `confirm` is the template).
+3. [ ] **Read the test-set loop runs** (queued, `scripts/run_test_set.sh`): Nanbeige loops and the extra Ouro loops; add
+   them to the README loops paragraph and the deck's results figure if they hold.
 4. [ ] **Two-loop Ouro with norm-aware ortho** (the handoff prediction: leak 2 needs several passes). Needs a loop-count
    override for the vLLM engine (HF has `load_model(n_loops_override=...)`).
 5. [ ] **Position-restricted ablation** (prompt tokens / CoT tokens / answer tokens) in `hooks.py` and
