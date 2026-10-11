@@ -1,7 +1,9 @@
 """Two-stage CoT/answer sampling (reasoning-manipulation protocol), backend-agnostic.
 
-A *generator* is a callable ``generate(texts) -> [(text, n_tokens, hit_limit), ...]``
-(same order as ``texts``; ``text`` keeps special tokens such as ``</think>``).
+A *generator* is a callable ``generate(texts, prompt_texts=None, answer=False) -> [(text, n_tokens, hit_limit), ...]``
+(same order as ``texts``; ``text`` keeps special tokens such as ``</think>``). ``prompt_texts[i]`` is the formatted user
+turn that ``texts[i]`` starts with, and ``answer`` says whether the generated tokens are answer tokens (stage 2) or
+CoT tokens (stage 1, continuations); a generator uses them only for position-restricted interventions.
 ``vllm_generator`` and ``hf_generator`` build one; ``two_stage`` runs the protocol.
 """
 
@@ -10,15 +12,35 @@ import pandas as pd
 from loop_steer.cot import format_prompt, split_cot, strip_end
 
 
-def vllm_generator(llm, sampling, tokenizer=None):
-    """vLLM generator. With ``tokenizer``, prompts go in as token ids (``add_special_tokens=False``)."""
+def vllm_generator(llm, sampling, tokenizer=None, gated=False):
+    """vLLM generator. With ``tokenizer``, prompts go in as token ids (``add_special_tokens=False``).
 
-    def generate(texts):
+    ``gated=True`` (needs ``tokenizer``) attaches each request's position-class boundaries
+    (``extra_args["ls_bounds"] = (P, C)``, see ``loop_steer.vllm_hooks``): P = tokens of the user turn, C = tokens of
+    the whole input when the generated tokens are answer tokens, else -1 (everything after the user turn is CoT).
+    """
+    if gated and tokenizer is None:
+        raise ValueError("gated generation needs the tokenizer (prompts are passed as token ids)")
+
+    def generate(texts, prompt_texts=None, answer=False):
         if tokenizer is not None:
-            prompts = [{"prompt_token_ids": tokenizer(t, add_special_tokens=False).input_ids} for t in texts]
+            ids = [tokenizer(t, add_special_tokens=False).input_ids for t in texts]
+            prompts = [{"prompt_token_ids": i} for i in ids]
         else:
             prompts = texts
-        outs = llm.generate(prompts, sampling)
+        params = sampling
+        if gated:
+            if prompt_texts is None:
+                raise ValueError("gated generation needs prompt_texts")
+            params = []
+            for t, p, i in zip(texts, prompt_texts, ids):
+                if not t.startswith(p):
+                    raise ValueError("prompt_texts[i] must be a prefix of texts[i]")
+                sp = sampling.clone()
+                n_prompt = len(tokenizer(p, add_special_tokens=False).input_ids)
+                sp.extra_args = {**(sp.extra_args or {}), "ls_bounds": (n_prompt, len(i) if answer else -1)}
+                params.append(sp)
+        outs = llm.generate(prompts, params)
         return [(o.outputs[0].text, len(o.outputs[0].token_ids), o.outputs[0].finish_reason == "length")
                 for o in outs]
     return generate
@@ -66,7 +88,7 @@ def hf_generator(model, tokenizer, *, max_new_tokens, temperature, top_p=1.0, ba
     eos = tokenizer.eos_token_id
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos
 
-    def generate(texts):
+    def generate(texts, prompt_texts=None, answer=False):  # position classes: not supported (vLLM only)
         torch.manual_seed(seed)
         order = sorted(range(len(texts)), key=lambda i: -len(texts[i]))
         results = [None] * len(texts)
@@ -99,7 +121,8 @@ _ROW_COLUMNS = ["prompt_idx", "prompt", "cot_rep", "out_rep", "cot", "stage1_len
 def _answer_rows(generate_answer, cots, out_reps):
     """Stage 2: ``out_reps`` answers per CoT; ``cots`` = [(prompt_idx, prompt, cot_rep, prefix, cot, n_tokens)]."""
     stage2 = [(c, rep) for c in cots for rep in range(out_reps)]
-    outs = generate_answer([c[3] + c[4] for c, _ in stage2]) if stage2 else []
+    outs = generate_answer([c[3] + c[4] for c, _ in stage2], prompt_texts=[c[3] for c, _ in stage2],
+                           answer=True) if stage2 else []
     return pd.DataFrame([
         {
             "prompt_idx": idx, "prompt": prompt, "cot_rep": cot_rep, "out_rep": out_rep,
@@ -122,7 +145,7 @@ def two_stage(generate, tokenizer, prompts, *, cot_reps, out_reps, prompt_offset
     generate_answer = generate_answer or generate
     formatted = [format_prompt(tokenizer, p) for p in prompts]
     stage1 = [(i, rep) for i in range(len(prompts)) for rep in range(cot_reps)]
-    outs = generate([formatted[i] for i, _ in stage1])
+    outs = generate([formatted[i] for i, _ in stage1], prompt_texts=[formatted[i] for i, _ in stage1])
     cots, invalid = [], []
     for (i, rep), (text, n_tokens, hit) in zip(stage1, outs):
         cot, _, ok = split_cot(text)
@@ -152,7 +175,8 @@ def extend_capped(generate_more, generate_answer, tokenizer, invalid, *, cap, ou
     """
     capped = invalid[invalid.n_tokens >= cap].reset_index(drop=True)
     formatted = [format_prompt(tokenizer, p) for p in capped.prompt]
-    outs = generate_more([f + r for f, r in zip(formatted, capped.response)]) if len(capped) else []
+    outs = generate_more([f + r for f, r in zip(formatted, capped.response)], prompt_texts=formatted) \
+        if len(capped) else []
     cots, still = [], []
     for row, f, (more, n_more, hit) in zip(capped.itertuples(), formatted, outs):
         text = row.response + more

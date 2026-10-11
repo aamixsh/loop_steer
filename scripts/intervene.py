@@ -13,11 +13,17 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
           layer=<l>      actadd at a different layer than the extraction site
           na=1           ortho only: norm-aware weight edit (project g*u, g = gain of the sandwich norm after each
                          writer, instead of u; see loop_steer.ortho). Matters for Ouro.
+          pos=<cls+cls>  ablate / actadd only on tokens of these position classes: prompt (the user turn), cot
+                         (thinking, incl. </think>), answer; e.g. pos=prompt, pos=cot+answer. vLLM backend only.
           dir=perloop    take the direction of each loop's own site (loop t, the site's layer) and apply it only in
                          loop t, instead of the site's single direction in every selected loop (ablate / actadd only;
                          the site's loop number is then ignored)
 Examples: ortho:v4_cot:l23   actadd:v12_cot150:l17:c=-1.5   ablate:v4_cot:t3.l12:apply=3
           ablate:v4_baseline:t3.l16:dir=perloop   actadd:v4_baseline:t3.l16:c=-1:apply=0,1:dir=perloop
+          ablate:v4_baseline:t3.l16:pos=prompt   ablate:v4_baseline:t3.l16:pos=cot+answer
+
+``--n-loops N`` runs a looped model with N loops instead of its trained number (vLLM: ``hf_overrides``; HF:
+``load_model(n_loops_override=N)``); use a separate ``--tag``.
 
 Weights are restored / hooks removed between candidates.
 
@@ -36,14 +42,14 @@ import re
 
 def parse_candidate(text):
     if text == "none":
-        return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False}
+        return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False, "positions": None}
     kind, method, site, *opts = text.split(":")
     m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", site)
     if m is None:
         raise ValueError(f"bad site {site!r}")
-    cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-"), "kind": kind, "method": method,
-            "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None, "layer": None,
-            "perloop": False, "norm_aware": False}
+    cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
+            "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
+            "layer": None, "perloop": False, "norm_aware": False, "positions": None}
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -56,6 +62,11 @@ def parse_candidate(text):
             cand["perloop"] = True
         elif key == "na":
             cand["norm_aware"] = bool(int(val))
+        elif key == "pos":
+            cand["positions"] = val.split("+")
+            bad = set(cand["positions"]) - {"prompt", "cot", "answer"}
+            if bad or kind not in ("ablate", "actadd"):
+                raise ValueError(f"pos= takes prompt, cot, answer joined by '+', on ablate / actadd only: {text!r}")
         else:
             raise ValueError(f"unknown option {key!r}")
     return cand
@@ -76,9 +87,11 @@ def intervention_specs(c, dirs, site_index):
     else:
         groups = [(c["apply"], table[site_index[c["site"]]])]
     layer = c["layer"] if c["layer"] is not None else c["site"][1]
+    pos = c.get("positions")
     if c["kind"] == "ablate":
-        return [{"kind": "ablate", "dir": vec, "loops": loops} for loops, vec in groups]
-    return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer} for loops, vec in groups]
+        return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos} for loops, vec in groups]
+    return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer, "positions": pos}
+            for loops, vec in groups]
 
 
 def main():
@@ -104,11 +117,15 @@ def main():
     ap.add_argument("--backend", choices=["vllm", "hf"], default="vllm",
                     help="hf = plain transformers generate (for models vLLM cannot run, e.g. Nanbeige)")
     ap.add_argument("--hf-batch-size", type=int, default=96)
+    ap.add_argument("--n-loops", type=int, default=None, help="Run a looped model with this many loops")
     ap.add_argument("--tag", required=True, help="Output subdir under generations/")
     ap.add_argument("--skip-existing", action="store_true")
     args = ap.parse_args()
     cands = [parse_candidate(c) for c in args.candidates]
     uses_hooks = any(c["kind"] in ("ablate", "actadd") for c in cands)
+    gated = any(c["positions"] for c in cands)
+    if gated and args.backend != "vllm":
+        ap.error("pos= needs the vLLM backend")
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -140,15 +157,17 @@ def main():
         from vllm import LLM, SamplingParams
 
         from loop_steer import vllm_hooks
-        from loop_steer.models import prepare_vllm, vllm_kwargs
+        from loop_steer.models import loop_overrides, prepare_vllm, vllm_kwargs
 
         as_ids = prepare_vllm(args.model)
         llm = LLM(model=args.model, seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
-                  max_model_len=args.max_model_len, enforce_eager=uses_hooks, **vllm_kwargs(args.model))
+                  max_model_len=args.max_model_len, enforce_eager=uses_hooks,
+                  hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
 
         def make_generate(n_tokens):
             sampling = SamplingParams(max_tokens=n_tokens, temperature=args.temperature, skip_special_tokens=False)
-            return vllm_generator(llm, sampling, tok if as_ids else None)
+            # gated runs pass token ids (same ids as vLLM's own tokenization: no BOS is added for Ouro or Qwen)
+            return vllm_generator(llm, sampling, tok if (as_ids or gated) else None, gated=gated)
 
         def prepare(c, vec, specs):
             if weights_dirty[0] or c["kind"] == "ortho":
@@ -164,7 +183,7 @@ def main():
         from loop_steer.hooks import ablation_hooks, actadd_hooks, hooked
         from loop_steer.models import load_model
 
-        model = load_model(args.model)
+        model = load_model(args.model, n_loops_override=args.n_loops)
 
         def make_generate(n_tokens):
             return hf_generator(model, tok, max_new_tokens=n_tokens, temperature=args.temperature,

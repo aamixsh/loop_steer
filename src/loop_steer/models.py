@@ -72,6 +72,16 @@ def load_model(model_name: str, *, device="cuda:0", dtype=torch.bfloat16, n_loop
     return model.eval()
 
 
+def loop_overrides(model_name: str, n_loops_override=None) -> dict | None:
+    """``vllm.LLM(hf_overrides=...)`` that runs a looped model with ``n_loops_override`` loops (None: as trained)."""
+    if n_loops_override is None:
+        return None
+    if not is_looped(model_name):
+        raise ValueError(f"{model_name} is not a looped model")
+    attr = LOOPED[model_name][1] if model_name in LOOPED else "total_ut_steps"
+    return {attr: n_loops_override}
+
+
 def eoi_length(tokenizer, **template_kwargs) -> int:
     """Number of template tokens after the user message (Arditi's end-of-instruction tokens)."""
     marker = "XYZZY_MARKER"

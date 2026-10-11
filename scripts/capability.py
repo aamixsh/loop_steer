@@ -127,6 +127,8 @@ def main():
     from loop_steer.ortho import orthogonalize_
 
     cands = [parse_candidate(c) for c in args.candidates]
+    if any(c["positions"] for c in cands):
+        ap.error("pos= is not supported here (capability prompts have no CoT/answer split)")
     uses_hooks = any(c["kind"] in ("ablate", "actadd") for c in cands)
     rd = run_dir(args.model)
     if any(c["kind"] != "none" for c in cands):

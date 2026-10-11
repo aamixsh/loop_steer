@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--n-prompts", type=int, default=8)
     ap.add_argument("--max-tokens", type=int, default=64)
     ap.add_argument("--vllm-mem", type=float, default=0.1)
+    ap.add_argument("--n-loops", type=int, default=None, help="Run a looped model with this many loops (both backends)")
     args = ap.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -37,13 +38,13 @@ def main():
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, load_prompts
     from loop_steer.hooks import ablation_hooks, actadd_hooks, hooked
-    from loop_steer.models import load_model, load_tokenizer, prepare_vllm, vllm_kwargs
+    from loop_steer.models import load_model, load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs
 
     loops = None if args.loops is None else [int(x) for x in args.loops.split(",")]
     tok = load_tokenizer(args.model)
     tok.padding_side = "left"
     prompts = [format_prompt(tok, p) for p in load_prompts("test")[: args.n_prompts]]
-    model = load_model(args.model)
+    model = load_model(args.model, n_loops_override=args.n_loops)
     D = model.config.hidden_size
     if args.direction:
         u = torch.load(args.direction, weights_only=False).float().cpu()
@@ -81,7 +82,7 @@ def main():
 
     as_ids = prepare_vllm(args.model)
     llm = LLM(model=args.model, gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
-              **vllm_kwargs(args.model))
+              hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
     sp = SamplingParams(max_tokens=args.max_tokens, temperature=0)
     specs = {
         "clean": [],
