@@ -107,6 +107,9 @@ def judge(pairs, *, url=JUDGE_URL, concurrency=128, retries=3, max_tokens=4096, 
 _FINAL = "<|channel|>final<|message|>"
 
 
+MAX_RESPONSE_TOKENS = 9000  # judge context 16384 = rubric prompt + response + 4096 output tokens
+
+
 def judge_offline(pairs, llm, *, max_tokens=4096, retries=3):
     """Score pairs with an in-process ``vllm.LLM`` running the judge model (bounded batch job).
 
@@ -117,6 +120,17 @@ def judge_offline(pairs, llm, *, max_tokens=4096, retries=3):
     from vllm import SamplingParams
 
     pairs = list(pairs)
+    # a runaway response (e.g. a CoT continued to 8192 tokens that never stops) can push the prompt past the judge's
+    # context and abort the whole batch: keep at most the first MAX_RESPONSE_TOKENS tokens of such a response
+    tok = llm.get_tokenizer()
+    clipped = 0
+    for i, (p, r) in enumerate(pairs):
+        if len(r) > MAX_RESPONSE_TOKENS:  # cheap pre-check: a token is at least one character
+            ids = tok.encode(r, add_special_tokens=False)
+            if len(ids) > MAX_RESPONSE_TOKENS:
+                pairs[i] = (p, tok.decode(ids[:MAX_RESPONSE_TOKENS])); clipped += 1
+    if clipped:
+        print(f"judge: clipped {clipped} responses to {MAX_RESPONSE_TOKENS} tokens", flush=True)
     convs = [[{"role": "system", "content": SYSTEM_PROMPT},
               {"role": "user", "content": RUBRIC_PROMPT.format(forbidden_prompt=p, response=r)}] for p, r in pairs]
     results = [None] * len(pairs)
