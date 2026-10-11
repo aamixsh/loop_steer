@@ -20,14 +20,13 @@ orthogonalization) or push against it (activation addition) and measure how ofte
 | Clean model | 61% | 61% | 78% |
 | Hook ablation | **5.5%** | **10%** | 16–18% |
 | Weight orthogonalization | **6–15%** | no valid outputs* | **11%** |
-| Activation addition | 6.8% (L17, c=−2) | 17% (L16, c=−1) | 24%** (c=−2) |
+| Activation addition | 6.8% (L17, c=−2) | 17% (L16, c=−1) | 26% (L15, c=−2) |
 | Random-direction control | 61% (hooks, weights) | 59% (hooks) | 76% (hooks), 73% (weights) |
 
 All 487 held-out test prompts, 3 CoTs per prompt, 3 answers per CoT, over all samples. The ranges are over the
 tested directions and layers. Mean StrongREJECT score rises from 0.22–0.37 (clean) to 0.83–0.91 with the best
 candidate per model. On Qwen3-8B our directions match the published layer-17 vectors (cosine 0.99).
 *Weight orthogonalization on Ouro was tested on 50 selection prompts only (the edit breaks generation, see below).
-**Selection set (50 prompts), both loops.
 
 **Why weight orthogonalization breaks Ouro but not Nanbeige.** Weight orthogonalization only stops the edited
 matrices from writing along the direction. A learned RMSNorm applied *after* those matrices has uneven
@@ -39,29 +38,36 @@ its single inter-loop norm shrinks the stream. Hooks avoid the problem by re-pro
 
 ![Leak of the removed direction per loop](docs/figures/loop_growth.png)
 
-**Which loops carry the refusal?** Hook ablation or actadd restricted to a subset of loops
-(`scripts/run_loop_sweep.sh`; all 15 subsets for Ouro, 3 for Nanbeige; the full tables are in `results/`):
+**Which loops carry the refusal?** Hook ablation or actadd restricted to a subset of loops (test set, 487 prompts;
+all 15 subsets for Ouro and 3 for Nanbeige on the selection set; tables in `results/`):
 
-| Ouro refusal (clean 61%) | all loops | loop 3 only | loops 1,2 | loop 1 only | actadd, all loops |
-|---|---|---|---|---|---|
-| test set (487 prompts) | 10% | 18.5% | 26% | 49% | 17% (c=−1) |
+| Refusal, ablation in loops | 1 only | 2 only | 3 only | 4 only | 1+2 | 3+4 | all | actadd, all loops | clean |
+|---|---|---|---|---|---|---|---|---|---|
+| Ouro-1.4B | 49% | 28% | 18% | 20% | 26% | 13% | 10% | 17% (c=−1) | 61% |
+| Nanbeige4.2-3B | 53% | 28% | – | – | – | – | 18% | 26% (c=−2) | 78% |
 
-- The later loops carry the effect; loop 1 alone is weak. Selection set, ablation in a single loop: 40 / 18 / 10 / 13%
-  for loops 1 / 2 / 3 / 4. Nanbeige: 48% (loop 1), 22% (loop 2), 12% (both); clean 80%.
-- Actadd behaves like a dose: refusal falls with the number of loops it is added in, and matters less which ones.
-- Using each loop's *own* direction instead of the last loop's is not better (slightly worse, e.g. loop 2 alone 32% vs 18%).
-- Actadd at one loop and one layer (Ouro, c=−2): loop 4 works at layers 4 to 12 (11–17%) and not at layers 16 and 20
-  (36%, 52%); loop 1 is weak at every layer (44–56%); see `docs/figures/loop_layer_map.png`.
+- The later loops carry most of the effect, but no single loop matches all loops; loop 1 alone barely helps. The
+  selection set was optimistic by 5–10 points for single loops.
+- Ablation needs a late loop; actadd behaves like a dose (refusal falls with the number of loops, not which ones).
+- Each loop's *own* direction is not better than the last loop's direction used in every loop.
+- Actadd at one loop and one layer (Ouro, c=−2, selection): loop 4 works at layers 4 to 12 (11–17%), not at 16 and 20
+  (36%, 52%); loop 1 is weak at every layer (44–56%).
 - Norm-aware weight orthogonalization is harmless for a random direction on Ouro (63% refusal, clean 57%) but still
   breaks generation with the refusal direction (99% unclosed CoTs): the inter-loop norm is the main cause.
 
-**Checks.** Over-refusal: on 250 harmless test prompts no intervention raises refusal (0–3% on both looped models).
-Capability: Ouro on MATH-500 scores 80.6% clean, 80.4–81.6% under hook ablation (no loss) and 77.0% under actadd c=−1
-(−3.6 points, fewer closed CoTs; about ±2 points of sampling noise). Nanbeige: 83.0% clean; its interventions and
-AIME 2025 are still running (see `PLAN.md`).
+**Checks.** Over-refusal: on 250 harmless test prompts no intervention raises refusal (0–3%). Capability (accuracy, ±1.7
+points s.e. on MATH-500, ±2.8 on AIME 2025):
 
-**Caveats.** Loop and layer results use the 50 selection prompts (differences below about 4 points are noise) except
-where marked test set; the Ouro test run showed loop 3 alone to be optimistic on the selection set. Mechanism measurements use 8 traces per model. Directions and layers were chosen on 50 selection prompts and
+| | MATH-500 clean | ablation (any loops) | actadd | AIME 2025 clean | ablation | actadd |
+|---|---|---|---|---|---|---|
+| Ouro-1.4B | 80.6% | 80.4–81.6% | 77.0% (c=−1) | 18.8% | 22.9–25.0% | 21.7% |
+| Nanbeige4.2-3B | 83.0% | 82.0–83.8% | 74.2% (c=−2) | 29.6% | 26.7–28.8% | 13.8% |
+
+Ablation costs nothing measurable; actadd costs accuracy (Nanbeige most). AIME at 8192 CoT tokens closes only 24–33%
+of CoTs, so it is a weak test.
+
+**Caveats.** The all-subsets sweep and the loop × layer map use the 50 selection prompts (differences below about 4 points are
+noise). Mechanism measurements use 8 traces per model. Directions and layers were chosen on 50 selection prompts and
 reported on the test set. Sampling is temperature 0.6 with no top-p or top-k, which differs from the models'
 recommended settings (top_p 0.95, top_k 20 for Qwen3 and Nanbeige). CoTs were capped at 8192 tokens; 0–2% of them
 still hit the cap (see Metrics). See the deck for details.

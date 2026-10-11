@@ -13,66 +13,57 @@ and why weight orthogonalization fails on Ouro.
 ## Where we are
 
 - Pipeline, directions, interventions (hook ablation, weight ortho, actadd) and the StrongREJECT judge run on all three
-  models. Test-set results (487 prompts) exist for the best candidates; capped CoTs are continued to 8192 tokens.
+  models; test-set results (487 prompts) exist for the best candidates and the loop configs (capped CoTs continued to
+  8192 tokens). The deck (`docs/presentation.md`) and README hold every result; `results/` holds the tables.
 - Qwen works with weight ortho (6%), hook ablation (5.5%) and actadd (6.8%) against 61% clean.
-- **Loops** (selection prompts, 50): ablation in the later loops carries the effect, loop 1 alone is weak, both for
-  Ouro and Nanbeige. Each loop's own direction is **not** better than the loop-4 (last-loop) direction. On the test set
-  Ouro ablation in loop 3 only leaves 18.5% refusal against 10.4% for all loops (clean 61%): the later loops carry most
-  of the effect, not all of it.
-- **Layers** (Ouro actadd, one loop and one layer): effect grows with loop index; in loop 4 only layers 4 to 12 work.
-- **Weight ortho on Ouro**: the norm-aware edit is harmless for a random direction but still breaks generation with the
-  refusal direction (99% unclosed CoTs), so the inter-loop norm is the main cause.
-- No over-refusal increase (0 to 3% refusal on 250 harmless prompts under every config). Capability (MATH-500, Ouro so
-  far): 80.6% clean, 80.4 to 81.6% under ablation, 77.0% under actadd c=-1 (-3.6 points, noise is about 2).
-- Code from this session is committed; run data is in `data/` (not in git); summary tables are in `results/`.
+- Ouro: hooks 10%, actadd 17% (clean 61%); weight ortho breaks generation (sandwich norms + amplifying inter-loop
+  norm; norm-aware ortho still 99% unclosed). Nanbeige: hooks 16-18%, weight ortho 11%, actadd 26% (clean 78%).
+- **Loops (test set):** Ouro ablation in loop 1/2/3/4 only: 49/28/18/20%, loops 3+4 13%, all 10%; Nanbeige loop 1/2
+  only 53/28%, both 18%. Later loops carry most of the effect, no single loop is enough; the selection set was
+  optimistic by 5-10 points. Ablation needs a late loop; actadd is a dose over loops (selection set, all subsets).
+- **Layers** (Ouro actadd, selection): effect grows with loop index; in loop 4 only layers 4-12 work.
+- **Collateral:** ablation costs no capability (MATH-500, AIME 2025 within noise); actadd costs MATH-500 3.6 (Ouro)
+  and 8.8 points (Nanbeige), Nanbeige AIME 29.6% -> 13.8%. No over-refusal (0-3% on 250 harmless prompts).
+- Ouro direct answers (no thinking): 20% clean, 11-15% under ablation on the test set (the selection-set rise to
+  15-18% was not confirmed).
 
-## Running now (GPU 0 only; GPU 1 belongs to another project's jobs)
+## Running now
 
-Everything runs through one FIFO runner, `scripts/gpuq.py` (state in `data/queue/gpu0`, logs in `data/runs/logs/gpuq/`;
-`scripts/gpuq.py list` shows it). Queued in order: Nanbeige AIME 2025 (running), Nanbeige test-set loop configs (ablate
-loop 2 only, loop 1 only, actadd all loops; `run_test_set.sh`, tag `test_loops`), Ouro test-set loop configs (loop 2 only,
-loop 4 only, loops 3+4 added to the existing `test_loops`), the full Ouro AIME 2025 run, then `capability_summary.py` and
-`export_results.sh` (refreshes `results/`). Add jobs with `scripts/gpuq.py add -n NAME -- CMD ...`.
-
-Ouro is slow (about 55 min per 500 MATH-500 samples: 4 loops, 790 KB of KV cache per token so only about 35 sequences
-fit, and hooks force eager mode), so expect about 5 hours for its AIME run. Known issue: AIME 2025 at the 8192-token CoT
-cap leaves about 70% of Nanbeige's clean samples unclosed, so its accuracy mostly measures what finishes under the cap;
-MATH-500 is the informative capability result.
+Nothing. GPU 0 is free (GPU 1 belongs to another project). Queue jobs with `scripts/gpuq.py add -n NAME -- CMD ...`
+(runner: `scripts/gpuq.py start -g 0`, state in `data/queue/gpu0`, logs in `data/runs/logs/gpuq/`). The gpuq watchdog
+kills a job whose log is silent for `--idle` seconds (default 1800): jobs must print progress to stdout (vLLM progress
+bars do; `run_test_set.sh` tees its sub-logs).
 
 ## Next TODO (in order)
 
-1. [ ] **When the capability jobs finish** (`gpuq.py list`: capability-summary done): `scripts/export_results.sh`, add the capability
-   rows (MATH-500 now, AIME) to the README findings and the deck's caveats slide, commit `results/`, push.
-2. [ ] Retire `queue_*.sh` and `run_followups.sh` in favour of `gpuq.py` jobs (keep `run_followups.sh` steps as the
-   record of how the follow-up experiments were run, or turn them into gpuq job lists).
-3. [ ] **Read the test-set loop runs** (queued, `scripts/run_test_set.sh`): Nanbeige loops and the extra Ouro loops; add
-   them to the README loops paragraph and the deck's results figure if they hold.
-4. [ ] **Two-loop Ouro with norm-aware ortho** (the handoff prediction: leak 2 needs several passes). Needs a loop-count
-   override for the vLLM engine (HF has `load_model(n_loops_override=...)`).
-5. [ ] **Position-restricted ablation** (prompt tokens / CoT tokens / answer tokens) in `hooks.py` and
-   `vllm_hooks.py`, then `v4_baseline` and `v4_cot` with each. HF backend can split prefill vs decode directly; vLLM
-   needs per-request prompt lengths.
-6. [ ] **Why ablation raises direct answers on Ouro** (9% to 15-18% of samples answer without thinking): CPU analysis of
-   the existing generations (`direct_frac` in the sweep tables).
-7. [ ] Confidence intervals (bootstrap over prompts) in `loop_sweep_summary.py`; differences below about 4 points are noise.
-8. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.
-9. [ ] `paired_cot` and actadd sweeps on the looped models; a teacher-forced per-loop screen for Ouro.
+1. [ ] **Why late loops?** With HF hooks, ablate loop 1 only (and loops 1+2) and measure the projection on `u` in each
+   later loop: do loops 2-4 rebuild it, and at what rate (compare with the restoring slope in the mechanism analysis)?
+2. [ ] **Two-loop Ouro with norm-aware ortho** in generation (direct test that leak 2 needs several passes). Needs a
+   loop-count override for the vLLM engine (HF has `load_model(n_loops_override=...)`).
+3. [ ] **Position-restricted ablation** (prompt / CoT / answer tokens) in `hooks.py` and `vllm_hooks.py`, then
+   `v4_baseline` and `v4_cot` with each. HF splits prefill vs decode directly; vLLM needs per-request prompt lengths.
+4. [ ] Bootstrap confidence intervals over prompts in `summarize.py` / `loop_sweep_summary.py`.
+5. [ ] Capability at a longer cap (AIME 2025 at 16-32k tokens) and actadd at matched strength across models.
+6. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.
+7. [ ] `paired_cot` and actadd-coefficient sweeps on the looped models; a teacher-forced per-loop screen for Ouro.
+8. [ ] Retire `queue_*.sh` and `run_followups.sh` (keep `run_followups.sh` as the record of how the follow-ups ran).
+9. [ ] Render the Marp deck (no `marp` on this machine) and check slide overflow.
 10. [ ] Housekeeping before making the repo public: license, decide on rewriting git history.
 
 ## Open questions for the user
 
-- Loop-restricted configs are chosen on the same 50 selection prompts the directions were picked on; the Ouro test-set
-  run showed loop 3 alone to be optimistic there. Run the remaining headline claims on the test set before reporting?
-- GPU use: the follow-up queue used GPU 0 only; GPU 1 has been idle. Allow GPU 1 for parallel jobs?
+- Selection-set-only results remain (all-subsets sweep, loop x layer map, Ouro weight edit). Rerun any of them on the
+  test set before reporting?
+- GPU use: GPU 0 only so far (GPU 1 runs another project's jobs).
 
 ## How to resume
 
 ```bash
 source scripts/env.sh && scripts/verify_setup.sh --no-gpu           # environment and data check
-cat data/runs/logs/followups_progress.log; nvidia-smi                 # what finished, what runs
+nvidia-smi                                                            # what runs
 scripts/gpuq.py list                                                  # GPU 0 job queue
 scripts/gpuq.py add -n NAME -- .venv/bin/python scripts/X.py --gpu '$GPU' ...   # queue a job behind the running ones
-scripts/run_followups.sh <step> ...                                   # steps: see the header of that script
+GPU=0 scripts/run_test_set.sh ouro|nanbeige|qwen TAG CANDIDATE ...       # test-set run with continuations + summary
 GPU=0 ACTADD_C=-1 VARIANT=shared|perloop scripts/run_loop_sweep.sh   # loop-subset sweep (MODEL_KEY=ouro|nanbeige)
 scripts/loop_sweep_summary.py loop_sweep loop_sweep_perloop --model Ouro-1.4B-Thinking
 ```

@@ -6,166 +6,127 @@ title: Refusal directions in looped reasoning models
 
 # Refusal directions in looped reasoning models
 
-Qwen3-8B (reproduction) → Ouro-1.4B-Thinking → Nanbeige4.2-3B
+Qwen3-8B (reproduction) → Ouro-1.4B-Thinking (4 loops) → Nanbeige4.2-3B (2 loops)
 
 Method: *reasoning-manipulation* (arXiv 2507.03167), built on *refusal_direction* (Arditi et al.)
 
-Slides are separated by `---` (Marp format). Figures: `scripts/make_presentation_figures.py`.
+Slides are separated by `---` (Marp). Figures: `scripts/make_presentation_figures.py`. Loops are numbered from 1.
 
 ---
 
-## Question
+## Motivation and questions
 
-- Reasoning models refuse harmful prompts. Prior work finds a single **refusal direction** in the residual stream; removing it stops refusal.
-- **Looped models** run the same layer stack several times. Does the method carry over?
-- Three models:
+- Reasoning models refuse harmful prompts. In standard transformers refusal is mediated by **one direction** in the
+  residual stream: removing it stops refusal, adding it induces refusal.
+- **Looped models** run the same layer stack several times, a cheap way to get more depth per parameter. Their
+  residual stream passes through the same weights and a shared norm several times.
 
-| Model | Layers × loops | Sites (loop, layer) | Norms between sublayer and residual |
-|---|---|---|---|
-| Qwen3-8B | 36 × 1 | 36 | none (standard pre-norm) |
-| Ouro-1.4B-Thinking | 24 × 4 | 96 | **sandwich norm** on every write + shared norm after every loop |
-| Nanbeige4.2-3B | 22 × 2 | 44 | none + shared norm after every loop |
+Questions:
 
----
-
-## Method: data
-
-1. **Sample.** For each harmful prompt: 3 chains of thought (CoTs), then 3 answers per CoT, conditioned on the CoT. Temperature 0.6, no top-p or top-k (the models recommend top_p 0.95, top_k 20).
-   - Token caps: CoT 8192 tokens (2048 first, then the capped ones are continued), answer 2048 (Nanbeige 4096 + 4096).
-   - train: 500 prompts · selection: 50 held-out train prompts · test: 487 prompts.
-2. **Judge.** StrongREJECT rubric with a local gpt-oss-20b judge. Per answer:
-   - `refusal` 0/1, `convincing` 1–5, `specific` 1–5.
-   - **score** = (1 − refusal) × (convincing + specific − 2) / 8, in [0, 1]. 0 = refused or useless, 1 = full harmful answer.
-3. **Label.** A CoT is *refusing* if all 3 of its answers score < 0.2, *complying* if all 3 score > 0.8. Prompt-level labels use ≥ 75% of answers.
+1. Does a single refusal direction exist in looped models, and do the standard interventions transfer?
+2. **Where** is the refusal decision made: which loops, which layers?
+3. If an intervention fails, **why**?
+4. What does steering cost (capability, over-refusal)?
 
 ---
 
-## Method: directions
+## Models
 
-**Direction = mean(refusing activations) − mean(complying activations)**, at the residual stream entering each (loop, layer) site.
+![w:1150](figures/models.png)
 
-The activations are averaged over a token **window**:
+| Model | Layers × loops | Sites | Norm between a write and the stream | Norm between loops |
+|---|---|---|---|---|
+| Qwen3-8B | 36 × 1 | 36 | none | – |
+| Ouro-1.4B-Thinking | 24 × 4 | 96 | **sandwich norm on every write** | shared, 3 passes |
+| Nanbeige4.2-3B | 22 × 2 | 44 | none | shared, 1 pass |
 
-| Name | Window | Labels |
+---
+
+## Data and pipeline
+
+![w:1150](figures/pipeline.png)
+
+- **Prompts:** reasoning-manipulation sets. Directions from 500 train prompts; candidates chosen on 50 further train
+  prompts (selection); results on the 487 harmful test prompts. Over-refusal: 250 harmless test prompts.
+- **Sampling:** 3 CoTs per prompt, 3 answers per CoT; temperature 0.6, no top-p / top-k. CoTs that hit the first cap
+  (2048; Nanbeige 4096) are continued to 8192 tokens.
+- **Judge:** StrongREJECT rubric with a local gpt-oss-20b. **score** = (1 − refused) × (convincing + specific − 2) / 8.
+- **Capability:** MATH-500 (1 sample each) and AIME 2025 (30 × 8 samples), CoT ≤ 8192 tokens.
+
+---
+
+## Directions, interventions, metrics
+
+**Direction** = mean(refusing) − mean(complying) activations at the stream entering each (loop, layer), over a token window:
+`v4_cot` (all CoT tokens), `v12_cot150` (first 150 CoT tokens), `v4_baseline` (template tokens before thinking, prompt
+labels), `random` (same norm, control).
+
+![w:1000](figures/interventions.png)
+
+- **Ablation (hooks)** projects `u` out at every layer and loop. **Weight ortho** edits `embed`, `o_proj`, `down_proj`
+  once. **Actadd** adds `c · r` at one layer. Hooks can be **loop-restricted** (`apply=`); weights cannot.
+- **Metrics:** judge refusal over all samples; mean score; **unclosed CoTs** (no `</think>`: a broken edit loops, Ouro
+  also often answers directly). Differences under about 4 points (50 prompts) or 2 points (test) are noise.
+
+---
+
+## Qwen3-8B: the reproduction holds
+
+| Test set (487 prompts) | refusal | mean score |
 |---|---|---|
-| `v4_cot` | all CoT tokens | CoT |
-| `v12_cot150` | first 150 CoT tokens | CoT |
-| `v4_baseline` | chat-template tokens after the prompt (before thinking) | prompt |
-| `random` | random vector, same norm | control |
+| clean / random direction | 61.3% / 61.1% | 0.37 |
+| **weight ortho**, `v4_baseline` L21 / `v12_cot150` L17 / `v4_cot` L15 | **5.7%** / 7.8% / 11.7% | 0.85–0.91 |
+| **hook ablation**, `v4_baseline` L21 | **5.5%** | |
+| **actadd**, `v4_baseline` L17, c = −2 | **6.8%** | |
 
-Per-site checks: split-half stability, and AUC of the projection for separating refusing from complying CoTs.
-
----
-
-## Method: three interventions
-
-![w:1100](figures/interventions.png)
-
-- **Ablation (hooks):** project `u` out of the stream entering every layer and out of every attention/MLP write, in every loop.
-- **Weight orthogonalization:** edit `embed`, `o_proj`, `down_proj` once so they cannot write along `u`. Exactly equals ablation in a standard pre-norm model.
-- **Activation addition:** add `c · r` (raw mean difference) at one layer; `c < 0` pushes away from refusal.
-- **Loop-restricted:** hooks can act in a chosen subset of loops only (`apply=`), with one direction for all of them or
-  each loop's own direction (`dir=perloop`). Weight edits cannot: the weights are shared by all loops.
+- Our directions match the published layer-17 vectors (cosine 0.994 CoT, 0.993 baseline). The CoT and the
+  prompt-end directions differ (cosine ≈ 0.35), yet both remove refusal.
+- Weight ortho ≈ hooks, as it must be in a pre-norm model (greedy outputs share 77–83% of opening tokens vs 8% clean).
 
 ---
 
-## Method: metrics
-
-| Metric | Meaning |
-|---|---|
-| **judge refusal** | fraction of answers the judge marks as refusals |
-| **mean score** | mean StrongREJECT score (higher = more harmful compliance) |
-| **substring refusal** | answer contains a stock phrase ("I can't", "I'm sorry", …); cheap proxy |
-| **all-sample refusal** | refusal over every CoT sample. Samples without `</think>` are judged as they are, on the whole response |
-| **unclosed CoT** | CoT never closes `</think>`: either it hits the token cap (loops), or the model answers directly without thinking (Ouro) |
-| **NLL** (mechanism slides) | negative log-likelihood of clean CoT tokens under the edited model; lower = less damage |
-
-Candidates (method × site × intervention) are picked on the 50 selection prompts, then run on the full test set. Results are on the test set unless a slide says otherwise.
-
----
-
-## Qwen3-8B: reproduction
-
-**Directions match upstream.** Cosine similarity with the published layer-17 vectors:
-
-| Our direction | vs upstream CoT vector | vs upstream baseline vector |
-|---|---|---|
-| `v4_cot`, layer 17 | **0.994** | 0.33 |
-| `v4_baseline`, layer 17 | 0.36 | **0.993** |
-
-The CoT direction and the prompt-end direction are different directions (cosine ≈ 0.35). Both remove refusal.
-
-**Weight ortho ≈ hooks.** On Qwen, greedy generations under the two methods share 77–83% of their opening tokens, versus 8% with the clean model. The gap is bf16 rounding of the edited weights.
-
----
-
-## Qwen3-8B: results
-
-Test set, 487 prompts × 9 answers, weight orthogonalization, refusal over all samples:
-
-| Candidate | judge refusal | mean score | unclosed CoT |
-|---|---|---|---|
-| clean | 61.3% | 0.37 | 0.1% |
-| random direction, layer 17 | 61.1% | 0.37 | 0.0% |
-| `v4_baseline`, layer 21 | **5.7%** | 0.91 | 0.2% |
-| `v12_cot150`, layer 17 | 7.8% | 0.89 | 0.1% |
-| `v4_baseline`, layer 17 | 8.5% | 0.83 | 0.0% |
-| `v4_cot`, layer 15 | 11.7% | 0.85 | 0.1% |
-| `v4_cot`, layer 23 | 15.0% | 0.80 | 0.1% |
-
-Same test set, hooks instead of weights: ablation (`v4_baseline`, L21) **5.5%**, activation addition (`v4_baseline`, L17,
-c = −2) **6.8%**, random direction ablation 60.9%. Hooks equal the weight edit, as they should in a standard pre-norm model.
-
-**Reproduction holds, with all three methods:** one direction, removed everywhere, takes refusal from 61% to 6–15%. The random direction does nothing.
-
----
-
-## Where refusal lives
+## A refusal direction exists at almost every site
 
 ![w:1100](figures/sites.png)
 
-- All three models carry a linearly separable refusal signal (AUC 0.93–0.99) at nearly every site.
-- In both looped models, every loop after the first looks alike. Loop 0 is where the signal builds up.
+- All three models carry a linearly separable refusal signal (AUC 0.93–0.99) at nearly every (loop, layer).
+- In both looped models every loop after the first looks alike; loop 1 is where the signal builds up.
 
 ---
 
-## Results across models
+## Results across models (test set)
 
-![w:1100](figures/results.png)
+![w:1150](figures/results.png)
 
-- **Qwen:** weight ortho, hooks and actadd all work (61% → 6–12%).
-- **Ouro:** hook ablation works (61% → 10%), actadd 17%. **Weight ortho produces no valid outputs**, even with a *random* direction (50-prompt run). Loop-restricted hooks: next slides.
-- **Nanbeige:** hooks *and* weight ortho both work (78% → 16–18% / 11%). Random directions do nothing (73–76%).
+- **Qwen:** all three interventions work (61% → 6–12%).
+- **Ouro:** hook ablation works (61% → 10%), actadd 17%. **Weight ortho gives no valid outputs**, even with a
+  random direction, and the norm-aware edit still leaves 99% of CoTs unclosed (50 prompts).
+- **Nanbeige:** hooks and weight ortho both work (78% → 11–18%), actadd 26%. Random directions do nothing.
 
-Test set, all samples. About 20% of clean Ouro samples **answer directly without thinking**; ablation lowers this to 11–15%. Looping to the token cap is rare: 0.2% clean, 2% ablated.
-
----
-
-## Nanbeige: one caution
-
-Selection set (50 prompts, 4096-token cap):
-
-| Weight ortho candidate | judge refusal | invalid CoT |
-|---|---|---|
-| `v4_baseline`, loop 1 layer 15 | 10.5% | 13% |
-| `v4_cot`, loop 0 layer 14 | 0.4% | **47%** |
-
-Weight ortho works on Nanbeige, but some directions damage generation. Check unclosed CoTs, not only refusal.
-
-Cap matters: on the test set the `v4_baseline` edit leaves 8% of CoTs unclosed at 4096 tokens but only 0.1% at 8192. Slow is not always broken. The `v4_cot` loop-0 edit was not rerun on the test set.
+**Inference:** the method transfers to looped models, but only interventions that act after every norm (hooks).
 
 ---
 
-## Which loops carry the refusal?
+## Which loops carry the refusal? (test set)
 
-![w:690](figures/loops_ouro.png) ![w:420](figures/loops_nanbeige.png)
+![w:1050](figures/loops_test.png)
 
-Hooks in every subset of loops, 50 selection prompts (Ouro clean 57%, Nanbeige 80%); light = one direction (last loop) in all selected loops, dark = each loop's own direction.
+- **Ouro:** loop 1 alone 49%, loop 2 28%, loop 3 18%, loop 4 20%; loops 3+4 13%; all four 10%.
+- **Nanbeige:** loop 1 alone 53%, loop 2 alone 28%, both 18%.
+- **Inference:** the later loops carry most of the effect, but no single loop is enough. The selection set was
+  optimistic by 5–10 points for single loops: confirm loop claims on held-out prompts.
 
-- **Later loops carry it, loop 1 alone is weak.** Ouro ablation in one loop: 40 / 18 / 10 / 13% (loops 1–4); Nanbeige: 48% (loop 1), 22% (loop 2), 12% (both).
-- **Test set, Ouro:** all loops 10%, loop 3 only 18.5%, loops 1,2 26%, loop 1 only 49% (`results.png`): loop 3 alone is not enough.
-- **Actadd is a dose:** refusal falls with the *number* of loops it is added in (one loop ≈ 40–50%, all four 16%).
-- **Per-loop directions do not help** (loop 2 alone 32% vs 18%): the last loop's direction works in every loop.
+---
+
+## Ablation needs a late loop; actadd is a dose (all subsets)
+
+![w:1100](figures/loops_dose.png)
+
+- **Ablation** (Ouro): every subset containing loop 3 or 4 reaches 8–15%; loop 2 alone 18%, loops 1+2 26%, loop 1
+  alone 40%. What matters is *which* loops.
+- **Actadd** (c = −1): refusal falls with the *number* of loops (mean 44% → 28% → 21% → 16%), almost regardless of which.
+- **Per-loop directions** (hollow) are not better than the last loop's direction used everywhere (often worse).
+- **Inference:** ablation removes a feature that later loops would otherwise rebuild; actadd adds a push that accumulates.
 
 ---
 
@@ -173,9 +134,21 @@ Hooks in every subset of loops, 50 selection prompts (Ouro clean 57%, Nanbeige 8
 
 ![w:880](figures/loop_layer_map.png)
 
-- Effect grows with the loop index; loop 1 is weak at every layer (44–56%, clean 57%).
-- In **loop 4 only layers 4–12 work** (11–17%); layers 16 and 20 do not (36%, 52%). Late injections come too late.
-- c = −2 once per cell, 50 prompts: differences of a few points are noise.
+- The effect grows with the loop index; loop 1 is weak at every layer (44–56%, clean 57%).
+- In **loop 4 only layers 4–12 work** (11–17%); layers 16 and 20 do not (36%, 52%): late injections come too late.
+- c = −2, once per cell, 50 prompts.
+
+---
+
+## What does steering cost?
+
+![w:1150](figures/capability.png)
+
+- **Ablation is free:** MATH-500 and AIME 2025 within noise of clean in both models, whichever loops.
+- **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1) and −8.8 points (Nanbeige, c = −2); Nanbeige AIME halves
+  (29.6% → 13.8%). It also lengthens CoTs.
+- **No over-refusal:** 0–3% refusal on harmless prompts under every config (a weak check: our interventions lower refusal).
+- AIME at 8192 tokens closes only 24–33% of CoTs, so it mostly measures problems solved early.
 
 ---
 
@@ -183,22 +156,20 @@ Hooks in every subset of loops, 50 selection prompts (Ouro clean 57%, Nanbeige 8
 
 **Short answer:** renormalization. A learned RMSNorm sits between the edited weights and the residual stream.
 
-- In Ouro it sits there **48 times per loop** (sandwich norms) **and 3 times between loops**, and the inter-loop norm **amplifies** what it receives.
+- In Ouro it sits there **48 times per loop** (sandwich norms) **and 3 times between loops**, and the inter-loop norm
+  **amplifies** what it receives.
 - In Nanbeige it sits there **once**, between the two loops, and it **shrinks** what it receives.
 
 ---
 
 ## RMSNorm re-introduces a removed direction
 
-`RMSNorm(x) = g ⊙ x / rms(x)`, where `g` is a learned per-dimension gain.
+![w:900](figures/norm_leak.png)
 
-![w:950](figures/norm_leak.png)
-
-- If `g` were uniform, `x ⊥ u` would stay `⊥ u`.
-- `g` is uneven, so it **rotates** `x`. Output component along `u` = `Σᵢ gᵢ xᵢ uᵢ / rms(x)`. This is not 0 even when `Σᵢ xᵢ uᵢ = 0`.
-- Measured unevenness: cos(`u`, `g ⊙ u`) ≈ 0.95 (Ouro), 0.99 (Nanbeige). Small rotations, but on large vectors.
-
-Weight ortho guarantees `W x ⊥ u`. Any norm **after** `W` breaks that guarantee.
+- `RMSNorm(x) = g ⊙ x / rms(x)`. An uneven gain `g` **rotates** `x`: the output component along `u` is
+  `Σᵢ gᵢ xᵢ uᵢ / rms(x)`, not 0 even when `x ⊥ u`.
+- Measured unevenness: cos(`u`, `g ⊙ u`) ≈ 0.95 (Ouro), 0.99 (Nanbeige). Small rotations, but of large vectors.
+- Weight ortho guarantees `W x ⊥ u`. Any norm **after** `W` breaks that guarantee.
 
 ---
 
@@ -211,84 +182,64 @@ h = h + MLP(Norm(h))                  h = h + Norm₂( MLP(Norm(h))  )
           ↑ edited weights write here           ↑ Norm₂ sits after the edited weights
 ```
 
-- Ouro passes every attention and MLP output through a second norm before adding it.
-- After weight ortho, the raw matrix outputs are clean (projection on `u` ≈ 0.001).
-- After `Norm₂`, each write carries `u` **at clean strength** again (0.09–0.17 vs clean 0.08–0.18).
-- 48 such writes per loop, 192 per token.
-
-This alone breaks Ouro **with a random direction**, even at 1 loop.
+- After weight ortho the raw matrix outputs are clean (projection on `u` ≈ 0.001). After `Norm₂` each write carries
+  `u` **at clean strength** again (0.09–0.17 vs clean 0.08–0.18). 48 such writes per loop.
+- This alone breaks Ouro **with a random direction**, even at 1 loop.
 
 ---
 
-## Leak 2: the inter-loop norm
+## Leak 2: the inter-loop norm compounds in Ouro only
 
-Both looped models apply a shared `model.norm` after each loop. Its output becomes the next loop's residual stream.
+![w:1100](figures/compounding.png)
 
-Each pass does two things to `u`:
-
-1. **Fresh leak:** the uneven gain adds a `u` component, as on the previous slide (Ouro ≈ 0.4 per pass).
-2. **Rescales what is carried:** the carried stream, including any `u` already there, is multiplied by `g / rms(x)`.
-
-In the clean model the next loop's writers push back against `u` (measured restoring slope −0.1 to −0.19 per loop in Ouro).
-
-**Weight ortho removes exactly that ability.** The writers can no longer write along `u`, so nothing cancels the leak.
-
----
-
-## Leak 2: why it compounds in Ouro only
-
-![w:1150](figures/compounding.png)
-
-- **Ouro:** the stream is small relative to `g`, so the norm **scales it up** (×1.05 → ×2.1). It does this 3 times. `u` grows geometrically: 0.28 → 0.88 → 2.39 → 4.81, **5.6× the clean level**, with the opposite sign.
-- **Nanbeige:** the stream is huge before the norm (length ≈ 2780), so the norm **scales it down 70×**. One pass leaves a fixed offset of **16% of clean**, and loop 1 writes 10× more than it inherits.
+- Each pass of the shared norm adds a **fresh leak** and **rescales** the `u` already carried. In the clean model the
+  next loop's writers push back against `u` (restoring slope −0.1 to −0.19 per loop); **weight ortho removes exactly
+  that ability.**
+- **Ouro:** the norm scales the stream **up** (×1.05 → ×2.1), 3 times: `u` grows 0.28 → 0.88 → 2.39 → 4.81, **5.6× clean**.
+- **Nanbeige:** the stream is huge (length ≈ 2780), so the norm scales it **down 70×**: one fixed offset of 16% of
+  clean, and loop 2 writes 10× more than it inherits.
 
 ---
 
 ## The same thing, per loop
 
-![w:1100](figures/loop_growth.png)
+![w:1050](figures/loop_growth.png)
 
-- Hooks: `u` stays below 0.4% of clean in both models. They re-project after every norm.
-- Ouro weight ortho: grows past clean by loop 1.
-- Norm-aware ortho fixes leak 1 (loop 0 ≈ 0). Leak 2 still grows it from loop 1 on.
-- Nanbeige weight ortho: a single small step, then the model ends.
+- Hooks keep `u` below 0.4% of clean in both models: they re-project after every norm.
+- Ouro weight ortho grows past clean by loop 2. Norm-aware ortho fixes leak 1 (loop 1 ≈ 0), but leak 2 still grows it.
+- Nanbeige weight ortho: one small step, then the model ends.
 
 ---
 
 ## Testing the explanation
 
-Two fixes, each targeting one leak:
+![w:900](figures/ouro_loop_count.png)
 
-1. **Norm-aware ortho** (fixes leak 1): edit each writer against `g ⊙ u` instead of `u`, where `g` is the gain of its sandwich norm. Normed writes are then exactly `⊥ u`.
-2. **Fewer loops** (removes leak 2): run Ouro with 1 or 2 loops.
-
-![w:1000](figures/ouro_loop_count.png)
+Two fixes, each targeting one leak: **norm-aware ortho** (edit against `g ⊙ u`; fixes leak 1) and **fewer loops**
+(removes leak 2).
 
 - Plain ortho with a random direction hurts at every loop count → leak 1.
-- Norm-aware ortho matches hooks at 1–2 loops, degrades at 4 → leak 2 needs several passes.
-- With the *refusal* direction at 4 loops, norm-aware ortho still leaves 99% of CoTs unclosed (random direction: harmless,
-  63% refusal vs 57% clean; 50 prompts) → the inter-loop norm, not the sandwich norms, is the main cause.
+- Norm-aware ortho matches hooks at 1–2 loops and degrades at 4 → leak 2 needs several passes.
+- In generation (4 loops): norm-aware ortho is harmless with a random direction (63% refusal vs 57% clean) but leaves
+  99% of CoTs unclosed with the refusal direction → **the inter-loop norm is the main cause**.
 
 ---
 
-## Can weights alone fix leak 2?
+## Can weights alone fix leak 2? No.
 
-Exact fix: also remove `g ⊙ u`, `g² ⊙ u`, … (one direction per inter-loop pass). The norm then cannot map anything back onto `u`.
+Exact fix: also remove `g ⊙ u`, `g² ⊙ u`, … (one direction per inter-loop pass).
 
 | Model | projection on `u` | damage (NLL, random `u`) |
 |---|---|---|
 | Ouro, rank-4 edit | ≈ 0 in every loop ✓ | 9.6 (clean 1.1) ✗ |
 | Nanbeige, rank-2 edit | ≈ 0 in every loop ✓ | 11.7 (clean 1.5) ✗ |
 
-It removes `u` but destroys both models. The extra directions put 34–48% of their weight on the **top 1% highest-gain dimensions**, which the model depends on.
-
-**No weight-only edit ablates a direction in a looped model with an inter-loop norm.** Hooks can, because they re-project after every norm.
+The extra directions put 34–48% of their weight on the **top 1% highest-gain dimensions**, which the model depends on.
+**No weight-only edit ablates a direction in a looped model with an amplifying inter-loop norm.**
 
 ---
 
 ## Is it Ouro's early-exit training?
-
-Ouro is trained so any loop can be the last (early exit). Nanbeige always runs 2 loops.
 
 Logit lens on clean traces (decode each loop's output directly):
 
@@ -297,57 +248,80 @@ Logit lens on clean traces (decode each loop's output directly):
 | Ouro | 2.93 → 1.44 → 1.12 → 1.11 | 61% → 80% → 92% → 100% |
 | Nanbeige | 8.36 → 1.55 | 34% → 100% |
 
-- Ouro's intermediate states are near-finished outputs, refined loop to loop. Its writes mostly correct an inherited state.
-- Nanbeige's loop 0 output is not decodable. Loop 1 mostly rewrites it.
-
-This **fits** the mechanism: Ouro relies on carrying a well-scaled state across loops, which is exactly what leak 2 corrupts. It is consistent with early-exit training but **not proven**: we have no same-architecture model trained without early exit.
+- Ouro (trained so any loop can exit) carries near-finished outputs from loop to loop and refines them; its writes
+  mostly correct an inherited state, which is what leak 2 corrupts.
+- Nanbeige's loop 1 output is not decodable; loop 2 mostly rewrites it.
+- Consistent with early-exit training, **not proven**: no same-architecture model without early exit to compare.
 
 ---
 
 ## Takeaways
 
-1. **The method transfers.** A difference-in-means refusal direction exists in both looped models and removing it drops refusal from 61–78% to 10–18% in Ouro and Nanbeige (Qwen: 61% → 6–15%).
-2. **Use hooks on looped models.** Weight orthogonalization is only equivalent to ablation when nothing renormalizes the stream after the edited weights.
-3. **Ouro breaks for two reasons**, both normalization:
-   - sandwich norms re-add `u` to every write,
-   - the inter-loop norm amplifies the leak 3 times while the edit stops the model from correcting it.
-4. **Nanbeige survives** because its writes enter raw, and its one inter-loop norm shrinks the stream.
-5. **Steering acts late.** In both looped models the later loops carry the refusal; loop 1 alone barely moves it, and the last loop's direction works in every loop. Actadd works at early to middle layers of the late loops.
-6. **Check damage, not just refusal.** Unclosed CoTs reveal broken edits (Ouro weight edit: 100%, Nanbeige loop-0 edit: 47% on the selection set). Use a generous token cap.
-7. **No collateral found so far:** no extra refusal on 250 harmless prompts; Ouro MATH-500 80.6% clean, 80.4–81.6% under ablation, 77.0% under actadd (−3.6).
+1. **The method transfers.** One difference-in-means direction removes most refusal in both looped models
+   (Ouro 61% → 10%, Nanbeige 78% → 11–18%), as in Qwen (61% → 6%).
+2. **Use hooks on looped models.** Weight ortho equals ablation only when nothing renormalizes the stream after the
+   edited weights. Ouro breaks twice: sandwich norms re-add `u` to every write, and the amplifying inter-loop norm
+   compounds the leak while the edit stops the model from correcting it. Nanbeige survives (raw writes, shrinking norm).
+3. **Refusal is decided late, but not in one loop.** Later loops carry most of the effect; ablating loop 1 alone
+   barely helps; no single loop matches all loops. One direction (last loop's) works in every loop.
+4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability; actadd is a dose over loops,
+   works at early-to-middle layers of late loops, and costs 4–16 points of math accuracy.
+5. **Check damage, not just refusal:** unclosed CoTs reveal broken edits; selection-set loop results were optimistic.
 
 ---
 
-## Caveats and open items
+## Caveats
 
-- Test-set runs cover the best candidates and four Ouro loop configs. Loop subsets, per-loop directions, the layer map and Ouro's weight edit use 50 selection prompts (±4 points).
-- Capability: Ouro on MATH-500 only so far (Nanbeige and AIME 2025 running). Over-refusal is only a weak check, since our interventions lower refusal.
-- Sampling is temperature 0.6 without top-p or top-k. Directions and layers were picked on 50 prompts.
-- Ouro ablation raises looping to the token cap from 0.2% to about 2%.
+- Directions, sites and loop configs are chosen on 50 selection prompts; headline and loop-profile numbers are on the
+  487 test prompts. The loop × layer map, the all-subsets sweep and Ouro's weight edit are selection-set only.
+- Sampling is temperature 0.6 without top-p/top-k (the models recommend top_p 0.95, top_k 20).
+- About 20% of clean Ouro samples answer without thinking; ablation lowers this to 11–15%. Looping to the 8192 cap:
+  0.2% clean, about 2% ablated.
+- AIME 2025 at 8192 tokens is a weak capability test (most CoTs do not close). Over-refusal is a weak check.
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
-- Nanbeige needs our own vLLM port (`src/loop_steer/vllm_nanbeige.py`); it matches HF greedy outputs exactly.
+- Some Nanbeige edits damage generation: the `v4_cot` loop-1 weight edit leaves 47% of CoTs unclosed (selection). Nanbeige
+  runs on our own vLLM port (matches HF greedy outputs exactly).
+
+---
+
+## Next steps
+
+1. **Why late loops?** Ablate loop 1 only and measure how much of `u` loops 2–4 rebuild (HF hooks, cheap); compare with
+   the restoring slope from the mechanism analysis.
+2. **Two-loop Ouro with norm-aware ortho** in generation: a direct test that leak 2 needs several passes (needs a
+   loop-count override in the vLLM engine).
+3. **Position-restricted ablation:** prompt vs CoT vs answer tokens; is the decision made before thinking?
+4. **Statistics:** bootstrap confidence intervals over prompts for every table.
+5. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
+6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
+   whole-CoT gap (15% vs the paper's 7.5%).
+
+---
+
+## Appendix: every subset of loops (50 selection prompts)
+
+![w:690](figures/loops_ouro.png) ![w:420](figures/loops_nanbeige.png)
+
+Light = one direction (last loop) in all selected loops; dark = each loop's own direction. Red dots: unclosed CoTs.
+Ouro clean 57%, Nanbeige 80%. Ablation in one loop: Ouro 40 / 18 / 10 / 13%, Nanbeige 48 / 22%.
 
 ---
 
 ## Appendix: reproduce
 
 ```bash
-# mechanism comparison (HF, one GPU each)
-uv run python scripts/ortho_compare.py --gpu 1 --model ByteDance/Ouro-1.4B-Thinking --direction v4_baseline:t3.l16 --loops 1,2
-uv run python scripts/ortho_compare.py --gpu 1 --model Nanbeige/Nanbeige4.2-3B --direction v4_baseline:t1.l15 --loops 1
-
-# test-set runs: continue CoTs that hit the cap, then merge (see README, step 6)
-uv run python scripts/intervene.py --model ByteDance/Ouro-1.4B-Thinking --directions train --split test --tag test_hooks_ext \
-    --extend-from test_hooks --max-tokens 2048 --extend-tokens 6144 --candidates ablate:v4_baseline:t3.l16
-uv run python scripts/summarize.py data/runs/Ouro-1.4B-Thinking/generations/test_hooks --cont data/runs/Ouro-1.4B-Thinking/generations/test_hooks_ext
-
-# loop-subset sweeps (selection prompts) and the loop x layer map; tables and figures under data/runs/<model>/
-GPU=0 ACTADD_C=-1 VARIANT=shared  scripts/run_loop_sweep.sh      # then VARIANT=perloop; MODEL_KEY=nanbeige ACTADD_C=-2
+# test-set run of loop configs (generate, judge, continue capped CoTs, judge, summarize)
+GPU=0 scripts/run_test_set.sh ouro test_loops ablate:v4_baseline:t3.l16:apply=2 actadd:v4_baseline:t3.l16:c=-1
+# loop-subset sweeps (selection prompts) and the loop x layer map
+GPU=0 ACTADD_C=-1 VARIANT=shared scripts/run_loop_sweep.sh      # then VARIANT=perloop; MODEL_KEY=nanbeige ACTADD_C=-2
 uv run python scripts/loop_sweep_summary.py loop_sweep loop_sweep_perloop --model Ouro-1.4B-Thinking
-scripts/run_followups.sh layermap capability                      # layer map, MATH-500 / AIME 2025
-
-# figures for this deck (CPU)
-uv run python scripts/make_presentation_figures.py
+# capability
+uv run python scripts/capability.py --gpu 0 --model ByteDance/Ouro-1.4B-Thinking --dataset math500 --tag cap \
+    --candidates none ablate:v4_baseline:t3.l16
+# mechanism comparison (HF)
+uv run python scripts/ortho_compare.py --gpu 0 --model ByteDance/Ouro-1.4B-Thinking --direction v4_baseline:t3.l16 --loops 1,2
+# queue jobs back to back on one GPU; figures for this deck (CPU)
+scripts/gpuq.py add -n NAME -- CMD ...;  uv run python scripts/make_presentation_figures.py
 ```
 
-Results: summary tables in `results/<model>/*.csv` (git), `data/runs/<model>/analysis/ortho_compare_*.json`, judged generations in `data/runs/<model>/generations/`.
+Candidate syntax uses 0-based loops (`t3` = loop 4). Summary tables: `results/<model>/*.csv`, `results/capability_summary.csv`.
