@@ -30,4 +30,4 @@ run $PY scripts/intervene.py --gpu $G --model $MODEL --directions train --split 
     --max-tokens $CAP $EXT --skip-existing --candidates "$@" 2>&1 | tee "$(log ${KEY}_${TAG}_ext.log)" >&3 || echo "continuation step failed"
 judge_dirs $D/${TAG}_ext $D/${TAG}_ext/invalid 2>&1 | tee "$(log judge_${KEY}_${TAG}_ext.log)" >&3
 [ -n "${DRY:-}" ] || mkdir -p data/runs/$RUN/analysis
-run $PY scripts/summarize.py $D/$TAG --max-tokens $CAP --cont $D/${TAG}_ext --csv data/runs/$RUN/analysis/$TAG.csv \ 2>&1 | tee "$(log summary_${KEY}_$TAG.log)" >&3
+run $PY scripts/summarize.py $D/$TAG --max-tokens $CAP --cont $D/${TAG}_ext --csv data/runs/$RUN/analysis/$TAG.csv 2>&1 | tee "$(log summary_${KEY}_$TAG.log)" >&3
