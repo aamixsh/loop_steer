@@ -29,19 +29,26 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
-Nothing. GPU 0 is free (GPU 1 belongs to another project). Queue jobs with `scripts/gpuq.py add -n NAME -- CMD ...`
-(runner: `scripts/gpuq.py start -g 0`, state in `data/queue/gpu0`, logs in `data/runs/logs/gpuq/`). The gpuq watchdog
-kills a job whose log is silent for `--idle` seconds (default 1800): jobs must print progress to stdout (vLLM progress
-bars do; `run_test_set.sh` tees its sub-logs).
+GPU 0 queue (`scripts/gpuq.py list`), selection set, `scripts/run_select.sh`: Ouro with 2 and with 1 loop (tags
+`loops2`, `loops1`: clean, hook ablation, plain and norm-aware weight ortho, refusal and random direction), then
+position-restricted ablation on Ouro and Nanbeige (tag `select_pos`: `v4_baseline` on prompt / cot / answer /
+prompt+cot / cot+answer tokens, `v4_cot` on each class, plus clean and full ablation). Results go to
+`data/runs/<model>/analysis/<tag>.csv`. GPU 1 belongs to another project. The gpuq watchdog kills a job whose log is
+silent for `--idle` seconds (default 1800): jobs must print progress to stdout.
 
 ## Next TODO (in order)
 
-1. [ ] **Why late loops?** With HF hooks, ablate loop 1 only (and loops 1+2) and measure the projection on `u` in each
-   later loop: do loops 2-4 rebuild it, and at what rate (compare with the restoring slope in the mechanism analysis)?
-2. [ ] **Two-loop Ouro with norm-aware ortho** in generation (direct test that leak 2 needs several passes). Needs a
-   loop-count override for the vLLM engine (HF has `load_model(n_loops_override=...)`).
-3. [ ] **Position-restricted ablation** (prompt / CoT / answer tokens) in `hooks.py` and `vllm_hooks.py`, then
-   `v4_baseline` and `v4_cot` with each. HF splits prefill vs decode directly; vLLM needs per-request prompt lengths.
+1. [x] **Why late loops?** `scripts/loop_rebuild.py` (teacher-forced clean traces, separation of refusing vs complying
+   along depth). Later loops rebuild the signal ablated upstream: prompt-end separation in Ouro's last loop is 93% of
+   clean after ablating loop 1 only, 75% after loop 2, 37% after loop 3, 19% after loop 4, 10% after all. Nanbeige:
+   59% after loop 1, 15% after loop 2. This ordering matches test-set refusal. Add to the deck (figure:
+   `data/runs/<model>/figures/loop_rebuild_*.png`).
+2. [ ] **Read the 1- and 2-loop Ouro weight-edit runs** (queued): does norm-aware ortho with the refusal direction give
+   valid CoTs and low refusal at 1-2 loops (as the mechanism predicts) while it breaks at 4? Then deck slide
+   "Testing the explanation".
+3. [ ] **Read the position-restricted runs** (queued, selection set): which token classes carry the effect? Confirm
+   the main ones on the test set (`run_test_set.sh` takes the same candidates). `pos=` is vLLM-only; validated by
+   `scripts/validate_position_gates.py` (exact).
 4. [ ] Bootstrap confidence intervals over prompts in `summarize.py` / `loop_sweep_summary.py`.
 5. [ ] Capability at a longer cap (AIME 2025 at 16-32k tokens) and actadd at matched strength across models.
 6. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.
