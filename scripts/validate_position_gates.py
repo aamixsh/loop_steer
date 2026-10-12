@@ -40,7 +40,7 @@ def main():
 
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, load_prompts
-    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs
+    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs, vllm_model
     from loop_steer.sampling import vllm_generator
 
     tok = load_tokenizer(args.model)
@@ -51,7 +51,7 @@ def main():
     prompts = [format_prompt(tok, p) for p in load_prompts("train")[500: 500 + args.n_prompts]]
 
     prepare_vllm(args.model)
-    llm = LLM(model=args.model, gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
+    llm = LLM(model=vllm_model(args.model), gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
               enable_prefix_caching=False, attention_config={"backend": "TRITON_ATTN"}, **vllm_kwargs(args.model))
     sp = SamplingParams(max_tokens=args.max_tokens, temperature=0, skip_special_tokens=False)
     gen = vllm_generator(llm, sp, tok, gated=True)

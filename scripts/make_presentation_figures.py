@@ -508,6 +508,52 @@ def fig_capability():
     fig.savefig(OUT / "capability.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
+# ---------------------------------------------------------------- 12. MoE: why the edit is still an ablation
+def fig_moe():
+    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+    fig, ax = plt.subplots(figsize=(14, 4.6))
+    ax.set_xlim(0, 14); ax.set_ylim(0, 4.6); ax.axis("off")
+
+    def box(x, y, w, h, text, fc, fs=10, ec="k"):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.04", fc=fc, ec=ec))
+        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=fs)
+
+    def arr(x0, y0, x1, y1, color="k", ls="-"):
+        ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>", mutation_scale=12, color=color, ls=ls,
+                                     lw=1.3))
+
+    ax.plot([0.2, 13.8], [0.55, 0.55], color="#555", lw=6, alpha=0.25, solid_capstyle="round")
+    ax.text(0.25, 0.15, "residual stream h (one vector per token; the direction u lives here)", fontsize=9.5, color="#555")
+    box(0.5, 1.5, 1.4, 0.8, "RMSNorm", "#eee")
+    arr(1.2, 0.6, 1.2, 1.5)
+    box(2.4, 1.5, 1.6, 0.8, "router\ntop-4 of 32", "#fff2cc")
+    arr(1.9, 1.9, 2.4, 1.9)
+    ys = [3.55, 2.75, 1.95, 1.15]
+    for k, y in enumerate(ys):
+        sel = k < 2
+        label = ("selected expert:  W_down · act + b", "selected expert:  W_down · act + b",
+                 "not selected for this token (edited too)", "… 32 experts per layer")[k]
+        box(4.8, y, 3.0, 0.62, label, "#e5f5e0" if sel else "#f4f4f4", fs=9, ec="k" if sel else "#bbb")
+        if sel:
+            arr(4.0, 1.9, 4.8, y + 0.31, color="#2ca02c")
+    ax.text(6.3, 4.35, "edit every expert: W_down ← (I − uuᵀ) W_down,  b ← b − (b·u) u", ha="center", fontsize=9.5,
+            color=C["ortho"])
+    box(8.6, 1.9, 2.0, 0.9, "Σₖ wₖ(h) · expertₖ\n(router weights)", "#e8f0fa", fs=9.5)
+    for y in ys[:2]:
+        arr(7.8, y + 0.31, 8.6, 2.35, color="#2ca02c")
+    arr(10.6, 2.35, 11.3, 0.62)
+    ax.text(11.0, 1.55, "+", fontsize=18, ha="center")
+    ax.text(11.45, 3.2, "every term ⊥ u  ⇒  the sum ⊥ u\nfor any routing: exact ablation", fontsize=10.5,
+            color=C["hook"], weight="bold")
+    ax.text(11.45, 2.2, "traps:\n• biases left unedited keep writing\n  a constant along u\n• MXFP4 re-quantization of the\n"
+            "  edited experts brings u back", fontsize=9, color=C["ortho"], va="top")
+    fig.suptitle("MoE layer (gpt-oss-20b): hooks act on the summed output; the weight edit must cover every expert and "
+                 "every bias", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "moe.png", dpi=150); plt.close(fig)
+
+
 def copy_sweep_figures():
     """Loop-subset sweep and loop x layer map figures (made by scripts/loop_sweep_summary.py and
     scripts/loop_layer_summary.py under data/runs/<model>/figures) -> docs/figures."""
@@ -524,5 +570,5 @@ def copy_sweep_figures():
 if __name__ == "__main__":
     fig_interventions(); fig_norm_leak(); fig_loop_growth(); fig_compounding(); fig_loop_count()
     fig_results(); fig_sites(); copy_sweep_figures()
-    fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability()
+    fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe()
     print("figures ->", OUT)

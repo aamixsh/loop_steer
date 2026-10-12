@@ -9,6 +9,8 @@ QWEN_ID = "Qwen/Qwen3-8B"
 QWEN_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"  # snapshot used for all reported runs
 NANBEIGE_ID = "Nanbeige/Nanbeige4.2-3B"
 NANBEIGE_REVISION = "b82e54bd609793562a75cbf9337970a93369eab5"
+GPT_OSS_ID = "openai/gpt-oss-20b"  # MoE (32 experts, top-4), MXFP4 experts; same snapshot as the judge
+GPT_OSS_REVISION = "6cee5e81ee83917806bbde320786a8fb61efebee"
 
 # Looped models: pinned (revision, loop-count config attribute). Custom code => trust_remote_code.
 LOOPED = {
@@ -19,6 +21,31 @@ LOOPED = {
 
 def is_ouro(model_name: str) -> bool:
     return "ouro" in model_name.lower()
+
+
+def is_gpt_oss(model_name: str) -> bool:
+    return "gpt-oss" in model_name.lower()
+
+
+def gpt_oss_bf16_dir():
+    """Local bf16 copy of gpt-oss-20b (experts dequantized from MXFP4; ``scripts/prepare_gpt_oss_bf16.py``).
+
+    vLLM runs the MXFP4 experts with fused kernels whose packed weights cannot be edited, so every gpt-oss run
+    (clean, hooks, weight edits) uses this copy: the same function, with editable expert weights.
+    """
+    from loop_steer.paths import DATA_ROOT
+
+    return DATA_ROOT / "models" / "gpt-oss-20b-bf16"
+
+
+def vllm_model(model_name: str) -> str:
+    """What to pass as ``vllm.LLM(model=...)``: the bf16 copy for gpt-oss, else the model id (or path) itself."""
+    if model_name == GPT_OSS_ID:
+        path = gpt_oss_bf16_dir()
+        if not (path / "config.json").exists():
+            raise FileNotFoundError(f"{path} missing: run scripts/prepare_gpt_oss_bf16.py first")
+        return str(path)
+    return model_name
 
 
 def is_looped(model_name: str) -> bool:
@@ -35,6 +62,8 @@ def _remote_kwargs(model_name: str) -> dict:
         return {"revision": LOOPED[model_name][0], "trust_remote_code": True}
     if model_name == QWEN_ID:
         return {"revision": QWEN_REVISION}
+    if model_name == GPT_OSS_ID:
+        return {"revision": GPT_OSS_REVISION}
     return {"trust_remote_code": True} if is_ouro(model_name) else {}
 
 
@@ -66,8 +95,14 @@ def load_model(model_name: str, *, device="cuda:0", dtype=torch.bfloat16, n_loop
             attr = LOOPED[model_name][1] if model_name in LOOPED else "total_ut_steps"
             setattr(config, attr, n_loops_override)
         kwargs["config"] = config
+    attn = "sdpa"
+    if is_gpt_oss(model_name):
+        from transformers import Mxfp4Config
+
+        kwargs["quantization_config"] = Mxfp4Config(dequantize=True)  # bf16 experts: editable, same values
+        attn = "eager"  # attention sinks are not supported by sdpa
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=dtype, device_map=device, attn_implementation="sdpa", **kwargs,
+        model_name, dtype=dtype, device_map=device, attn_implementation=attn, **kwargs,
     )
     return model.eval()
 
@@ -103,6 +138,8 @@ def vllm_kwargs(model_name: str) -> dict:
                 "tokenizer_mode": "slow"}  # same SentencePiece tokenizer as the HF path
     if model_name == QWEN_ID:
         return {"revision": QWEN_REVISION, "tokenizer_revision": QWEN_REVISION}
+    if model_name == GPT_OSS_ID:  # weights from the local bf16 copy (vllm_model), tokenizer from the hub snapshot
+        return {"tokenizer": GPT_OSS_ID, "tokenizer_revision": GPT_OSS_REVISION}
     return {}
 
 

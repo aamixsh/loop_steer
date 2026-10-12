@@ -29,12 +29,12 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
-GPU 0 queue (`scripts/gpuq.py list`), selection set, `scripts/run_select.sh`: Ouro with 2 and with 1 loop (tags
-`loops2`, `loops1`: clean, hook ablation, plain and norm-aware weight ortho, refusal and random direction), then
-position-restricted ablation on Ouro and Nanbeige (tag `select_pos`: `v4_baseline` on prompt / cot / answer /
-prompt+cot / cot+answer tokens, `v4_cot` on each class, plus clean and full ablation). Results go to
-`data/runs/<model>/analysis/<tag>.csv`. GPU 1 belongs to another project. The gpuq watchdog kills a job whose log is
-silent for `--idle` seconds (default 1800): jobs must print progress to stdout.
+GPU 0 queue (`scripts/gpuq.py list`): **gpt-oss-20b (MoE)** via `scripts/run_gpt_oss.sh <step>`: `clean` (500 train
+prompts, judged), `directions` (labels, activations, directions, per-site analysis), `validate` (weight edit vs hooks
+with the real `v4_baseline` L15 direction, HF and vLLM; HF vs vLLM hooks), `screen` (50 selection prompts: ablation of
+`v4_cot` / `v4_baseline` at layers 7-21, random, actadd, weight edits with and without biases at upstream's layers 19 /
+15). Runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`, `scripts/prepare_gpt_oss_bf16.py`): vLLM's MXFP4 experts
+cannot be edited. GPU 1 belongs to another project. gpuq kills a job silent for `--idle` seconds (default 1800).
 
 ## Next TODO (in order)
 
@@ -43,12 +43,16 @@ silent for `--idle` seconds (default 1800): jobs must print progress to stdout.
    clean after ablating loop 1 only, 75% after loop 2, 37% after loop 3, 19% after loop 4, 10% after all. Nanbeige:
    59% after loop 1, 15% after loop 2. This ordering matches test-set refusal. Add to the deck (figure:
    `data/runs/<model>/figures/loop_rebuild_*.png`).
-2. [ ] **Read the 1- and 2-loop Ouro weight-edit runs** (queued): does norm-aware ortho with the refusal direction give
-   valid CoTs and low refusal at 1-2 loops (as the mechanism predicts) while it breaks at 4? Then deck slide
-   "Testing the explanation".
-3. [ ] **Read the position-restricted runs** (queued, selection set): which token classes carry the effect? Confirm
-   the main ones on the test set (`run_test_set.sh` takes the same candidates). `pos=` is vLLM-only; validated by
-   `scripts/validate_position_gates.py` (exact).
+2. [x] **1- and 2-loop Ouro weight edits** (selection set, tags `loops2`, `loops1`). 1-loop Ouro does not work even
+   clean (96% unclosed). At 2 loops: plain ortho with a random direction still breaks generation (leak 1); norm-aware
+   ortho with the refusal direction gives 10% refusal like hooks (clean 40%) but 54% unclosed vs 38% for hooks,
+   whereas at 4 loops it leaves 99% unclosed (leak 2 compounds with loops). Add to the deck's "Testing the
+   explanation"; continuing the capped CoTs (2-loop Ouro thinks longer) would sharpen the comparison.
+3. [ ] **Read the position-restricted runs** (done, selection set, tag `select_pos` for Ouro and Nanbeige): which token
+   classes carry the effect? Confirm the main ones on the test set (`run_test_set.sh` takes the same candidates).
+   `pos=` is vLLM-only; validated by `scripts/validate_position_gates.py` (exact).
+3b. [ ] **gpt-oss (MoE)**: read the validation (weight edit with biases = hooks? upstream's edit without biases?),
+   the screen; pick layers; test set; capability. The MoE slide is in the deck (`figures/moe.png`).
 4. [ ] Bootstrap confidence intervals over prompts in `summarize.py` / `loop_sweep_summary.py`.
 5. [ ] Capability at a longer cap (AIME 2025 at 16-32k tokens) and actadd at matched strength across models.
 6. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.

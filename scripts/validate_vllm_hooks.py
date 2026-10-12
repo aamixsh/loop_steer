@@ -38,7 +38,7 @@ def main():
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, load_prompts
     from loop_steer.hooks import ablation_hooks, actadd_hooks, hooked
-    from loop_steer.models import load_model, load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs
+    from loop_steer.models import load_model, load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
 
     loops = None if args.loops is None else [int(x) for x in args.loops.split(",")]
     tok = load_tokenizer(args.model)
@@ -78,10 +78,13 @@ def main():
     with hooked(actadd_hooks(model, vec, args.layer, loops=loops)):
         hf["actadd"] = hf_gen()
     del model
+    import gc
+
+    gc.collect()
     torch.cuda.empty_cache()
 
     as_ids = prepare_vllm(args.model)
-    llm = LLM(model=args.model, gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
+    llm = LLM(model=vllm_model(args.model), gpu_memory_utilization=args.vllm_mem, max_model_len=4096, enforce_eager=True,
               hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
     sp = SamplingParams(max_tokens=args.max_tokens, temperature=0)
     specs = {

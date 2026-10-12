@@ -13,6 +13,8 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
           layer=<l>      actadd at a different layer than the extraction site
           na=1           ortho only: norm-aware weight edit (project g*u, g = gain of the sandwich norm after each
                          writer, instead of u; see loop_steer.ortho). Matters for Ouro.
+          bias=0         ortho only: leave the writers' biases unedited (gpt-oss has biases on o_proj and every
+                         expert; the reasoning-manipulation edit leaves them, so it is not an exact ablation)
           pos=<cls+cls>  ablate / actadd only on tokens of these position classes: prompt (the user turn), cot
                          (thinking, incl. </think>), answer; e.g. pos=prompt, pos=cot+answer. vLLM backend only.
           dir=perloop    take the direction of each loop's own site (loop t, the site's layer) and apply it only in
@@ -42,14 +44,15 @@ import re
 
 def parse_candidate(text):
     if text == "none":
-        return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False, "positions": None}
+        return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False, "positions": None,
+                "biases": True}
     kind, method, site, *opts = text.split(":")
     m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", site)
     if m is None:
         raise ValueError(f"bad site {site!r}")
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
-            "layer": None, "perloop": False, "norm_aware": False, "positions": None}
+            "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True}
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -62,6 +65,8 @@ def parse_candidate(text):
             cand["perloop"] = True
         elif key == "na":
             cand["norm_aware"] = bool(int(val))
+        elif key == "bias":
+            cand["biases"] = bool(int(val))
         elif key == "pos":
             cand["positions"] = val.split("+")
             bad = set(cand["positions"]) - {"prompt", "cot", "answer"}
@@ -157,10 +162,10 @@ def main():
         from vllm import LLM, SamplingParams
 
         from loop_steer import vllm_hooks
-        from loop_steer.models import loop_overrides, prepare_vllm, vllm_kwargs
+        from loop_steer.models import loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
 
         as_ids = prepare_vllm(args.model)
-        llm = LLM(model=args.model, seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
+        llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
                   max_model_len=args.max_model_len, enforce_eager=uses_hooks,
                   hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
 
@@ -172,7 +177,7 @@ def main():
         def prepare(c, vec, specs):
             if weights_dirty[0] or c["kind"] == "ortho":
                 llm.apply_model(functools.partial(orthogonalize_, direction=vec if c["kind"] == "ortho" else None,
-                                                  norm_aware=c["norm_aware"]))
+                                                  norm_aware=c["norm_aware"], biases=c["biases"]))
                 weights_dirty[0] = c["kind"] == "ortho"
             if uses_hooks:
                 llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
@@ -191,7 +196,8 @@ def main():
 
         def prepare(c, vec, specs):
             if weights_dirty[0] or c["kind"] == "ortho":
-                orthogonalize_(model, vec if c["kind"] == "ortho" else None, norm_aware=c["norm_aware"])
+                orthogonalize_(model, vec if c["kind"] == "ortho" else None, norm_aware=c["norm_aware"],
+                               biases=c["biases"])
                 weights_dirty[0] = c["kind"] == "ortho"
             stack = contextlib.ExitStack()
             for spec in specs:

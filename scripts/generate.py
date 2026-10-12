@@ -48,7 +48,7 @@ def main():
     from vllm import LLM, SamplingParams
 
     from loop_steer.cot import load_prompts
-    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs
+    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs, vllm_model
     from loop_steer.sampling import two_stage, vllm_generator
 
     tok_name = args.tokenizer or args.model
@@ -63,9 +63,9 @@ def main():
     tokenizer = load_tokenizer(tok_name)
     as_ids = prepare_vllm(tok_name)
     llm = LLM(
-        model=args.model, tokenizer=tok_name, seed=args.seed,
+        model=vllm_model(args.model), seed=args.seed,
         gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len,
-        **vllm_kwargs(tok_name),
+        **{"tokenizer": tok_name, **vllm_kwargs(tok_name)},
     )
     sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature,
                               top_p=args.top_p, skip_special_tokens=False)

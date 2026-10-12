@@ -123,7 +123,7 @@ def main():
 
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, split_cot, strip_end
-    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs
+    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs, vllm_model
     from loop_steer.ortho import orthogonalize_
 
     cands = [parse_candidate(c) for c in args.candidates]
@@ -141,7 +141,7 @@ def main():
     prompts = [format_prompt(tok, p["question"] + SUFFIX) for p in problems]
 
     as_ids = prepare_vllm(args.model)
-    llm = LLM(model=args.model, seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
+    llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
               max_model_len=args.max_model_len, enforce_eager=uses_hooks, **vllm_kwargs(args.model))
     sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature, n=args.samples,
                               skip_special_tokens=False)
@@ -155,7 +155,8 @@ def main():
         if c["kind"] == "ortho":
             vec = dirs[c["method"]]["dirs"][site_index[c["site"]]]
         if weights_dirty or c["kind"] == "ortho":
-            llm.apply_model(functools.partial(orthogonalize_, direction=vec, norm_aware=c["norm_aware"]))
+            llm.apply_model(functools.partial(orthogonalize_, direction=vec, norm_aware=c["norm_aware"],
+                                              biases=c["biases"]))
             weights_dirty = c["kind"] == "ortho"
         if uses_hooks:
             specs = intervention_specs(c, dirs, site_index) if c["kind"] in ("ablate", "actadd") else []

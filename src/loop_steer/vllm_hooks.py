@@ -2,9 +2,10 @@
 
 Shipped to the worker with ``LLM.apply_model(functools.partial(install, specs=...))``.
 vLLM decoder layers use the fused-residual convention: layer ``l`` is called as
-``layer(positions, hidden_states, [loop_idx,] residual)`` and the residual
-stream entering it is ``hidden_states + residual`` (``residual`` is None for
-the first layer of each pass, where ``hidden_states`` is the full stream).
+``layer(positions, hidden_states, [loop_idx,] residual)`` (gpt-oss: ``layer(hidden_states, positions, residual)``) and
+the residual stream entering it is ``hidden_states + residual`` (``residual`` is None for the first layer of each
+pass, where ``hidden_states`` is the full stream). Residual writes are the outputs of ``self_attn`` and ``mlp``
+(gpt-oss: ``attn`` and ``mlp``, the MoE block: router-weighted sum of the selected experts' outputs).
 
 Spec dicts (tensors may be on CPU):
   {"kind": "actadd", "vec": [D], "layer": l, "coeff": c, "loops": None | [t, ...], "positions": None | [cls, ...]}
@@ -30,6 +31,10 @@ CLASSES = {"prompt": 0, "cot": 1, "answer": 2}
 
 def _is_ouro(model) -> bool:
     return hasattr(model.model.layers[0], "input_layernorm_2")
+
+
+def _is_gpt_oss(model) -> bool:
+    return hasattr(model.model.layers[0], "attn") and not hasattr(model.model.layers[0], "self_attn")
 
 
 def _is_looped(model) -> bool:
@@ -102,6 +107,8 @@ def install(model, specs):
     layers = model.model.layers
     ouro = _is_ouro(model)
     looped = _is_looped(model)
+    gpt_oss = _is_gpt_oss(model)
+    pos_arg = 1 if gpt_oss else 0  # index of the positions argument of a decoder layer
     device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
     state = {"loop": 0, "cls": None, "masks": {}}
     gated = any(s.get("positions") is not None or s["kind"] == "record" for s in specs)
@@ -116,7 +123,7 @@ def install(model, specs):
         def classify(module, args):
             if looped and args[2] != 0:
                 return
-            state["cls"], info = _token_classes(runner, args[0])
+            state["cls"], info = _token_classes(runner, args[pos_arg])
             state["masks"] = {}
             if recording and info is not None:
                 req_ids, req, valid = info
@@ -147,6 +154,9 @@ def install(model, specs):
         return out
 
     def unpack(args):  # -> (hidden, loop, residual, rebuild)
+        if gpt_oss:
+            h, pos, res = args[0], args[1], args[2] if len(args) > 2 else None
+            return h, 0, res, lambda h2, r2: (h2, pos, r2, *args[3:])
         if looped:
             pos, h, loop, res = args[0], args[1], args[2], args[3] if len(args) > 3 else None
             return h, loop, res, lambda h2, r2: (pos, h2, loop, r2, *args[4:])
@@ -204,7 +214,7 @@ def install(model, specs):
                     handles.append(layer.input_layernorm_2.register_forward_hook(post))
                     handles.append(layer.post_attention_layernorm_2.register_forward_hook(post))
                 else:
-                    handles.append(layer.self_attn.register_forward_hook(post))
+                    handles.append((layer.attn if gpt_oss else layer.self_attn).register_forward_hook(post))
                     handles.append(layer.mlp.register_forward_hook(post))
         else:
             raise ValueError(f"unknown intervention kind {spec['kind']!r}")

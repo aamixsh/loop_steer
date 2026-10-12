@@ -65,19 +65,40 @@ labels), `random` (same norm, control).
 
 - **Ablation (hooks)** projects `u` out at every layer and loop. **Weight ortho** edits `embed`, `o_proj`, `down_proj`
   once. **Actadd** adds `c · r` at one layer. Hooks can be **loop-restricted** (`apply=`); weights cannot.
+- **What "layer L" means differs:** for ablation and weight ortho, L is only *where the direction was measured*; it is
+  then removed at **every** layer. For actadd, L is also *where the vector is added* (and nowhere else).
 - **Metrics:** judge refusal over all samples; mean score; **unclosed CoTs** (no `</think>`: a broken edit loops, Ouro
   also often answers directly). Differences under about 4 points (50 prompts) or 2 points (test) are noise.
 
 ---
 
+## Choosing the layer (and why ablation and actadd differ)
+
+Each intervention gets its own screen on the 50 selection prompts; the winner goes to the test set. Rule (as upstream):
+**lowest refusal among candidates that keep CoTs intact** (unclosed CoTs ≲ 10%; a broken model also "stops refusing").
+
+| Qwen3-8B screen | grid | best by refusal alone | chosen |
+|---|---|---|---|
+| weight ortho | 4 windows × layers 11–25 (odd) | `v4_baseline` L19: 0.3%, **23% unclosed** | `v4_baseline` **L21**: 4.0%, 10% unclosed |
+| actadd | 3 windows × L13 / 17 / 21 × c = −1 / −2 | `v4_cot` L17 c=−2: 2.5%, **21% unclosed** | `v4_baseline` **L17**, c=−2: 4.7%, 0.7% unclosed |
+| hook ablation | not screened | – | L21: identical to the weight edit in Qwen |
+
+- Ablation removes `u` everywhere, so its "layer" only picks *which* direction; mid-late directions (L19–21) work best.
+  Actadd injects at one place: at L21 it comes too late and damages (17% unclosed); L17 is early enough to steer the CoT.
+- Ouro (hooks, loop 4, layers 4–20): `v4_cot` gives 0–3% refusal but 40–80% unclosed, so `v4_baseline` L16 (6.6%, 19%).
+- Upstream's Qwen3-8B layers: 23 (CoT) and 17 (end-of-prompt). Our L17 end-of-prompt edit: 8.5% on the test set vs 5.7%
+  for L21. The screen is noisy (50 prompts): neighbouring layers differ by a few points.
+
+---
+
 ## Qwen3-8B: the reproduction holds
 
-| Test set (487 prompts) | refusal | mean score |
-|---|---|---|
-| clean / random direction | 61.3% / 61.1% | 0.37 |
-| **weight ortho**, `v4_baseline` L21 / `v12_cot150` L17 / `v4_cot` L15 | **5.7%** / 7.8% / 11.7% | 0.85–0.91 |
-| **hook ablation**, `v4_baseline` L21 | **5.5%** | |
-| **actadd**, `v4_baseline` L17, c = −2 | **6.8%** | |
+| Test set (487 prompts) | direction measured at | applied at | refusal | mean score |
+|---|---|---|---|---|
+| clean / random direction | – | – | 61.3% / 61.1% | 0.37 |
+| **weight ortho**, `v4_baseline` / `v12_cot150` / `v4_cot` | L21 / L17 / L15 | every layer | **5.7%** / 7.8% / 11.7% | 0.85–0.91 |
+| **hook ablation**, `v4_baseline` | L21 | every layer | **5.5%** | |
+| **actadd**, `v4_baseline`, c = −2 | L17 | L17 only | **6.8%** | |
 
 - Our directions match the published layer-17 vectors (cosine 0.994 CoT, 0.993 baseline). The CoT and the
   prompt-end directions differ (cosine ≈ 0.35), yet both remove refusal.
@@ -281,6 +302,25 @@ Logit lens on clean traces (decode each loop's output directly):
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
 - Some Nanbeige edits damage generation: the `v4_cot` loop-1 weight edit leaves 47% of CoTs unclosed (selection). Nanbeige
   runs on our own vLLM port (matches HF greedy outputs exactly).
+
+---
+
+## MoE models: does the method carry over? (gpt-oss-20b, in progress)
+
+![w:1100](figures/moe.png)
+
+- gpt-oss-20b: 24 pre-norm layers; each MLP is a **router** that sends every token to 4 of 32 experts; the layer adds
+  the router-weighted sum of their outputs. The residual stream is still one vector per token, so the direction is
+  measured and ablated exactly as in a dense model. **Hooks** act on that sum, whatever the routing.
+- **Weight ortho** must edit **all 32 experts** in every layer (any of them can be routed to), plus `o_proj` and the
+  embedding: then every possible sum is ⊥ `u`. The router reads the stream; it changes the same way under hooks.
+- **Biases:** gpt-oss has biases on `o_proj` and on every expert, which write a constant along `u`. Upstream's edit
+  leaves them: with a random `u` it leaves 20% of the clean projection in the stream; editing them too leaves ≈ 0.
+- **MXFP4:** the experts ship as 4-bit blocks. The edit only exists in bf16 (we run a bf16 copy); re-quantizing the
+  edited experts brings back 74% of their write along a random `u`.
+- Upstream (v4) on gpt-oss: refusal 93% → 3.5% (CoT direction, L19) / 7% (end-of-prompt, L15), the latter with 40%
+  incomplete generations. **Running:** clean data and directions, a layer screen (7–21) for both windows, actadd, and
+  weight edits with and without biases.
 
 ---
 

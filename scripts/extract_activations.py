@@ -46,7 +46,8 @@ def main():
     from tqdm import tqdm
 
     from loop_steer.hooks import capture_window_means
-    from loop_steer.models import eoi_length, load_model, load_tokenizer
+    from loop_steer.cot import format_prompt
+    from loop_steer.models import eoi_length, is_gpt_oss, load_model, load_tokenizer
     from loop_steer.models import n_loops as n_loops_of
 
     tok = load_tokenizer(args.model)
@@ -60,10 +61,13 @@ def main():
 
     seqs = []
     for row in df.itertuples():
-        p_ids = tok.apply_chat_template([{"role": "user", "content": row.prompt}],
-                                        add_generation_prompt=True, tokenize=True)
-        if isinstance(p_ids, dict) or hasattr(p_ids, "input_ids"):
-            p_ids = p_ids["input_ids"]
+        if is_gpt_oss(args.model):  # the generation prompt: date-pinned template text (see loop_steer.cot)
+            p_ids = tok(format_prompt(tok, row.prompt), add_special_tokens=False).input_ids
+        else:
+            p_ids = tok.apply_chat_template([{"role": "user", "content": row.prompt}],
+                                            add_generation_prompt=True, tokenize=True)
+            if isinstance(p_ids, dict) or hasattr(p_ids, "input_ids"):
+                p_ids = p_ids["input_ids"]
         c_ids = tok.encode(row.cot, add_special_tokens=False)
         seqs.append((list(p_ids), c_ids))
     df["n_prompt_tokens"] = [len(p) for p, _ in seqs]
