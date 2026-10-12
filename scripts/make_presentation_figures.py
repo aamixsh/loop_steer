@@ -226,74 +226,93 @@ def _test_row(model, run, name, cap, ext=None):
 
 
 def fig_results():
+    """Same five columns in the same order for every model: the best test-set candidate of each intervention."""
     q, o, n = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B"
-    # (label, summary row, kind); all on the 487 test prompts, 3 CoTs x 3 answers, continuations merged
+    cols = [("clean model", "clean"), ("random direction\n(hook ablation)", "random"), ("hook ablation", "hook"),
+            ("weight\northogonalization", "ortho"), ("activation\naddition", "actadd")]
+    # per model: (summary row or None, note under the bar) for each column
     data = {
-        "Qwen3-8B": [
-            ("clean", _test_row(q, "clean_test_8k", "none", 8192), "clean"),
-            ("random u", _test_row(q, "test_ortho", "ortho_random_l17", 2048, "test_ortho_ext"), "random"),
-            ("weights\nv4_baseline\nL21", _test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "ortho"),
-            ("weights\nv12_cot150\nL17", _test_row(q, "test_ortho", "ortho_v12_cot150_l17", 2048, "test_ortho_ext"), "ortho"),
-            ("weights\nv4_cot\nL15", _test_row(q, "test_ortho", "ortho_v4_cot_l15", 2048, "test_ortho_ext"), "ortho"),
-            ("ablate\nv4_baseline\nL21", _test_row(q, "test_hooks", "ablate_v4_baseline_l21", 2048, "test_hooks_ext"), "hook"),
-            ("actadd L17\nc=-2", _test_row(q, "test_hooks", "actadd_v4_baseline_l17_c-2", 2048, "test_hooks_ext"), "actadd")],
-        "Ouro-1.4B (directions from loop 4)": [
-            ("clean", _test_row(o, "clean_test_8k", "none", 8192), "clean"),
-            ("random u", _test_row(o, "test_hooks", "ablate_random_t3.l16", 2048, "test_hooks_ext"), "random"),
-            ("ablate\nL8", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l8", 2048, "test_hooks_ext"), "hook"),
-            ("ablate\nL16", _test_row(o, "test_hooks", "ablate_v4_baseline_t3.l16", 2048, "test_hooks_ext"), "hook"),
-            ("actadd L16\nc=-1", _test_row(o, "test_loops", "actadd_v4_baseline_t3.l16_c-1", 2048, "test_loops_ext"), "actadd"),
-            ("weight edit\n(plain or\nnorm-aware)", None, "ortho")],
-        "Nanbeige4.2-3B": [
-            ("clean", _test_row(n, "clean_test", "none", 4096, "clean_test_ext"), "clean"),
-            ("ablate,\nrandom u", _test_row(n, "test_int", "ablate_random_t0.l14", 4096, "test_int_ext"), "random"),
-            ("weights,\nrandom u", _test_row(n, "test_int", "ortho_random_t0.l14", 4096, "test_int_ext"), "random"),
-            ("ablate\nv4_baseline\nloop 2, L15", _test_row(n, "test_int", "ablate_v4_baseline_t1.l15", 4096, "test_int_ext"), "hook"),
-            ("ablate\nv4_cot\nloop 1, L14", _test_row(n, "test_int", "ablate_v4_cot_t0.l14", 4096, "test_int_ext"), "hook"),
-            ("weight edit\nv4_baseline", _test_row(n, "test_int", "ortho_v4_baseline_t1.l15", 4096, "test_int_ext"), "ortho"),
-            ("actadd L15\nc=-2", _test_row(n, "test_loops", "actadd_v4_baseline_t1.l15_c-2", 4096, "test_loops_ext"), "actadd")],
+        "Qwen3-8B  (36 layers)": [
+            (_test_row(q, "clean_test_8k", "none", 8192), ""),
+            (_test_row(q, "test_hooks", "ablate_random_l17", 2048, "test_hooks_ext"), "same norm as u"),
+            (_test_row(q, "test_hooks", "ablate_v4_baseline_l21", 2048, "test_hooks_ext"), "u from L21"),
+            (_test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "u from L21"),
+            (_test_row(q, "test_hooks", "actadd_v4_baseline_l17_c-2", 2048, "test_hooks_ext"), "added at L17, c=−2")],
+        "Ouro-1.4B  (24 layers × 4 loops)": [
+            (_test_row(o, "clean_test_8k", "none", 8192), ""),
+            (_test_row(o, "test_hooks", "ablate_random_t3.l16", 2048, "test_hooks_ext"), "same norm as u"),
+            (_test_row(o, "test_hooks", "ablate_v4_baseline_t3.l16", 2048, "test_hooks_ext"), "u from loop 4, L16"),
+            (None, "no valid outputs\n(50 prompts)"),
+            (_test_row(o, "test_loops", "actadd_v4_baseline_t3.l16_c-1", 2048, "test_loops_ext"),
+             "added at L16 of\nevery loop, c=−1")],
+        "Nanbeige4.2-3B  (22 layers × 2 loops)": [
+            (_test_row(n, "clean_test", "none", 4096, "clean_test_ext"), ""),
+            (_test_row(n, "test_int", "ablate_random_t0.l14", 4096, "test_int_ext"), "same norm as u"),
+            (_test_row(n, "test_int", "ablate_v4_baseline_t1.l15", 4096, "test_int_ext"), "u from loop 2, L15"),
+            (_test_row(n, "test_int", "ortho_v4_baseline_t1.l15", 4096, "test_int_ext"), "u from loop 2, L15"),
+            (_test_row(n, "test_loops", "actadd_v4_baseline_t1.l15_c-2", 4096, "test_loops_ext"),
+             "added at L15 of\nboth loops, c=−2")],
     }
-    fig, axes = plt.subplots(1, 3, figsize=(19, 4.8), gridspec_kw={"width_ratios": [7, 6, 7]}, sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), sharey=True)
+    x = np.arange(len(cols))
     for ax, (model, rows) in zip(axes, data.items()):
-        x = np.arange(len(rows))
-        ref = [np.nan if r is None else 100 * r["all_refusal"] for _, r, _ in rows]
-        ax.bar(x, np.nan_to_num(ref), color=[C[k] for _, _, k in rows])
-        for i, (_, r, _) in enumerate(rows):
+        for i, ((_, kind), (r, note)) in enumerate(zip(cols, rows)):
             if r is None:
-                ax.text(i, 3, "no valid\noutputs\n(50 prompts)", ha="center", color=C["ortho"], fontsize=9)
+                ax.text(i, 4, note, ha="center", color=C["ortho"], fontsize=9)
                 continue
-            ax.text(i, ref[i] + 1.5, f"{ref[i]:.0f}%", ha="center", fontsize=10)
-            ax.text(i, -27, f"unclosed\n{100 * r['invalid_cot_frac']:.0f}%", ha="center", fontsize=8, color="#555")
-        ax.set_xticks(x); ax.set_xticklabels([lab for lab, _, _ in rows], fontsize=9)
-        ax.set_title(model); ax.set_ylim(0, 95)
-    axes[0].set_ylabel("judge refusal rate, all samples (%)")
-    fig.suptitle("Refusal on the 487 test prompts (3 CoTs x 3 answers, StrongREJECT judge). "
-                 "Red = weight edit, blue = hook ablation, green = actadd. 'unclosed' = no </think> (Ouro mostly answers directly)", fontsize=11)
+            v = 100 * r["all_refusal"]
+            ax.bar(i, v, color=C[kind], width=0.72)
+            ax.text(i, v + 1.5, f"{v:.0f}%", ha="center", fontsize=11, weight="bold")
+            if note:
+                ax.text(i, v + 7.5, note, ha="center", fontsize=7.8, color="#444")
+        ax.set_xticks(x); ax.set_xticklabels([c for c, _ in cols], fontsize=9)
+        ax.set_title(model, fontsize=11); ax.set_ylim(0, 100)
+    axes[0].set_ylabel("refusal rate (%)")
+    fig.suptitle("Refusal on 487 held-out harmful prompts. Per prompt 3 sampled CoTs, per CoT 3 sampled answers; a CoT counts "
+                 "as the share of its answers the judge marks as refusals\n(a CoT that never closes is judged on its raw "
+                 "text); the bar is the mean over all 1,461 CoTs. u = the refusal direction, measured at the layer named",
+                 fontsize=10.5)
     fig.tight_layout()
     fig.savefig(OUT / "results.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
 # ---------------------------------------------------------------- 6. where the direction lives
 def fig_sites():
-    models = [("Qwen3-8B", "Qwen3-8B"), ("Ouro-1.4B-Thinking", "Ouro-1.4B (4 loops)"),
-              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (2 loops)")]
-    fig, axes = plt.subplots(1, 3, figsize=(14, 3.8), sharey=True)
-    cmap = plt.get_cmap("viridis")
-    for ax, (m, title) in zip(axes, models):
-        a = pd.read_csv(RUNS / m / "analysis" / "v4_cot_sites.csv")
-        if "loop" not in a:
-            a["loop"] = 0
-        T = a.loop.max() + 1
-        for t in range(T):
-            s = a[a.loop == t].sort_values("layer")
-            ax.plot(s.layer, s.auc, marker=".", color=cmap(t / max(T - 1, 1)) if T > 1 else "k",
-                    label=f"loop {t + 1}" if T > 1 else None)
-        ax.set_title(title); ax.set_xlabel("layer")
-        if T > 1:
-            ax.legend(fontsize=9)
-    axes[0].set_ylabel("AUC: refusing vs complying CoTs\n(projection on direction)")
-    fig.suptitle("Whole-CoT direction separates refusing from complying CoTs at almost every site", fontsize=11)
-    fig.tight_layout()
+    """Held-out AUC of the refusal direction at every site, for both windows, against a random direction."""
+    models = [("Qwen3-8B", "Qwen3-8B (36 layers)"), ("Ouro-1.4B-Thinking", "Ouro-1.4B (24 layers × 4 loops)"),
+              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (22 layers × 2 loops)")]
+    windows = [("v4_cot", "CoT direction: activations averaged over all CoT tokens, CoT labels", "CoTs"),
+               ("v4_baseline", "Prompt-end direction: activations averaged over the template tokens before thinking, "
+                               "prompt labels", "prompts")]
+    fig, axes = plt.subplots(2, 3, figsize=(17, 7.4), sharey=True, gridspec_kw={"width_ratios": [36, 96, 44]})
+    for i, (meth, wtitle, unit) in enumerate(windows):
+        for j, (m, title) in enumerate(models):
+            ax = axes[i, j]
+            a = pd.read_csv(RUNS / m / "analysis" / f"{meth}_sites.csv")
+            L = a.layer.max() + 1
+            a["x"] = a.loop * L + a.layer
+            a = a.sort_values("x")
+            T = a.loop.max() + 1
+            for t in range(T):
+                if t % 2:
+                    ax.axvspan(t * L - 0.5, (t + 1) * L - 0.5, color="#f2f2f2", zorder=0)
+                if T > 1:
+                    ax.text(t * L + L / 2, 0.42, f"loop {t + 1}", ha="center", fontsize=9, color="#666")
+            ax.plot(a.x, a.auc, color=C["hook"], lw=1.8, label="refusal direction")
+            ax.plot(a.x, a.auc_random, color="#999", lw=1.0, label="random direction (chance reference)")
+            ax.axhline(0.5, color="#ccc", lw=0.8, ls=":")
+            ax.set_ylim(0.38, 1.02); ax.set_xlim(-0.5, T * L - 0.5)
+            ax.set_xlabel("layer (loop by loop)" if T > 1 else "layer")
+            ax.set_title(f"{title}\nn = {a.n_ref.iloc[0]} refusing / {a.n_non.iloc[0]} complying {unit}", fontsize=9.5)
+        axes[i, 0].set_ylabel("held-out AUC")
+
+    axes[0, 0].legend(fontsize=8.5, loc="lower right")
+    fig.suptitle("Is refusal linearly readable at each site? Direction from half of the training prompts, AUC of the "
+                 "projection on the other half (1 = perfect separation, 0.5 = chance)", fontsize=11)
+    fig.subplots_adjust(left=0.05, right=0.99, top=0.83, bottom=0.08, hspace=0.75, wspace=0.06)
+    for i, (_, wtitle, _) in enumerate(windows):
+        pos = axes[i, 0].get_position()
+        fig.text(pos.x0, pos.y1 + 0.085, f"{'AB'[i]}. {wtitle}", fontsize=11, weight="bold")
     fig.savefig(OUT / "sites.png", dpi=150); plt.close(fig)
 
 

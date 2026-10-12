@@ -106,12 +106,35 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 
 ---
 
-## A refusal direction exists at almost every site
+## How we measure where refusal is readable
 
-![w:1100](figures/sites.png)
+A **site** is one place in the residual stream: the vector entering decoder layer *l* during loop *t*. Qwen has 36 sites,
+Ouro 24 layers × 4 loops = 96, Nanbeige 22 × 2 = 44 (see the model figure). At every site:
 
-- All three models carry a linearly separable refusal signal (AUC 0.93–0.99) at nearly every (loop, layer).
-- In both looped models every loop after the first looks alike; loop 1 is where the signal builds up.
+1. **Average** the residual stream of each training example over a token window: the **CoT window** (all thinking
+   tokens) or the **prompt-end window** (the template tokens between the user message and the start of thinking).
+2. **Label** examples refusing or complying from the judged answers (a CoT: all 3 answers score < 0.2 / > 0.8; a
+   prompt: ≥ 75% of its answers).
+3. **Split** the training prompts into halves A and B. Direction from A: mean(refusing) − mean(complying).
+4. **Score** on B: project every B example onto the direction; **AUC** = probability that a random refusing example
+   projects higher than a random complying one (1 = perfect separation, 0.5 = chance).
+5. **Reference:** the same AUC for a random unit direction.
+
+"Linearly separable" here means: one direction, fixed on half the data, tells refusing from complying examples apart on
+the other half. It measures **readability**, not cause; the ablations test cause.
+
+---
+
+## Refusal is readable at almost every site
+
+![w:1150](figures/sites.png)
+
+- **A. CoT window:** AUC 0.93–0.99 at every site of all three models; random directions reach 0.6–0.7 typically, up to
+  0.97 at a few sites (refusing and complying CoTs differ in content, so even random directions sometimes separate them).
+- **B. Prompt-end window, before any thinking:** refusal is already readable (AUC 0.93–0.97 after the first 12–20
+  layers). In the looped models it rises through loop 1–2 and stays flat afterwards.
+- So a single direction carries the refusal signal everywhere, and the model's decision is largely readable before the
+  CoT starts. Layer 0 of the prompt-end window is undefined (identical template tokens for every prompt).
 
 ---
 
@@ -119,12 +142,20 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 
 ![w:1150](figures/results.png)
 
-- **Qwen:** all three interventions work (61% → 6–12%).
-- **Ouro:** hook ablation works (61% → 10%), actadd 17%. **Weight ortho gives no valid outputs**, even with a
-  random direction, and the norm-aware edit still leaves 99% of CoTs unclosed (50 prompts).
-- **Nanbeige:** hooks and weight ortho both work (78% → 11–18%), actadd 26%. Random directions do nothing.
+**What a bar is:** 487 held-out harmful prompts × 3 sampled CoTs = 1,461 CoTs, each followed by 3 sampled answers. A CoT
+scores the share of its answers the judge marks as refusals (a CoT that never closes is judged once on its raw text);
+the bar is the mean over all 1,461 CoTs, so every prompt weighs the same.
 
-**Inference:** the method transfers to looped models, but only interventions that act after every norm (hooks).
+**Columns** (same order for every model): clean model · a **random direction** of the same norm ablated with hooks
+(control: removing just any direction should not stop refusal) · **hook ablation** of the refusal direction `u` ·
+**weight orthogonalization** with `u` · **activation addition** of −`c`·`r` at one layer. `u` is the selection winner;
+"u from loop 4, L16" means it was measured at layer 16 during Ouro's 4th loop and is then removed at every layer of
+every loop.
+
+- **Qwen:** all three interventions work (61% → 6–7%). **Ouro:** hooks 10%, actadd 17%; the weight edit gives no valid
+  outputs (50 prompts, so not run on the test set). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. Random
+  directions change nothing (Nanbeige weight edit with a random direction: 73%).
+- **Inference:** the method transfers to looped models, but only interventions that act after every norm (hooks).
 
 ---
 
@@ -314,13 +345,15 @@ Logit lens on clean traces (decode each loop's output directly):
   measured and ablated exactly as in a dense model. **Hooks** act on that sum, whatever the routing.
 - **Weight ortho** must edit **all 32 experts** in every layer (any of them can be routed to), plus `o_proj` and the
   embedding: then every possible sum is ⊥ `u`. The router reads the stream; it changes the same way under hooks.
-- **Biases:** gpt-oss has biases on `o_proj` and on every expert, which write a constant along `u`. Upstream's edit
-  leaves them: with a random `u` it leaves 20% of the clean projection in the stream; editing them too leaves ≈ 0.
+- **Biases:** gpt-oss has biases on `o_proj` and on every expert (up to 54 along `u`), which write a constant along
+  `u`. With the refusal direction (end-of-prompt, L15), upstream's edit leaves 6% of the clean projection in the stream;
+  editing the biases too leaves 0.2%, as hooks do. Log-probs: weight edit vs hooks 0.13 (bf16 noise; clean vs hooks
+  0.87), upstream edit vs hooks 0.19. The in-place edit gives the same numbers in vLLM.
 - **MXFP4:** the experts ship as 4-bit blocks. The edit only exists in bf16 (we run a bf16 copy); re-quantizing the
-  edited experts brings back 74% of their write along a random `u`.
+  edited experts brings back 63% of their write along `u`.
 - Upstream (v4) on gpt-oss: refusal 93% → 3.5% (CoT direction, L19) / 7% (end-of-prompt, L15), the latter with 40%
-  incomplete generations. **Running:** clean data and directions, a layer screen (7–21) for both windows, actadd, and
-  weight edits with and without biases.
+  incomplete generations. Ours so far: clean refusal 91% (500 train prompts); 1,359 refusing vs 128 complying CoTs.
+  **Running:** layer screen (7–21) for both windows, actadd, weight edits with and without biases.
 
 ---
 

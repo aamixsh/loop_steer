@@ -6,6 +6,8 @@ Splits labeled examples by prompt into two halves A/B. For every (loop, layer):
   splithalf   cosine(dir_A, dir_B)                       -- stability
   auc         AUC of projection onto dir_A, evaluated on B -- held-out separability
   dprime      (mu_ref - mu_non) / pooled sd of projections on B
+  auc_random  AUC of the projection onto a random unit direction (same split): the chance reference. Activations carry
+              many features, so a random direction can separate a little; the refusal direction should do far better
 Also plots cosine similarity of the full-data direction across all sites.
 Writes ``analysis/<method>_sites.csv`` and ``figures/<method>_*.png`` under the run dir.
 """
@@ -25,10 +27,10 @@ LABEL_WINDOW = {
 
 
 def auc(pos, neg):
-    """Mann-Whitney AUC: P(score(pos) > score(neg))."""
-    s = np.concatenate([pos, neg])
-    ranks = s.argsort().argsort() + 1
-    return (ranks[: len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+    """Mann-Whitney AUC: P(score(pos) > score(neg)), ties counted 1/2 (identical inputs, e.g. the template tokens at
+    layer 0, give 0.5 rather than an arbitrary value)."""
+    d = pos[:, None] - neg[None, :]
+    return float((d > 0).mean() + 0.5 * (d == 0).mean())
 
 
 def main():
@@ -61,6 +63,10 @@ def main():
     dir_a, dir_b = mean_diff(idx[in_a], y[in_a]), mean_diff(idx[~in_a], y[~in_a])
     unit_a = dir_a / dir_a.norm(dim=-1, keepdim=True)
     proj_b = torch.einsum("nsd,sd->ns", X[idx[~in_a]], unit_a).numpy()  # [N_B, S]
+    g = torch.Generator().manual_seed(args.seed)
+    rnd = torch.randn(X.shape[1], X.shape[2], generator=g)
+    rnd = rnd / rnd.norm(dim=-1, keepdim=True)
+    proj_r = torch.einsum("nsd,sd->ns", X[idx[~in_a]], rnd).numpy()
     yb = y[~in_a]
 
     rows = []
@@ -70,7 +76,11 @@ def main():
         rows.append({
             "loop": loop, "layer": layer, "norm": float(full[s].norm()),
             "splithalf": float(torch.nn.functional.cosine_similarity(dir_a[s], dir_b[s], dim=0)),
-            "auc": auc(pr, pn), "dprime": (pr.mean() - pn.mean()) / pooled,
+            # no direction where the window's inputs are identical for every example (template tokens at layer 0)
+            "auc": auc(pr, pn) if float(dir_a[s].norm()) > 1e-4 else float("nan"),
+            "dprime": (pr.mean() - pn.mean()) / pooled,
+            "auc_random": max(a := auc(proj_r[yb, s], proj_r[~yb, s]), 1 - a),  # sign of a random direction is arbitrary
+            "n_ref": int(y.sum()), "n_non": int((~y).sum()),
         })
     table = pd.DataFrame(rows)
     (rd / "analysis").mkdir(exist_ok=True)
