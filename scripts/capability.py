@@ -165,8 +165,10 @@ def main():
         rows = []
         for prob, req in zip(problems, llm.generate(inputs, sampling)):
             for k, o in enumerate(req.outputs):
-                response = strip_end(o.text)
-                cot, answer, closed = split_cot(response)
+                # split before cutting at the end token: gpt-oss closes its analysis channel with <|end|> too
+                cot, answer, closed = split_cot(o.text)
+                answer = strip_end(answer)
+                response = cot + answer if closed else strip_end(o.text)
                 pred = last_boxed(answer) if closed else None
                 rows.append({"problem_id": prob["id"], "sample": k, "truth": prob["answer"], "pred": pred,
                              "correct": is_correct(pred, prob["answer"]), "closed": closed,

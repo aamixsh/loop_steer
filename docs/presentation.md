@@ -6,7 +6,7 @@ title: Refusal directions in looped reasoning models
 
 # Refusal directions in looped reasoning models
 
-Qwen3-8B (reproduction) → Ouro-1.4B-Thinking (4 loops) → Nanbeige4.2-3B (2 loops)
+Qwen3-8B (reproduction) → Ouro-1.4B-Thinking (4 loops) → Nanbeige4.2-3B (2 loops) → gpt-oss-20b (MoE)
 
 Method: *reasoning-manipulation* (arXiv 2507.03167), built on *refusal_direction* (Arditi et al.)
 
@@ -39,6 +39,7 @@ Questions:
 | Qwen3-8B | 36 × 1 | 36 | none | – |
 | Ouro-1.4B-Thinking | 24 × 4 | 96 | **sandwich norm on every write** | shared, 3 passes |
 | Nanbeige4.2-3B | 22 × 2 | 44 | none | shared, 1 pass |
+| gpt-oss-20b (MoE: 4 of 32 experts per token) | 24 × 1 | 24 | none (biases on `o_proj` and experts) | – |
 
 ---
 
@@ -49,8 +50,9 @@ Questions:
 - **Prompts:** reasoning-manipulation sets. Directions from 500 train prompts; candidates chosen on 50 further train
   prompts (selection); results on the 487 harmful test prompts. Over-refusal: 250 harmless test prompts.
 - **Sampling:** 3 CoTs per prompt, 3 answers per CoT; temperature 0.6, no top-p / top-k. CoTs that hit the first cap
-  (2048; Nanbeige 4096) are continued to 8192 tokens.
+  (2048; Nanbeige and gpt-oss 4096) are continued to 8192 tokens.
 - **Judge:** StrongREJECT rubric with a local gpt-oss-20b. **score** = (1 − refused) × (convincing + specific − 2) / 8.
+  On gpt-oss it judges its own outputs; a refusal-phrase check agrees (clean 92% vs 92%, ablated 1–2% vs 2%).
 - **Capability:** MATH-500 (1 sample each) and AIME 2025 (30 × 8 samples), CoT ≤ 8192 tokens.
 
 ---
@@ -86,6 +88,8 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 - Ablation removes `u` everywhere, so its "layer" only picks *which* direction; mid-late directions (L19–21) work best.
   Actadd injects at one place: at L21 it comes too late and damages (17% unclosed); L17 is early enough to steer the CoT.
 - Ouro (hooks, loop 4, layers 4–20): `v4_cot` gives 0–3% refusal but 40–80% unclosed, so `v4_baseline` L16 (6.6%, 19%).
+- gpt-oss (layers 7–21): end-of-prompt L15 / L17 give 3.8% / 4.2% refusal with 4% unclosed; the CoT direction leaves
+  37–100% unclosed at L7–19. Actadd: L13, c=−2 (17%, 6% unclosed).
 - Upstream's Qwen3-8B layers: 23 (CoT) and 17 (end-of-prompt). Our L17 end-of-prompt edit: 8.5% on the test set vs 5.7%
   for L21. The screen is noisy (50 prompts): neighbouring layers differ by a few points.
 
@@ -109,7 +113,7 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 ## How we measure where refusal is readable
 
 A **site** is one place in the residual stream: the vector entering decoder layer *l* during loop *t*. Qwen has 36 sites,
-Ouro 24 layers × 4 loops = 96, Nanbeige 22 × 2 = 44 (see the model figure). At every site:
+Ouro 24 layers × 4 loops = 96, Nanbeige 22 × 2 = 44, gpt-oss 24 (see the model table). At every site:
 
 1. **Average** the residual stream of each training example over a token window: the **CoT window** (all thinking
    tokens) or the **prompt-end window** (the template tokens between the user message and the start of thinking).
@@ -129,12 +133,14 @@ the other half. It measures **readability**, not cause; the ablations test cause
 
 ![w:1150](figures/sites.png)
 
-- **A. CoT window:** AUC 0.93–0.99 at every site of all three models; random directions reach 0.6–0.7 typically, up to
-  0.97 at a few sites (refusing and complying CoTs differ in content, so even random directions sometimes separate them).
+- **A. CoT window:** AUC 0.93–1.00 at every site of all four models; random directions reach 0.6–0.7 typically, up to
+  0.97–0.99 at a few sites (refusing and complying CoTs differ in content, so even random directions sometimes separate
+  them). So this window says little about *where*; on gpt-oss it is ≈ 1.0 everywhere.
 - **B. Prompt-end window, before any thinking:** refusal is already readable (AUC 0.93–0.97 after the first 12–20
-  layers). In the looped models it rises through loop 1–2 and stays flat afterwards.
+  layers). In the looped models it rises through loop 1–2 and stays flat afterwards. In gpt-oss it peaks at L12–18
+  (0.96) and falls to 0.88 at the last layer; ablation works exactly at the peak (L15–17, next slides).
 - So a single direction carries the refusal signal everywhere, and the model's decision is largely readable before the
-  CoT starts. Layer 0 of the prompt-end window is undefined (identical template tokens for every prompt).
+  CoT starts. Layer 0 of the prompt-end window is undefined or at chance (identical template tokens for every prompt).
 
 ---
 
@@ -153,9 +159,11 @@ the bar is the mean over all 1,461 CoTs, so every prompt weighs the same.
 every loop.
 
 - **Qwen:** all three interventions work (61% → 6–7%). **Ouro:** hooks 10%, actadd 17%; the weight edit gives no valid
-  outputs (50 prompts, so not run on the test set). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. Random
-  directions change nothing (Nanbeige weight edit with a random direction: 73%).
-- **Inference:** the method transfers to looped models, but only interventions that act after every norm (hooks).
+  outputs (50 prompts, so not run on the test set). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. **gpt-oss:**
+  hooks and weight edit 2% (from 92%), actadd 15%. Random directions change nothing (Nanbeige weight edit with a random
+  direction: 73%).
+- **Inference:** the method transfers to looped and to MoE models; in looped models only interventions that act after
+  every norm (hooks) are safe.
 
 ---
 
@@ -318,7 +326,9 @@ Logit lens on clean traces (decode each loop's output directly):
    barely helps; no single loop matches all loops. One direction (last loop's) works in every loop.
 4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability; actadd is a dose over loops,
    works at early-to-middle layers of late loops, and costs 4–16 points of math accuracy.
-5. **Check damage, not just refusal:** unclosed CoTs reveal broken edits; selection-set loop results were optimistic.
+5. **MoE models too.** gpt-oss-20b: 92% → 2% with hooks or with a weight edit of all 32 experts per layer. The
+   experts' biases matter for an exact ablation, not for behaviour. Its CoT-window and early directions break it.
+6. **Check damage, not just refusal:** unclosed CoTs reveal broken edits; selection-set loop results were optimistic.
 
 ---
 
@@ -330,13 +340,15 @@ Logit lens on clean traces (decode each loop's output directly):
 - About 20% of clean Ouro samples answer without thinking; ablation lowers this to 11–15%. Looping to the 8192 cap:
   0.2% clean, about 2% ablated.
 - AIME 2025 at 8192 tokens is a weak capability test (most CoTs do not close). Over-refusal is a weak check.
+- gpt-oss is judged by gpt-oss-20b itself (refusal-phrase check agrees); its weight edit runs on a bf16 copy (MXFP4
+  would undo 63% of it).
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
 - Some Nanbeige edits damage generation: the `v4_cot` loop-1 weight edit leaves 47% of CoTs unclosed (selection). Nanbeige
   runs on our own vLLM port (matches HF greedy outputs exactly).
 
 ---
 
-## MoE models: does the method carry over? (gpt-oss-20b, in progress)
+## MoE models: the method carries over (gpt-oss-20b)
 
 ![w:1100](figures/moe.png)
 
@@ -345,28 +357,41 @@ Logit lens on clean traces (decode each loop's output directly):
   measured and ablated exactly as in a dense model. **Hooks** act on that sum, whatever the routing.
 - **Weight ortho** must edit **all 32 experts** in every layer (any of them can be routed to), plus `o_proj` and the
   embedding: then every possible sum is ⊥ `u`. The router reads the stream; it changes the same way under hooks.
-- **Biases:** gpt-oss has biases on `o_proj` and on every expert (up to 54 along `u`), which write a constant along
-  `u`. With the refusal direction (end-of-prompt, L15), upstream's edit leaves 6% of the clean projection in the stream;
-  editing the biases too leaves 0.2%, as hooks do. Log-probs: weight edit vs hooks 0.13 (bf16 noise; clean vs hooks
-  0.87), upstream edit vs hooks 0.19. The in-place edit gives the same numbers in vLLM.
+- **Biases** (`o_proj` and every expert; up to 54 along `u`) write a constant along `u`. Upstream's edit leaves them:
+  6% of the clean projection stays in the stream (0.2% if we edit them too, as hooks). Log-probs vs hooks: 0.13 with
+  biases edited (bf16 noise; clean vs hooks 0.87), 0.19 without. The in-place vLLM edit gives the same numbers.
 - **MXFP4:** the experts ship as 4-bit blocks. The edit only exists in bf16 (we run a bf16 copy); re-quantizing the
   edited experts brings back 63% of their write along `u`.
-- Upstream (v4) on gpt-oss: refusal 93% → 3.5% (CoT direction, L19) / 7% (end-of-prompt, L15), the latter with 40%
-  incomplete generations. Ours so far: clean refusal 91% (500 train prompts); 1,359 refusing vs 128 complying CoTs.
-  **Running:** layer screen (7–21) for both windows, actadd, weight edits with and without biases.
 
+---
+
+## gpt-oss-20b results (test set, 487 prompts)
+
+| Intervention (`v4_baseline` direction) | refusal | unclosed CoTs |
+|---|---|---|
+| clean / random direction (hooks, L15) | 92.2% / 92.0% | 0 / 0 |
+| **hook ablation**, u from L15 | **2.1%** | 0.2% |
+| **weight ortho**, u from L15, biases edited / biases kept (upstream) | **1.8%** / 1.6% | 0.3% / 0.6% |
+| actadd at L13, c = −2 | 14.6% | 1.0% |
+
+- Ablation works as in the dense model and costs almost nothing in closed CoTs (4% hit the 4096 cap; they close by 8192).
+  Upstream (v4, end-of-prompt, L15): 7% with 40% incomplete generations.
+- **Biases do not matter for behaviour:** the 6% of `u` the bias-free edit leaves in the stream changes nothing here.
+- **Early and CoT-window directions break gpt-oss** (screen, 50 prompts): ablating either direction measured at L7–11
+  (CoT direction: L7–13) leaves every CoT unclosed (no channel header, "etc, etc, maybe…"); the CoT direction still
+  leaves 37–89% unclosed at L15–19; only L21 keeps CoTs intact, at 26% refusal. Random direction at L15: harmless.
+- Capability (MATH-500 / AIME 2025): CAPABILITY_TBD
 ---
 
 ## Next steps
 
-1. **Why late loops?** Ablate loop 1 only and measure how much of `u` loops 2–4 rebuild (HF hooks, cheap); compare with
-   the restoring slope from the mechanism analysis.
-2. **Two-loop Ouro with norm-aware ortho** in generation: a direct test that leak 2 needs several passes (needs a
-   loop-count override in the vLLM engine).
-3. **Position-restricted ablation:** prompt vs CoT vs answer tokens; is the decision made before thinking?
-4. **Statistics:** bootstrap confidence intervals over prompts for every table.
-5. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
+1. **Deck:** add the loop-rebuild result (ablating loop 1 only: Ouro rebuilds 93% of the clean prompt-end separation by
+   the last loop, Nanbeige 59%) and the 2-loop Ouro test of leak 2.
+2. **Position-restricted ablation** (prompt vs CoT vs answer tokens): runs done for Ouro and Nanbeige, to read and confirm
+   on the test set; then gpt-oss.
+3. **Statistics:** bootstrap confidence intervals over prompts for every table.
+4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
+5. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
    whole-CoT gap (15% vs the paper's 7.5%).
 
 ---

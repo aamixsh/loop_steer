@@ -7,7 +7,7 @@ picked up after a context reset. Results live in the README, `docs/presentation.
 ## Goal
 
 Refusal-direction ablation and steering for looped reasoning models (Ouro-1.4B-Thinking, 4 loops; Nanbeige4.2-3B,
-2 loops), reproduced first on Qwen3-8B. Current focus: **where in the loops and layers the refusal decision is made**,
+2 loops), reproduced first on Qwen3-8B, and checked on an MoE model (gpt-oss-20b). Current focus: **where in the loops and layers the refusal decision is made**,
 and why weight orthogonalization fails on Ouro.
 
 ## Where we are
@@ -24,17 +24,20 @@ and why weight orthogonalization fails on Ouro.
 - **Layers** (Ouro actadd, selection): effect grows with loop index; in loop 4 only layers 4-12 work.
 - **Collateral:** ablation costs no capability (MATH-500, AIME 2025 within noise); actadd costs MATH-500 3.6 (Ouro)
   and 8.8 points (Nanbeige), Nanbeige AIME 29.6% -> 13.8%. No over-refusal (0-3% on 250 harmless prompts).
+- **gpt-oss-20b (MoE), test set:** clean 92%, random 92%, hook ablation (`v4_baseline` L15) 2.1%, weight ortho over all
+  32 experts 1.8% (biases kept, as upstream: 1.6%), actadd L13 c=-2 14.6%; 0.2-1% unclosed. Biases matter for an exact
+  ablation (6% of `u` stays in the stream without them), not for behaviour. CoT-window directions and any direction from
+  L7-11 break generation (screen). Judge = gpt-oss itself; refusal-phrase check agrees.
 - Ouro direct answers (no thinking): 20% clean, 11-15% under ablation on the test set (the selection-set rise to
   15-18% was not confirmed).
 
 ## Running now
 
-GPU 0 queue (`scripts/gpuq.py list`): **gpt-oss-20b (MoE)** via `scripts/run_gpt_oss.sh <step>`: `clean` (500 train
-prompts, judged), `directions` (labels, activations, directions, per-site analysis), `validate` (weight edit vs hooks
-with the real `v4_baseline` L15 direction, HF and vLLM; HF vs vLLM hooks), `screen` (50 selection prompts: ablation of
-`v4_cot` / `v4_baseline` at layers 7-21, random, actadd, weight edits with and without biases at upstream's layers 19 /
-15). Runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`, `scripts/prepare_gpt_oss_bf16.py`): vLLM's MXFP4 experts
-cannot be edited. GPU 1 belongs to another project. gpuq kills a job silent for `--idle` seconds (default 1800).
+GPU 0 queue (`scripts/gpuq.py list`): gpt-oss-20b capability (MATH-500, AIME 2025 x 8; clean, hooks, weight ortho,
+actadd), re-run after fixing `capability.py` (it cut gpt-oss responses at the analysis channel's `<|end|>`; the broken
+outputs are in `capability/*/cap_stripbug`). gpt-oss runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`,
+`scripts/prepare_gpt_oss_bf16.py`): vLLM's MXFP4 experts cannot be edited. GPU 1 belongs to another project. gpuq kills a
+job silent for `--idle` seconds (default 1800).
 
 ## Next TODO (in order)
 
@@ -51,8 +54,8 @@ cannot be edited. GPU 1 belongs to another project. gpuq kills a job silent for 
 3. [ ] **Read the position-restricted runs** (done, selection set, tag `select_pos` for Ouro and Nanbeige): which token
    classes carry the effect? Confirm the main ones on the test set (`run_test_set.sh` takes the same candidates).
    `pos=` is vLLM-only; validated by `scripts/validate_position_gates.py` (exact).
-3b. [ ] **gpt-oss (MoE)**: read the validation (weight edit with biases = hooks? upstream's edit without biases?),
-   the screen; pick layers; test set; capability. The MoE slide is in the deck (`figures/moe.png`).
+3b. [x] **gpt-oss (MoE)**: validation, screen, test set done (deck: MoE slides). Left: capability numbers into the deck
+   and `fig_capability`; position-restricted ablation on gpt-oss (Harmony bounds) once item 3 is read.
 4. [ ] Bootstrap confidence intervals over prompts in `summarize.py` / `loop_sweep_summary.py`.
 5. [ ] Capability at a longer cap (AIME 2025 at 16-32k tokens) and actadd at matched strength across models.
 6. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.
@@ -74,7 +77,7 @@ source scripts/env.sh && scripts/verify_setup.sh --no-gpu           # environmen
 nvidia-smi                                                            # what runs
 scripts/gpuq.py list                                                  # GPU 0 job queue
 scripts/gpuq.py add -n NAME -- .venv/bin/python scripts/X.py --gpu '$GPU' ...   # queue a job behind the running ones
-GPU=0 scripts/run_test_set.sh ouro|nanbeige|qwen TAG CANDIDATE ...       # test-set run with continuations + summary
+GPU=0 scripts/run_test_set.sh ouro|nanbeige|qwen|gptoss TAG CANDIDATE ...  # test-set run with continuations + summary
 GPU=0 ACTADD_C=-1 VARIANT=shared|perloop scripts/run_loop_sweep.sh   # loop-subset sweep (MODEL_KEY=ouro|nanbeige)
 scripts/loop_sweep_summary.py loop_sweep loop_sweep_perloop --model Ouro-1.4B-Thinking
 ```

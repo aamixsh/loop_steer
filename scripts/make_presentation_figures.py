@@ -227,7 +227,7 @@ def _test_row(model, run, name, cap, ext=None):
 
 def fig_results():
     """Same five columns in the same order for every model: the best test-set candidate of each intervention."""
-    q, o, n = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B"
+    q, o, n, g = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B", "gpt-oss-20b"
     cols = [("clean model", "clean"), ("random direction\n(hook ablation)", "random"), ("hook ablation", "hook"),
             ("weight\northogonalization", "ortho"), ("activation\naddition", "actadd")]
     # per model: (summary row or None, note under the bar) for each column
@@ -252,8 +252,16 @@ def fig_results():
             (_test_row(n, "test_int", "ortho_v4_baseline_t1.l15", 4096, "test_int_ext"), "u from loop 2, L15"),
             (_test_row(n, "test_loops", "actadd_v4_baseline_t1.l15_c-2", 4096, "test_loops_ext"),
              "added at L15 of\nboth loops, c=−2")],
+        "gpt-oss-20b  (24 MoE layers)": [
+            (_test_row(g, "test", "none", 4096, "test_ext"), ""),
+            (_test_row(g, "test", "ablate_random_l15", 4096, "test_ext"), "same norm as u"),
+            (_test_row(g, "test", "ablate_v4_baseline_l15", 4096, "test_ext"), "u from L15"),
+            (_test_row(g, "test", "ortho_v4_baseline_l15", 4096, "test_ext"),
+             "u from L15, biases\nedited (kept: {bias0:.0f}%)"),
+            (_test_row(g, "test", "actadd_v4_baseline_l13_c-2", 4096, "test_ext"), "added at L13, c=−2")],
     }
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), sharey=True)
+    bias0 = 100 * _test_row(g, "test", "ortho_v4_baseline_l15_bias0", 4096, "test_ext")["all_refusal"]
+    fig, axes = plt.subplots(1, 4, figsize=(23, 5.2), sharey=True)
     x = np.arange(len(cols))
     for ax, (model, rows) in zip(axes, data.items()):
         for i, ((_, kind), (r, note)) in enumerate(zip(cols, rows)):
@@ -264,9 +272,9 @@ def fig_results():
             ax.bar(i, v, color=C[kind], width=0.72)
             ax.text(i, v + 1.5, f"{v:.0f}%", ha="center", fontsize=11, weight="bold")
             if note:
-                ax.text(i, v + 7.5, note, ha="center", fontsize=7.8, color="#444")
+                ax.text(i, v + 7.5, note.format(bias0=bias0), ha="center", fontsize=7.8, color="#444")
         ax.set_xticks(x); ax.set_xticklabels([c for c, _ in cols], fontsize=9)
-        ax.set_title(model, fontsize=11); ax.set_ylim(0, 100)
+        ax.set_title(model, fontsize=11); ax.set_ylim(0, 108); ax.set_yticks(range(0, 101, 20))
     axes[0].set_ylabel("refusal rate (%)")
     fig.suptitle("Refusal on 487 held-out harmful prompts. Per prompt 3 sampled CoTs, per CoT 3 sampled answers; a CoT counts "
                  "as the share of its answers the judge marks as refusals\n(a CoT that never closes is judged on its raw "
@@ -280,11 +288,11 @@ def fig_results():
 def fig_sites():
     """Held-out AUC of the refusal direction at every site, for both windows, against a random direction."""
     models = [("Qwen3-8B", "Qwen3-8B (36 layers)"), ("Ouro-1.4B-Thinking", "Ouro-1.4B (24 layers × 4 loops)"),
-              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (22 layers × 2 loops)")]
+              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (22 layers × 2 loops)"), ("gpt-oss-20b", "gpt-oss-20b (24 MoE layers)")]
     windows = [("v4_cot", "CoT direction: activations averaged over all CoT tokens, CoT labels", "CoTs"),
                ("v4_baseline", "Prompt-end direction: activations averaged over the template tokens before thinking, "
                                "prompt labels", "prompts")]
-    fig, axes = plt.subplots(2, 3, figsize=(17, 7.4), sharey=True, gridspec_kw={"width_ratios": [36, 96, 44]})
+    fig, axes = plt.subplots(2, 4, figsize=(20, 7.4), sharey=True, gridspec_kw={"width_ratios": [36, 96, 44, 30]})
     for i, (meth, wtitle, unit) in enumerate(windows):
         for j, (m, title) in enumerate(models):
             ax = axes[i, j]

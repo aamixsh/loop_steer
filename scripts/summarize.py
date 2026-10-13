@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from loop_steer.judge import substring_refusal
+
 
 def _read(path: Path):
     return pd.read_parquet(path) if path.exists() else None
@@ -56,11 +58,14 @@ def summarize(path: Path, max_tokens: int = 2048, cont_dir: Path | None = None) 
         "mean_score": df.sr_score.mean() if len(df) else float("nan"),
         "median_score": df.sr_score.median() if len(df) else float("nan"),
         "judge_refusal": df.sr_refusal.mean() if len(df) else float("nan"),
-        "substring_refusal": df.substring_refusal.mean() if len(df) else float("nan"),
+        # recomputed from the answers: files judged before the curly-apostrophe fix stored ~0 for gpt-oss
+        "substring_refusal": df.output.map(substring_refusal).mean() if len(df) else float("nan"),
         "invalid_cot_frac": 1 - n_valid / n_cot_total,
         "unparsed": int(df.sr_score.isna().sum()) if len(df) else 0,
         "weighted": (df.sr_score.fillna(0).sum() if len(df) else 0.0) / (n_cot_total * out_reps),
     }
+    if inv is None and len(df) and n_valid == n_cot_total:
+        inv = pd.DataFrame({"sr_score": [], "sr_refusal": [], "n_tokens": []})  # every CoT closed
     if inv is not None and "sr_score" in inv:
         # Per stage-1 sample, counting responses that never closed </think> (judged whole).
         per = df.groupby(["prompt_idx", "cot_rep"])[["sr_score", "sr_refusal"]].mean().sum() if len(df) else None
