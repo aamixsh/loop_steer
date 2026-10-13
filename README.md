@@ -63,8 +63,10 @@ points s.e. on MATH-500, ±2.8 on AIME 2025):
 |---|---|---|---|---|---|---|
 | Ouro-1.4B | 80.6% | 80.4–81.6% | 77.0% (c=−1) | 18.8% | 22.9–25.0% | 21.7% |
 | Nanbeige4.2-3B | 83.0% | 82.0–83.8% | 74.2% (c=−2) | 29.6% | 26.7–28.8% | 13.8% |
+| gpt-oss-20b | 88.8% | 85.0–86.0% | 65.4% (c=−2) | 52.5% | 38.8–40.8% | 10.8% |
 
-Ablation costs nothing measurable; actadd costs accuracy (Nanbeige most). AIME at 8192 CoT tokens closes only 24–33%
+Ablation costs nothing measurable in the looped models. On gpt-oss it lengthens the CoT, so more CoTs hit the 8192-token
+cap (accuracy of the CoTs that close is unchanged). Actadd costs accuracy in every model. AIME at 8192 CoT tokens closes only 24–33%
 of CoTs, so it is a weak test.
 
 **Caveats.** The all-subsets sweep and the loop × layer map use the 50 selection prompts (differences below about 4 points are

@@ -495,42 +495,57 @@ def fig_loops_dose():
 # ---------------------------------------------------------------- 11. collateral: capability and over-refusal
 def fig_capability():
     cap = pd.read_csv(ROOT / "results" / "capability_summary.csv")
-    o, n = "Ouro-1.4B-Thinking", "Nanbeige4.2-3B"
-    configs = {  # (label, Ouro candidate, Nanbeige candidate, color)
-        "clean": ("none", "none", C["clean"]),
-        "ablate, all loops": ("ablate_v4_baseline_t3.l16", "ablate_v4_baseline_t1.l15", C["hook"]),
-        "ablate, loop 1 only": ("ablate_v4_baseline_t3.l16_apply0", "ablate_v4_baseline_t1.l15_apply0", "#9ecae1"),
-        "ablate, late loop only": ("ablate_v4_baseline_t3.l16_apply2", "ablate_v4_baseline_t1.l15_apply1", "#4292c6"),
-        "actadd (Ouro c=−1, Nanbeige c=−2)": ("actadd_v4_baseline_t3.l16_c-1", "actadd_v4_baseline_t1.l15_c-2", C["actadd"]),
+    cap = cap[cap.tag == "cap"]
+    o, n, g = "Ouro-1.4B-Thinking", "Nanbeige4.2-3B", "gpt-oss-20b"
+    models = [(o, "Ouro-1.4B"), (n, "Nanbeige4.2-3B"), (g, "gpt-oss-20b")]
+    configs = {  # label -> ({model: candidate}, color)
+        "clean": ({o: "none", n: "none", g: "none"}, C["clean"]),
+        "ablate (all loops)": ({o: "ablate_v4_baseline_t3.l16", n: "ablate_v4_baseline_t1.l15",
+                                g: "ablate_v4_baseline_l15"}, C["hook"]),
+        "ablate, loop 1 only": ({o: "ablate_v4_baseline_t3.l16_apply0", n: "ablate_v4_baseline_t1.l15_apply0"}, "#9ecae1"),
+        "ablate, late loop only": ({o: "ablate_v4_baseline_t3.l16_apply2", n: "ablate_v4_baseline_t1.l15_apply1"},
+                                   "#4292c6"),
+        "weight ortho": ({g: "ortho_v4_baseline_l15"}, C["ortho"]),
+        "actadd (Ouro c=−1, others c=−2)": ({o: "actadd_v4_baseline_t3.l16_c-1", n: "actadd_v4_baseline_t1.l15_c-2",
+                                             g: "actadd_v4_baseline_l13_c-2"}, C["actadd"]),
     }
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.4), gridspec_kw={"width_ratios": [1, 1, 1]})
-    w = 0.16
-    for ax, ds, title, ylim in ((axes[0], "math500", "MATH-500 (500 problems × 1)", (60, 92)),
-                                (axes[1], "aime25", "AIME 2025 (30 problems × 8)", (0, 40))):
-        for j, (lab, (oc, nc, col)) in enumerate(configs.items()):
-            for i, (model, cand) in enumerate(((o, oc), (n, nc))):
-                r = cap[(cap.model == model) & (cap.dataset == ds) & (cap.candidate == cand)]
-                if not len(r):
+    w = 0.14
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.6))
+
+    def bars(ax, value):
+        for j, (lab, (cands, col)) in enumerate(configs.items()):
+            for i, (model, _) in enumerate(models):
+                v = value(model, cands[model]) if model in cands else None
+                if v is None:
                     continue
-                acc, se = 100 * r.accuracy.iloc[0], 100 * r.se.iloc[0]
-                ax.bar(i + (j - 2) * w, acc, w * 0.95, yerr=se, color=col, capsize=2, label=lab if i == 0 else None)
-        ax.set_xticks([0, 1]); ax.set_xticklabels(["Ouro-1.4B", "Nanbeige4.2-3B"])
+                x = i + (j - 2.5) * w
+                ax.bar(x, v[0], w * 0.95, yerr=v[1], color=col, capsize=2, label=lab if lab not in seen else None)
+                seen.add(lab)
+                if v[1] is None:
+                    ax.text(x, v[0] + 0.2, f"{v[0]:.1f}", ha="center", fontsize=7.5)
+        ax.set_xticks(range(len(models))); ax.set_xticklabels([m for _, m in models])
+
+    def acc(ds):
+        def f(model, cand):
+            r = cap[(cap.model == model) & (cap.dataset == ds) & (cap.candidate == cand)]
+            return (100 * r.accuracy.iloc[0], 100 * r.se.iloc[0]) if len(r) else None
+        return f
+
+    seen = set()
+    for ax, ds, title, ylim in ((axes[0], "math500", "MATH-500 (500 problems × 1)", (50, 95)),
+                                (axes[1], "aime25", "AIME 2025 (30 problems × 8)", (0, 80))):
+        bars(ax, acc(ds))
         ax.set_ylim(*ylim); ax.set_title(title, fontsize=11); ax.set_ylabel("accuracy (%) ± s.e.")
-    axes[1].text(0.5, 37, "only 24–33% of CoTs close within 8192 tokens", ha="center", fontsize=9, color="#555")
+    ov = {m: pd.read_csv(f).set_index("candidate") for m, _ in models
+          if (f := ROOT / "results" / m / "overrefusal.csv").exists()}
+    bars(axes[2], lambda m, c: (100 * ov[m].loc[c, "all_refusal"], None) if m in ov and c in ov[m].index else None)
+    axes[2].set_ylim(0, 10); axes[2].set_ylabel("refusal on harmless prompts (%)")
+    axes[2].set_title("Over-refusal (250 harmless test prompts)", fontsize=11)
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="lower center", ncol=5, fontsize=9.5, frameon=False, bbox_to_anchor=(0.5, -0.06))
-    ax = axes[2]
-    ov = {model: pd.read_csv(ROOT / "results" / model / "overrefusal.csv").set_index("candidate") for model in (o, n)}
-    for j, (lab, (oc, nc, col)) in enumerate(configs.items()):
-        for i, (model, cand) in enumerate(((o, oc), (n, nc))):
-            if cand in ov[model].index:
-                v = 100 * ov[model].loc[cand, "all_refusal"]
-                ax.bar(i + (j - 2) * w, v, w * 0.95, color=col)
-                ax.text(i + (j - 2) * w, v + 0.2, f"{v:.1f}", ha="center", fontsize=8)
-    ax.set_xticks([0, 1]); ax.set_xticklabels(["Ouro-1.4B", "Nanbeige4.2-3B"]); ax.set_ylim(0, 10)
-    ax.set_ylabel("refusal on harmless prompts (%)"); ax.set_title("Over-refusal (250 harmless test prompts)", fontsize=11)
-    fig.suptitle("Collateral effects: ablation leaves capability unchanged; actadd costs accuracy (Nanbeige most); "
-                 "no intervention adds refusals", fontsize=11)
+    fig.legend(h, l, loc="lower center", ncol=6, fontsize=9.5, frameon=False, bbox_to_anchor=(0.5, -0.07))
+    fig.suptitle("Collateral effects (CoT ≤ 8192 tokens): ablation is free in the looped models; on gpt-oss it lengthens "
+                 "CoTs, so more hit the cap (MATH −3, AIME −12 points);\nactadd costs more everywhere; no intervention "
+                 "adds refusals", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "capability.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 

@@ -204,9 +204,12 @@ every loop.
 
 ![w:1150](figures/capability.png)
 
-- **Ablation is free:** MATH-500 and AIME 2025 within noise of clean in both models, whichever loops.
-- **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1) and −8.8 points (Nanbeige, c = −2); Nanbeige AIME halves
-  (29.6% → 13.8%). It also lengthens CoTs.
+- **Ablation is free in the looped models:** MATH-500 and AIME 2025 within noise of clean, whichever loops.
+- **On gpt-oss ablation lengthens the CoT** (+25% tokens on MATH-500): fewer CoTs close within 8192 tokens, so accuracy
+  drops 3 points on MATH-500 (88.8 → 86.0 hooks, 85.0 weight edit) and 12–14 on AIME (52.5 → 40.8 / 38.8). Accuracy
+  of the CoTs that close is unchanged (MATH 92 → 91%, AIME 86 → 88%). AIME at a 16k cap is running.
+- **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1), −8.8 (Nanbeige, c = −2), −23 points (gpt-oss, c = −2);
+  AIME: Nanbeige 29.6% → 13.8%, gpt-oss 52.5% → 10.8%. It also lengthens CoTs.
 - **No over-refusal:** 0–3% refusal on harmless prompts under every config (a weak check: our interventions lower refusal).
 - AIME at 8192 tokens closes only 24–33% of CoTs, so it mostly measures problems solved early.
 
@@ -324,10 +327,12 @@ Logit lens on clean traces (decode each loop's output directly):
    compounds the leak while the edit stops the model from correcting it. Nanbeige survives (raw writes, shrinking norm).
 3. **Refusal is decided late, but not in one loop.** Later loops carry most of the effect; ablating loop 1 alone
    barely helps; no single loop matches all loops. One direction (last loop's) works in every loop.
-4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability; actadd is a dose over loops,
-   works at early-to-middle layers of late loops, and costs 4–16 points of math accuracy.
+4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability in the looped models (on gpt-oss
+   it lengthens CoTs); actadd is a dose over loops, works at early-to-middle layers of late loops, and costs 4–23 points
+   of MATH-500 accuracy.
 5. **MoE models too.** gpt-oss-20b: 92% → 2% with hooks or with a weight edit of all 32 experts per layer. The
-   experts' biases matter for an exact ablation, not for behaviour. Its CoT-window and early directions break it.
+   experts' biases matter for an exact ablation, not for behaviour. Its CoT-window and early directions break it;
+   ablation makes it reason longer (more CoTs hit the cap on AIME).
 6. **Check damage, not just refusal:** unclosed CoTs reveal broken edits; selection-set loop results were optimistic.
 
 ---
@@ -380,7 +385,8 @@ Logit lens on clean traces (decode each loop's output directly):
 - **Early and CoT-window directions break gpt-oss** (screen, 50 prompts): ablating either direction measured at L7–11
   (CoT direction: L7–13) leaves every CoT unclosed (no channel header, "etc, etc, maybe…"); the CoT direction still
   leaves 37–89% unclosed at L15–19; only L21 keeps CoTs intact, at 26% refusal. Random direction at L15: harmless.
-- Capability (MATH-500 / AIME 2025): CAPABILITY_TBD
+- **Capability** (CoT ≤ 8192): MATH-500 88.8% clean, 86.0% hooks, 85.0% weight edit, 65.4% actadd; AIME 2025 52.5 /
+  40.8 / 38.8 / 10.8%. Ablation makes gpt-oss think longer, so more CoTs hit the cap; the ones that close are as accurate.
 ---
 
 ## Next steps
