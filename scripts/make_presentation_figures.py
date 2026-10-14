@@ -324,14 +324,16 @@ def fig_sites():
     fig.savefig(OUT / "sites.png", dpi=150); plt.close(fig)
 
 
-# ---------------------------------------------------------------- 7. the three models (schematic)
+# ---------------------------------------------------------------- 7. the four models (schematic)
 def fig_models():
     from matplotlib.patches import Circle, FancyBboxPatch
 
     rows = [("Qwen3-8B", 36, 1, False, "standard pre-norm: writes added raw"),
             ("Ouro-1.4B-Thinking", 24, 4, True, "sandwich norm on every write; shared norm after every loop"),
-            ("Nanbeige4.2-3B", 22, 2, False, "writes added raw; shared norm after every loop")]
-    fig, ax = plt.subplots(figsize=(15, 4.6))
+            ("Nanbeige4.2-3B", 22, 2, False, "writes added raw; shared norm after every loop"),
+            ("gpt-oss-20b", 24, 1, False, "standard pre-norm, MoE: each MLP routes a token to 4 of 32 experts; "
+                                          "biases on o_proj and experts")]
+    fig, ax = plt.subplots(figsize=(15, 6.0))
     ax.set_xlim(-0.2, 17.6); ax.set_ylim(-0.2, len(rows) * 1.5 + 0.1); ax.axis("off")
     loop_colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, 4))
     for i, (name, L, T, sandwich, note) in enumerate(rows):
@@ -342,7 +344,7 @@ def fig_models():
         ax.add_patch(FancyBboxPatch((x, y - 0.22), 0.9, 0.44, boxstyle="round,pad=0.03", fc="#eee", ec="k"))
         ax.text(x + 0.45, y, "embed", ha="center", va="center", fontsize=9)
         x += 1.15
-        width = 2.6 if T > 1 else 9.0
+        width = 2.6 if T > 1 else 9.0 * L / 36  # one-pass models: length in proportion to depth
         for t in range(T):
             ax.annotate("", xy=(x, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
             ax.add_patch(FancyBboxPatch((x, y - 0.25), width, 0.5, boxstyle="round,pad=0.03",
@@ -352,6 +354,12 @@ def fig_models():
                     color="white" if T > 1 and t < 2 else "k")
             if sandwich:
                 ax.text(x + width / 2, y - 0.4, "h += Norm₂(Attn/MLP)", ha="center", fontsize=8, color="#8c564b")
+            if name.startswith("gpt-oss"):  # the 32 experts of one MLP, 4 of them routed to
+                for e in range(32):
+                    ax.add_patch(plt.Rectangle((x + 0.35 + e * 0.165, y - 0.43), 0.13, 0.13, lw=0.5, ec="#666",
+                                               fc="#2ca02c" if e in (3, 11, 12, 26) else "white"))
+                ax.text(x + 0.35 + 32 * 0.165 + 0.1, y - 0.37, "experts per MLP (4 of 32 used per token)",
+                        fontsize=8, va="center", color="#2ca02c")
             x += width + 0.25
             ax.annotate("", xy=(x + 0.05, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
             ax.add_patch(Circle((x + 0.35, y), 0.3, fc="#fde8d0" if t < T - 1 else "#eee", ec="k"))
@@ -360,8 +368,9 @@ def fig_models():
         ax.annotate("", xy=(x + 0.05, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
         ax.add_patch(FancyBboxPatch((x + 0.05, y - 0.22), 1.0, 0.44, boxstyle="round,pad=0.03", fc="#eee", ec="k"))
         ax.text(x + 0.55, y, "lm_head", ha="center", va="center", fontsize=9)
-    fig.suptitle("Looped models run the same layer stack several times. A site is (loop, layer): "
-                 "36 (Qwen), 96 (Ouro), 44 (Nanbeige). Orange = shared norm between loops", fontsize=11)
+    fig.suptitle("Looped models run the same layer stack several times; gpt-oss runs once but its MLPs are mixtures of "
+                 "experts.\nA site is (loop, layer): 36 (Qwen), 96 (Ouro), 44 (Nanbeige), 24 (gpt-oss). "
+                 "Orange = shared norm between loops", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "models.png", dpi=150); plt.close(fig)
 

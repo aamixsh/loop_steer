@@ -66,7 +66,8 @@ points s.e. on MATH-500, ±2.8 on AIME 2025):
 | gpt-oss-20b | 88.8% | 85.0–86.0% | 65.4% (c=−2) | 52.5% | 38.8–40.8% | 10.8% |
 
 Ablation costs nothing measurable in the looped models. On gpt-oss it lengthens the CoT, so more CoTs hit the 8192-token
-cap (accuracy of the CoTs that close is unchanged). Actadd costs accuracy in every model. AIME at 8192 CoT tokens closes only 24–33%
+cap (accuracy of the CoTs that close is unchanged; at a 16k cap the AIME gap shrinks from 12 to 8 points, 65% → 57%).
+Actadd costs accuracy in every model. AIME at 8192 CoT tokens closes only 24–33%
 of CoTs, so it is a weak test.
 
 **Caveats.** The all-subsets sweep and the loop × layer map use the 50 selection prompts (differences below about 4 points are

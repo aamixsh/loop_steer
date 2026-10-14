@@ -207,7 +207,8 @@ every loop.
 - **Ablation is free in the looped models:** MATH-500 and AIME 2025 within noise of clean, whichever loops.
 - **On gpt-oss ablation lengthens the CoT** (+25% tokens on MATH-500): fewer CoTs close within 8192 tokens, so accuracy
   drops 3 points on MATH-500 (88.8 → 86.0 hooks, 85.0 weight edit) and 12–14 on AIME (52.5 → 40.8 / 38.8). Accuracy
-  of the CoTs that close is unchanged (MATH 92 → 91%, AIME 86 → 88%). AIME at a 16k cap is running.
+  of the CoTs that close is unchanged (MATH 92 → 91%, AIME 86 → 88%). At a 16k cap the AIME gap shrinks to 8 points
+  (65.4 → 57.1 / 57.5%; 25% of clean and 34% of ablated CoTs still hit the cap; closed CoTs 86% vs 86–87%).
 - **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1), −8.8 (Nanbeige, c = −2), −23 points (gpt-oss, c = −2);
   AIME: Nanbeige 29.6% → 13.8%, gpt-oss 52.5% → 10.8%. It also lengthens CoTs.
 - **No over-refusal:** 0–3% refusal on harmless prompts under every config (a weak check: our interventions lower refusal).
@@ -386,7 +387,8 @@ Logit lens on clean traces (decode each loop's output directly):
   (CoT direction: L7–13) leaves every CoT unclosed (no channel header, "etc, etc, maybe…"); the CoT direction still
   leaves 37–89% unclosed at L15–19; only L21 keeps CoTs intact, at 26% refusal. Random direction at L15: harmless.
 - **Capability** (CoT ≤ 8192): MATH-500 88.8% clean, 86.0% hooks, 85.0% weight edit, 65.4% actadd; AIME 2025 52.5 /
-  40.8 / 38.8 / 10.8%. Ablation makes gpt-oss think longer, so more CoTs hit the cap; the ones that close are as accurate.
+  40.8 / 38.8 / 10.8%. Ablation makes gpt-oss think longer (+16–25% tokens), so more CoTs hit the cap; the ones that
+  close are as accurate. AIME at 16k: 65.4 / 57.1 / 57.5% (gap 8 points, still from capped CoTs).
 ---
 
 ## Next steps

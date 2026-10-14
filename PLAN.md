@@ -29,16 +29,16 @@ and why weight orthogonalization fails on Ouro.
   ablation (6% of `u` stays in the stream without them), not for behaviour. CoT-window directions and any direction from
   L7-11 break generation (screen). Judge = gpt-oss itself; refusal-phrase check agrees. Capability (8192 cap):
   MATH-500 88.8 clean / 86.0 hooks / 85.0 ortho / 65.4 actadd; AIME 52.5 / 40.8 / 38.8 / 10.8. Ablation lengthens
-  CoTs (+25% tokens) so more hit the cap; accuracy of closed CoTs unchanged. Over-refusal 0.4-3.2% (clean 1.8%).
+  CoTs (+25% tokens) so more hit the cap; accuracy of closed CoTs unchanged. AIME at 16k (tag `cap16k`): 65.4 / 57.1 /
+  57.5 (gap 8 points, 25% vs 34% of CoTs still capped). Over-refusal 0.4-3.2% (clean 1.8%).
 - Ouro direct answers (no thinking): 20% clean, 11-15% under ablation on the test set (the selection-set rise to
   15-18% was not confirmed).
 
 ## Running now
 
-GPU 0 queue (`scripts/gpuq.py list`): gpt-oss AIME 2025 at a 16k CoT cap (tag `cap16k`; clean, hooks, weight ortho):
-is the 12-point AIME drop under ablation only longer CoTs hitting the 8192 cap? gpt-oss runs use a bf16 copy
-(`data/models/gpt-oss-20b-bf16`, `scripts/prepare_gpt_oss_bf16.py`): vLLM's MXFP4 experts cannot be edited. GPU 1
-belongs to another project. gpuq kills a job silent for `--idle` seconds (default 1800).
+Nothing (GPU 0 idle). gpt-oss runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`, `scripts/prepare_gpt_oss_bf16.py`):
+vLLM's MXFP4 experts cannot be edited. GPU 1 belongs to another project. gpuq kills a job silent for `--idle` seconds
+(default 1800).
 
 ## Next TODO (in order)
 
@@ -56,7 +56,8 @@ belongs to another project. gpuq kills a job silent for `--idle` seconds (defaul
    classes carry the effect? Confirm the main ones on the test set (`run_test_set.sh` takes the same candidates).
    `pos=` is vLLM-only; validated by `scripts/validate_position_gates.py` (exact).
 3b. [x] **gpt-oss (MoE)**: validation, screen, test set, capability, over-refusal done (deck: MoE slides). Left: the
-   16k-cap AIME result into the deck; position-restricted ablation on gpt-oss (Harmony bounds) once item 3 is read.
+   position-restricted ablation on gpt-oss (Harmony bounds) once item 3 is read; AIME at 32k (does the gap close?);
+   an independent judge on a sample of gpt-oss answers (gpt-oss currently judges itself).
 4. [ ] Bootstrap confidence intervals over prompts in `summarize.py` / `loop_sweep_summary.py`.
 5. [ ] Capability at a longer cap (AIME 2025 at 16-32k tokens) and actadd at matched strength across models.
 6. [ ] Explain the Qwen whole-CoT gap (15% vs the paper's 7.5%): train set size, 3 vs 5 answers, top_p.
