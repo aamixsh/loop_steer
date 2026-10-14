@@ -37,7 +37,7 @@ the stream up and compounds the leak over three passes. Nanbeige adds writes to 
 its single inter-loop norm shrinks the stream. Hooks avoid the problem by re-projecting after every norm. See
 [docs/presentation.md](docs/presentation.md) for the full explanation, figures, and the tests that confirm it.
 
-![Leak of the removed direction per loop](docs/figures/loop_growth.png)
+![The inter-loop norm ratchets the removed direction up in Ouro](docs/figures/leak2.png)
 
 **Which loops carry the refusal?** Hook ablation or actadd restricted to a subset of loops (test set, 487 prompts;
 all 15 subsets for Ouro and 3 for Nanbeige on the selection set; tables in `results/`):

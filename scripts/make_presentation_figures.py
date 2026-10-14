@@ -96,101 +96,211 @@ def fig_norm_leak():
     fig.savefig(OUT / "norm_leak.png", dpi=150); plt.close(fig)
 
 
-# ---------------------------------------------------------------- 3. per-loop growth (real data)
-def load_cmp(model, site):
-    return json.load(open(RUNS / model / "analysis" / f"ortho_compare_v4_baseline_{site}.json"))
-
-
-def fig_loop_growth():
-    ouro = load_cmp("Ouro-1.4B-Thinking", "t3l16")["full"]
-    nanb = load_cmp("Nanbeige4.2-3B", "t1l15")["full"]
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.6), gridspec_kw={"width_ratios": [1.3, 1]})
-
-    ax = axes[0]
-    for data, name, mk in ((ouro, "Ouro", "o"), (nanb, "Nanbeige", "s")):
-        clean = np.array([data["clean"]["refusal"][str(t)]["resid_rms"] for t in range(len(data["clean"]["refusal"]))])
-        loops = np.arange(len(clean))
-        for cond, lab in (("ortho", "weight ortho"), ("ortho_na", "norm-aware ortho"), ("hook", "hook ablation")):
-            if cond not in data:
-                continue
-            v = np.array([data[cond]["refusal"][str(t)]["resid_rms"] for t in loops]) / clean
-            ax.plot(loops, v, marker=mk, color=C[cond], ls="-" if name == "Ouro" else "--", lw=2,
-                    label=f"{name}: {lab}")
-    ax.axhline(1, color=C["clean"], lw=1.5); ax.text(3.05, 1.08, "clean", color=C["clean"])
-    ax.set_yscale("log"); ax.set_xticks(range(4)); ax.set_xticklabels(range(1, 5)); ax.set_xlabel("loop")
-    ax.set_ylabel("|projection on u| in the residual\nrelative to the clean model")
-    ax.set_title("Refusal direction left in the stream (log scale)")
-    ax.set_ylim(5e-4, 20)
-    ax.legend(fontsize=8.5, loc="upper left", ncol=2)
-
-    ax = axes[1]
-    bars = []
-    for data, name in ((ouro, "Ouro"), (nanb, "Nanbeige")):
-        rows = data["clean"]["refusal"]
-        T = len(rows)
-        for t in range(T - 1):  # passes that feed the next loop
-            r = rows[str(t)]
-            bars.append((f"{name}\nafter loop {t + 1}", r["Lout_len"] / r["Lin_len"], name))
-    x = np.arange(len(bars))
-    ax.bar(x, [b[1] for b in bars], color=["#8c564b" if b[2] == "Ouro" else "#17becf" for b in bars])
-    for i, b in enumerate(bars):
-        ax.text(i, b[1] * 1.1, f"×{b[1]:.2f}", ha="center")
-    ax.axhline(1, color="k", lw=0.8)
-    ax.set_yscale("log"); ax.set_ylim(0.008, 5)
-    ax.set_xticks(x); ax.set_xticklabels([b[0] for b in bars], fontsize=9)
-    ax.set_ylabel("stream length after / before the norm")
-    ax.set_title("Inter-loop norm multiplies the carried stream\nup (Ouro) or down (Nanbeige)")
-    fig.tight_layout()
-    fig.savefig(OUT / "loop_growth.png", dpi=150); plt.close(fig)
-
-
-# ---------------------------------------------------------------- 3b. compounding schematic (real numbers)
-def fig_compounding():
+# ---------------------------------------------------------------- 2b. leak 1: the sandwich norm sits after the edit
+def fig_leak1():
     from matplotlib.patches import Circle, FancyBboxPatch
 
+    fig, ax = plt.subplots(figsize=(15, 7.6))
+    ax.set_xlim(0, 15); ax.set_ylim(0, 7.6); ax.set_aspect("equal"); ax.axis("off")
+    u = np.array([1.0, 1.0]) / np.sqrt(2)
+    perp = np.array([1.0, -1.0]) / np.sqrt(2)
+    g = np.array([2.0, 0.5])  # the toy uneven gain of the RMSNorm slide
+    v_perp = perp                                    # a write with no u-component
+    v_rot = g * perp / np.linalg.norm(g * perp)      # the same write after the norm
+    v_raw = 0.8 * perp + 0.6 * u                     # an unedited write (has a u-component)
+
+    def glyph(cx, cy, v, r=0.44):
+        ax.add_patch(Circle((cx, cy), r * 1.25, fc="white", ec="#ddd", lw=0.8, zorder=2))
+        ax.plot([cx - r * u[0], cx + r * u[0]], [cy - r * u[1], cy + r * u[1]], color=C["u"], ls=":", lw=1.2, zorder=3)
+        v = np.asarray(v) / np.linalg.norm(v) * r
+        ax.annotate("", xy=(cx + v[0], cy + v[1]), xytext=(cx, cy), zorder=4,
+                    arrowprops=dict(arrowstyle="-|>", color="k", lw=1.5, mutation_scale=9))
+        pu = (v @ u) * u
+        if abs(v @ u) > 1e-3:
+            ax.plot([cx + v[0], cx + pu[0]], [cy + v[1], cy + pu[1]], color=C["u"], ls="--", lw=0.8, zorder=3)
+            ax.annotate("", xy=(cx + pu[0], cy + pu[1]), xytext=(cx, cy), zorder=5,
+                        arrowprops=dict(arrowstyle="-|>", color=C["u"], lw=2.4, mutation_scale=9))
+        ax.text(cx, cy - r * 1.25 - 0.17, "has u" if abs(v @ u) > 1e-3 else "⊥ u", ha="center", va="top", fontsize=8.5,
+                color=C["u"] if abs(v @ u) > 1e-3 else "#555")
+
+    def box(x, y, w, h, text, fc, ec="k", fs=9.5, color="k"):
+        ax.add_patch(FancyBboxPatch((x, y - h / 2), w, h, boxstyle="round,pad=0.05", fc=fc, ec=ec, zorder=2))
+        ax.text(x + w / 2, y, text, ha="center", va="center", fontsize=fs, color=color, zorder=3)
+
+    def norm(x, y, text, fc="#fde8d0"):
+        ax.add_patch(Circle((x, y), 0.36, fc=fc, ec="k", zorder=2))
+        ax.text(x, y, text, ha="center", va="center", fontsize=8.5, zorder=3)
+
+    def arr(x0, x1, y, color="k"):
+        ax.annotate("", xy=(x1, y), xytext=(x0, y), arrowprops=dict(arrowstyle="-|>", color=color, lw=1.2), zorder=1)
+
+    rows = [  # (title, edited weights?, sandwich norm?, hook?, verdict, colour)
+        ("Qwen / Nanbeige layer\n+ weight ortho", True, False, False,
+         "✓ write ⊥ u\nthe edit is exact", C["actadd"]),
+        ("Ouro layer\n+ weight ortho", True, True, False,
+         "✗ u is back in\nevery write (48 per\nloop), at clean strength", C["ortho"]),
+        ("Ouro layer\n+ hook ablation", False, True, True,
+         "✓ write ⊥ u\nthe hook acts after the norm", C["hook"]),
+    ]
+    xs = dict(h=2.45, n1=4.05, W=4.75, g1=7.0, n2=8.2, g2=9.4, hook=10.1, g3=11.75, add=12.7)
+    for i, (title, edited, sandwich, hook, verdict, vc) in enumerate(rows):
+        y = 6.35 - i * 2.35
+        ax.text(0.05, y, title, fontsize=11, weight="bold", va="center")
+        box(xs["h"], y, 0.95, 0.5, "stream h", "#eee")
+        arr(xs["h"] + 0.98, xs["n1"] - 0.38, y)
+        norm(xs["n1"], y, "Norm")
+        arr(xs["n1"] + 0.38, xs["W"] - 0.02, y)
+        box(xs["W"], y, 1.6, 0.72, "Attn / MLP\n" + ("edited: W′ = (I − uuᵀ)W" if edited else "weights W (unedited)"),
+            "#fbe3e3" if edited else "#e8f0fa", ec=C["ortho"] if edited else "k", fs=8.8)
+        arr(xs["W"] + 1.65, xs["g1"] - 0.48, y)
+        glyph(xs["g1"], y, v_perp if edited else v_raw)
+        if sandwich:
+            arr(xs["g1"] + 0.48, xs["n2"] - 0.38, y)
+            norm(xs["n2"], y, "Norm₂")
+            arr(xs["n2"] + 0.38, xs["g2"] - 0.48, y)
+            glyph(xs["g2"], y, v_rot if edited else g * v_raw)
+        else:
+            ax.plot([xs["g1"] + 0.48, xs["g2"] + 0.45], [y, y], color="k", lw=1.2, zorder=1)
+            ax.text(xs["n2"] + 0.55, y + 0.12, "no norm here: added as is", ha="center", fontsize=8.5, color="#777")
+        if hook:
+            arr(xs["g2"] + 0.48, xs["hook"] + 0.02, y)
+            box(xs["hook"], y, 1.05, 0.62, "hook\n− (x·u) u", "#e8f0fa", ec=C["hook"], fs=9, color=C["hook"])
+            arr(xs["hook"] + 1.1, xs["g3"] - 0.48, y)
+            glyph(xs["g3"], y, v_perp)
+            arr(xs["g3"] + 0.48, xs["add"] - 0.3, y)
+        else:
+            ax.plot([xs["g2"] + 0.48 if sandwich else xs["g2"] + 0.45, xs["add"] - 0.3], [y, y], color="k", lw=1.2,
+                    zorder=1)
+            ax.annotate("", xy=(xs["add"] - 0.3, y), xytext=(xs["add"] - 0.6, y),
+                        arrowprops=dict(arrowstyle="-|>", color="k", lw=1.2))
+        ax.add_patch(Circle((xs["add"], y), 0.28, fc="white", ec="k", zorder=2))
+        ax.text(xs["add"], y, "+", ha="center", va="center", fontsize=15, zorder=3)
+        # residual connection: h skips around the block into the sum
+        yb = y - 0.95
+        ax.plot([xs["h"] + 0.47, xs["h"] + 0.47, xs["add"], xs["add"]], [y - 0.28, yb, yb, y - 0.29], color="#999",
+                lw=1.6, zorder=1)
+        ax.text((xs["h"] + xs["add"]) / 2, yb - 0.05, "residual connection: h passes unchanged", ha="center",
+                va="top", fontsize=8, color="#888")
+        ax.text(xs["add"] + 0.45, y, verdict, va="center", fontsize=10, color=vc, weight="bold")
+    ax.text(7.5, 7.45, "Norm₂(x) = g ⊙ x / rms(x), x = the matrix output:   (g ⊙ x) · u = x · (g ⊙ u) ≠ 0   even "
+            "when x · u = 0  (g uneven)", ha="center", fontsize=10.5, color="#8c564b")
+    ax.text(7.5, 7.1, "In each circle: black arrow = the write, dotted line = u, purple arrow = the write's component "
+            "along u", ha="center", fontsize=9.5, color="#555")
+    fig.suptitle("Leak 1 (sandwich norm, Ouro only): weight ortho cleans the matrix output, but Ouro normalizes every "
+                 "write after the matrix, and the norm rotates it back onto u", fontsize=12, y=0.995)
+    fig.text(0.5, 0.012, "Measured (8 traces, refusal u): the edited matrices write 0.001 along u; after Norm₂ the same "
+             "writes carry 0.09–0.17 (clean model 0.08–0.18).  Fix for this leak: edit against g ⊙ u instead of u "
+             "(norm-aware ortho).", ha="center", fontsize=9.5, color="#444")
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.95, bottom=0.04)
+    fig.savefig(OUT / "leak1.png", dpi=150); plt.close(fig)
+
+
+# ---------------------------------------------------------------- 2c. leak 2: the inter-loop norm ratchets u up
+def fig_leak2():
     ouro = load_cmp("Ouro-1.4B-Thinking", "t3l16")["full"]
     nanb = load_cmp("Nanbeige4.2-3B", "t1l15")["full"]
-    fig, axes = plt.subplots(2, 1, figsize=(15, 6.4))
-    for ax, data, name, n_layers, note in (
-        (axes[0], ouro, "Ouro-1.4B", 24, "each of 48 writes passes a sandwich norm\n→ leaks u (weights can't stop it)"),
-        (axes[1], nanb, "Nanbeige4.2-3B", 22, "writes added raw\n→ exactly ⊥ u after the edit"),
-    ):
-        rows_c, rows_o = data["clean"]["refusal"], data["ortho"]["refusal"]
-        T = len(rows_c)
-        ax.set_xlim(-0.5, 17.0); ax.set_ylim(-1.9, 1.4); ax.axis("off")
-        ax.text(-0.4, 1.25, name, fontsize=13, weight="bold")
-        ax.text(3.6, 1.25, note.replace("\n", " "), fontsize=10, style="italic", va="center")
-        x = 0.0
-        ax.add_patch(FancyBboxPatch((x, -0.35), 1.0, 0.7, boxstyle="round,pad=0.05", fc="#eee", ec="k"))
-        ax.text(x + 0.5, 0, "embed", ha="center", va="center", fontsize=10)
-        x += 1.4
+    fig = plt.figure(figsize=(17, 8.2))
+    gs = fig.add_gridspec(2, 2, width_ratios=[2.5, 1], height_ratios=[3.2, 1], hspace=0.12, wspace=0.12)
+    ax, bx, nx = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, :])
+    nx.axis("off"); nx.set_xlim(0, 1); nx.set_ylim(0, 1)
+    conds = [("clean", "clean model", "-"), ("hook", "hook ablation", "-"),
+             ("ortho_na", "norm-aware ortho (leak 1 fixed: only leak 2)", "--"),
+             ("ortho", "weight ortho (leak 1 + leak 2)", "-")]
+
+    def path(data, cond, T):
+        r = data[cond]["refusal"]
+        xs, ys = ([0], [0.0]) if cond != "clean" else ([], [])  # the edited / hooked embedding writes no u
         for t in range(T):
-            ax.annotate("", xy=(x, 0), xytext=(x - 0.4, 0), arrowprops=dict(arrowstyle="-|>", color="k"))
-            ax.add_patch(FancyBboxPatch((x, -0.45), 2.0, 0.9, boxstyle="round,pad=0.05", fc="#e8f0fa", ec="k"))
-            ax.text(x + 1.0, 0.12, f"loop {t + 1}", ha="center", fontsize=11, weight="bold")
-            ax.text(x + 1.0, -0.22, f"{n_layers} layers", ha="center", fontsize=9)
-            c, o = rows_c[str(t)]["resid_rms"], rows_o[str(t)]["resid_rms"]
-            ax.text(x + 1.0, -0.8, f"clean {c:.2f}", ha="center", color=C["clean"], fontsize=10)
-            ax.text(x + 1.0, -1.15, f"ortho {o:.2f}", ha="center", color=C["ortho"], fontsize=10, weight="bold")
-            ax.text(x + 1.0, -1.5, f"({o / c:.0%} of clean)", ha="center", color=C["ortho"], fontsize=9)
-            x += 2.0
-            ax.annotate("", xy=(x + 0.4, 0), xytext=(x, 0), arrowprops=dict(arrowstyle="-|>", color="k"))
-            x += 0.85
+            xs += [2 * t + 1, 2 * t + 2]; ys += [r[str(t)]["Lin_rms"], r[str(t)]["Lout_rms"]]
+        return np.array(xs), np.array(ys)
+
+    def shade(a, T, top):
+        for t in range(T):
+            a.axvspan(2 * t, 2 * t + 1, color="#e8f0fa", zorder=0)
+            a.text(2 * t + 0.5, top, f"loop {t + 1}", ha="center", va="top", fontsize=10, color="#335")
             last = t == T - 1
-            ax.add_patch(Circle((x, 0), 0.42, fc="#fde8d0" if not last else "#eee", ec="k"))
-            ax.text(x, 0, "norm", ha="center", va="center", fontsize=9)
-            r = rows_c[str(t)]
-            if not last:
-                ax.text(x, 0.62, f"× {r['Lout_len'] / r['Lin_len']:.2f}\n+ fresh leak", ha="center", fontsize=9,
-                        color="#8c564b")
-            else:
-                ax.text(x, 0.62, "→ lm_head", ha="center", fontsize=9, color="#555")
-            x += 0.85
-    axes[0].text(-0.4, -1.15, "|u| in stream\n(rms, refusal u)", fontsize=9, color="#555", va="center")
-    fig.suptitle("Weight ortho on a looped model: the leak is re-amplified by every inter-loop norm and "
-                 "nothing cancels it", fontsize=12)
-    fig.tight_layout()
-    fig.savefig(OUT / "compounding.png", dpi=150); plt.close(fig)
+            a.axvspan(2 * t + 1, 2 * t + 2, color="#eee" if last else "#fde8d0", zorder=0)
+            a.text(2 * t + 1.5, top, "final\nnorm" if last else "shared\nnorm", ha="center", va="top", fontsize=8.5,
+                   color="#8c564b")
+        a.set_xticks([])
+
+    # ---- Ouro
+    for cond, lab, ls in conds:
+        x, y = path(ouro, cond, 4)
+        ax.plot(x, y, marker="o", ms=4, color=C[cond], ls=ls, lw=2.3, label=lab, zorder=3)
+    shade(ax, 4, 12.6)
+    ax.set_ylim(-0.3, 12.8); ax.set_xlim(-0.1, 8.1)
+    ax.set_ylabel("component of the stream along u\n(rms over tokens)")
+    ax.set_title("Ouro-1.4B (4 loops): every pass of the shared norm multiplies u; edited writers cannot cancel it",
+                 fontsize=11.5)
+    r_o, r_n, r_c, r_h = (ouro[c]["refusal"] for c in ("ortho", "ortho_na", "clean", "hook"))
+    marks = [  # (n, x, y, colour): numbered markers on the segments the notes explain
+        (1, 0.5, r_o["0"]["Lin_rms"] / 2 + 0.55, C["ortho"]),
+        (2, 5.5, (r_o["2"]["Lin_rms"] + r_o["2"]["Lout_rms"]) / 2 - 0.35, "#8c564b"),
+        (3, 4.35, (r_c["1"]["Lout_rms"] + r_c["2"]["Lin_rms"]) / 2 + 0.6, C["clean"]),
+        (4, 6.5, r_n["3"]["Lin_rms"] + 0.55, C["ortho_na"]),
+        (5, 7.5, r_h["3"]["Lout_rms"] / 2 + 0.55, C["hook"]),
+    ]
+    for n, x, y, col in marks:
+        ax.text(x, y, str(n), ha="center", va="center", fontsize=10, weight="bold", color="white", zorder=6,
+                bbox=dict(boxstyle="circle,pad=0.25", fc=col, ec="none"))
+    notes = [
+        (1, C["ortho"], "loop 1: the 48 sandwich-norm writes build u from 0 to 0.64 (leak 1)"),
+        (2, "#8c564b", "each shared norm scales the stream up (×1.05 → ×2.1) and rotates it:\n"
+                       "u grows ×2.2–3.2 per pass, and a u-free stream gets 0.3–0.4 of u"),
+        (3, "#555", "clean: a loop rewrites u along with the rest of the stream\n"
+                    "(u −45%, stream −47% in loop 3), so u stays bounded"),
+        (4, C["ortho_na"], "norm-aware ortho: a loop leaves u untouched (−0%) while it\n"
+                           "rewrites half the stream: the edited writers cannot cancel u"),
+        (5, C["hook"], "hooks: the norm's fresh leak is removed\nby the next layer's hook"),
+    ]
+    for k, (n, col, txt) in enumerate(notes):  # two columns under the Ouro panel
+        x0, y0 = (0.01, 0.92 - 0.33 * k) if k < 3 else (0.37, 0.92 - 0.33 * (k - 3))
+        nx.text(x0, y0, str(n), ha="center", va="top", fontsize=10, weight="bold", color="white",
+                bbox=dict(boxstyle="circle,pad=0.22", fc=col, ec="none"))
+        nx.text(x0 + 0.012, y0 + 0.02, txt, ha="left", va="top", fontsize=10, color=col)
+    for cond in ("ortho", "ortho_na", "clean", "hook"):
+        v = ouro[cond]["refusal"]["3"]["Lout_rms"]
+        txt = f"{v:.1f}" + (f"  ({v / r_c['3']['Lout_rms']:.1f}× clean)" if cond.startswith("ortho") else "")
+        ax.text(8.05, v + (0.35 if cond == "hook" else 0), txt, color=C[cond], fontsize=9.5, ha="right", va="bottom",
+                weight="bold")
+    ax.legend(loc="upper left", fontsize=9.5, bbox_to_anchor=(0.0, 0.92), frameon=False)
+
+    # ---- Nanbeige
+    for cond, lab, ls in conds:
+        if cond not in nanb:
+            continue
+        x, y = path(nanb, cond, 2)
+        if cond != "clean":
+            x, y = x[1:], y[1:]  # log scale: skip the zero at the embedding
+        bx.plot(x, y, marker="o", ms=4, color=C[cond], ls=ls, lw=2.3, zorder=3)
+    shade(bx, 2, 190)
+    bx.set_yscale("log"); bx.set_ylim(0.02, 200); bx.set_xlim(-0.1, 4.1)
+    bx.set_title("Nanbeige4.2-3B (2 loops): one pass, and it shrinks", fontsize=11.5)
+    rn = nanb["ortho"]["refusal"]; rc = nanb["clean"]["refusal"]
+    bx.text(0.1, 0.035, "writes added raw:\nweight ortho exact in loop 1", fontsize=9, color=C["ortho"])
+    bx.annotate(f"norm shrinks the stream ×{rc['0']['Lout_len'] / rc['0']['Lin_len']:.2f}:\n"
+                f"one fixed leak of {rn['0']['Lout_rms']:.1f}", xy=(1.62, 1.5), xytext=(2.05, 0.25),
+                arrowprops=dict(arrowstyle="->", color="#8c564b"), color="#8c564b", fontsize=9)
+    bx.annotate(f"loop 2 writes most of the clean u\n({rc['0']['Lout_rms']:.1f} → {rc['1']['Lin_rms']:.0f}); "
+                f"edited writers\ncannot: ends at {rn['1']['Lin_rms'] / rc['1']['Lin_rms']:.0%} of clean",
+                xy=(3, rc["1"]["Lin_rms"] * 1.15), xytext=(1.55, 70), va="top", arrowprops=dict(arrowstyle="->", color="#555"),
+                color="#555", fontsize=9)
+    nx.text(0.725, 0.92, "Nanbeige: writes are added raw (exact edit inside\na loop); its one shared norm shrinks the stream,\n"
+            "so the leak is a fixed 2.1 and nothing compounds.\nu ends at 9% of clean.", ha="left", va="top",
+            fontsize=10, color="#555")
+    fig.suptitle("Leak 2 (inter-loop norm): the norm between loops re-injects u and scales it up; a weight edit also "
+                 "stops the writers from cancelling it, so in Ouro it ratchets up loop after loop", fontsize=12.5)
+    fig.text(0.5, 0.01, "Measured on 8 clean CoTs per model (teacher-forced), refusal direction (Ouro: loop 4, L16; "
+             "Nanbeige: loop 2, L15). Points: the stream entering and leaving each norm.", ha="center", fontsize=9.5,
+             color="#444")
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.9, bottom=0.04)
+    fig.savefig(OUT / "leak2.png", dpi=150); plt.close(fig)
+
+
+# ---------------------------------------------------------------- 3. mechanism data
+def load_cmp(model, site):
+    return json.load(open(RUNS / model / "analysis" / f"ortho_compare_v4_baseline_{site}.json"))
 
 
 # ---------------------------------------------------------------- 4. reduced loop count (Ouro)
@@ -624,7 +734,7 @@ def copy_sweep_figures():
 
 
 if __name__ == "__main__":
-    fig_interventions(); fig_norm_leak(); fig_loop_growth(); fig_compounding(); fig_loop_count()
+    fig_interventions(); fig_norm_leak(); fig_leak1(); fig_leak2(); fig_loop_count()
     fig_results(); fig_sites(); copy_sweep_figures()
     fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe()
     print("figures ->", OUT)

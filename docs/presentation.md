@@ -245,39 +245,24 @@ some loops is a separate experiment (next slides).
 
 ## Leak 1: sandwich norms (Ouro only)
 
-```
-Qwen / Nanbeige layer                 Ouro layer
-h = h + Attn(Norm(h))                 h = h + Norm₂( Attn(Norm(h)) )
-h = h + MLP(Norm(h))                  h = h + Norm₂( MLP(Norm(h))  )
-          ↑ edited weights write here           ↑ Norm₂ sits after the edited weights
-```
+![w:1150](figures/leak1.png)
 
-- After weight ortho the raw matrix outputs are clean (projection on `u` ≈ 0.001). After `Norm₂` each write carries
-  `u` **at clean strength** again (0.09–0.17 vs clean 0.08–0.18). 48 such writes per loop.
-- This alone breaks Ouro **with a random direction**, even at 1 loop.
+- Weight ortho only controls the **matrix output**. What reaches the stream is whatever sits after the matrix: in Qwen
+  and Nanbeige nothing (exact), in Ouro a second norm, which rotates the clean output back onto `u`.
+- Measured: the edited matrices write 0.001 along `u`; after `Norm₂` each write carries 0.09–0.17 (clean 0.08–0.18).
+  Hooks act on the write itself, after the norm. This leak alone breaks Ouro **with a random direction**, even at 1 loop.
 
 ---
 
-## Leak 2: the inter-loop norm compounds in Ouro only
+## Leak 2: the inter-loop norm compounds (Ouro only)
 
-![w:1100](figures/compounding.png)
+![w:1150](figures/leak2.png)
 
-- Each pass of the shared norm adds a **fresh leak** and **rescales** the `u` already carried. In the clean model the
-  next loop's writers push back against `u` (restoring slope −0.1 to −0.19 per loop); **weight ortho removes exactly
-  that ability.**
-- **Ouro:** the norm scales the stream **up** (×1.05 → ×2.1), 3 times: `u` grows 0.28 → 0.88 → 2.39 → 4.81, **5.6× clean**.
-- **Nanbeige:** the stream is huge (length ≈ 2780), so the norm scales it **down 70×**: one fixed offset of 16% of
-  clean, and loop 2 writes 10× more than it inherits.
-
----
-
-## The same thing, per loop
-
-![w:1050](figures/loop_growth.png)
-
-- Hooks keep `u` below 0.4% of clean in both models: they re-project after every norm.
-- Ouro weight ortho grows past clean by loop 2. Norm-aware ortho fixes leak 1 (loop 1 ≈ 0), but leak 2 still grows it.
-- Nanbeige weight ortho: one small step, then the model ends.
+- Each Ouro loop **rewrites about half of the stream** it inherits. Clean: `u` is rewritten with the rest (bounded).
+- A weight edit stops the writers from writing along `u`, which also means **they cannot cancel `u`**. Whatever the
+  shared norm injects (0.3–0.4 even into a `u`-free stream) survives the loop untouched and is scaled up ×2.2–3.2 by
+  the next norm: 0 → 0.4 → 1.3 → 3.5 → 8.5 (norm-aware ortho, leak 1 fixed). With leak 1 on top: 11.0, 4.5× clean.
+- **Nanbeige:** one shared norm that shrinks the stream ×0.01, so the leak is a fixed offset (9% of clean at the end).
 
 ---
 
