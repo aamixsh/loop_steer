@@ -144,9 +144,7 @@ the other half. It measures **readability**, not cause; the ablations test cause
 
 ---
 
-## Results across models (test set)
-
-![w:1150](figures/results.png)
+## Reading the results figure
 
 **What a bar is:** 487 held-out harmful prompts × 3 sampled CoTs = 1,461 CoTs, each followed by 3 sampled answers. A CoT
 scores the share of its answers the judge marks as refusals (a CoT that never closes is judged once on its raw text);
@@ -154,14 +152,22 @@ the bar is the mean over all 1,461 CoTs, so every prompt weighs the same.
 
 **Columns** (same order for every model): clean model · a **random direction** of the same norm ablated with hooks
 (control: removing just any direction should not stop refusal) · **hook ablation** of the refusal direction `u` ·
-**weight orthogonalization** with `u` · **activation addition** of −`c`·`r` at one layer. `u` is the selection winner;
-"u from loop 4, L16" means it was measured at layer 16 during Ouro's 4th loop and is then removed at every layer of
-every loop.
+**weight orthogonalization** with `u` · **activation addition** of −`c`·`r` at one layer.
 
-- **Qwen:** all three interventions work (61% → 6–7%). **Ouro:** hooks 10%, actadd 17%; the weight edit gives no valid
-  outputs (50 prompts, so not run on the test set). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. **gpt-oss:**
-  hooks and weight edit 2% (from 92%), actadd 15%. Random directions change nothing (Nanbeige weight edit with a random
-  direction: 73%).
+**Measured vs applied:** `u` is *measured* at one site, the selection winner (e.g. Ouro: layer 16 during loop 4). Hook
+ablation then *removes* it at **every** site: all 24 layers of all 4 loops in Ouro (96 sites), at every token. Weight
+ortho edits it out of every writer's weights. Only actadd acts at one layer (in every loop). Restricting ablation to
+some loops is a separate experiment (next slides).
+
+---
+
+## Results across models (test set)
+
+![h:500](figures/results.png)
+
+- **Qwen** 61% → 6–7% with all three. **Ouro:** hooks 10%, actadd 17%, weight edit broken (no valid outputs on 50
+  prompts). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. **gpt-oss:** hooks and weight edit 2% (from 92%),
+  actadd 15%. Random directions change nothing (Nanbeige weight edit with a random direction: 73%).
 - **Inference:** the method transfers to looped and to MoE models; in looped models only interventions that act after
   every norm (hooks) are safe.
 
