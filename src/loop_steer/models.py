@@ -11,16 +11,23 @@ NANBEIGE_ID = "Nanbeige/Nanbeige4.2-3B"
 NANBEIGE_REVISION = "b82e54bd609793562a75cbf9337970a93369eab5"
 GPT_OSS_ID = "openai/gpt-oss-20b"  # MoE (32 experts, top-4), MXFP4 experts; same snapshot as the judge
 GPT_OSS_REVISION = "6cee5e81ee83917806bbde320786a8fb61efebee"
+DORY_ID = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"  # looped nGPT; our implementation (loop_steer.dory)
+DORY_REVISION = "b366b87f762ea334ba3eb55912031baba1515810"
 
 # Looped models: pinned (revision, loop-count config attribute). Custom code => trust_remote_code.
 LOOPED = {
     OURO_ID: (OURO_REVISION, "total_ut_steps"),
     NANBEIGE_ID: (NANBEIGE_REVISION, "num_loops"),
+    DORY_ID: (DORY_REVISION, "n_recurrent_loops"),
 }
 
 
 def is_ouro(model_name: str) -> bool:
     return "ouro" in model_name.lower()
+
+
+def is_dory(model_name: str) -> bool:
+    return "dory" in model_name.lower()
 
 
 def is_gpt_oss(model_name: str) -> bool:
@@ -54,10 +61,27 @@ def is_looped(model_name: str) -> bool:
 
 def n_loops(config) -> int:
     """Number of times the layer stack is applied (1 for ordinary models)."""
-    return getattr(config, "total_ut_steps", None) or getattr(config, "num_loops", None) or 1
+    return (getattr(config, "total_ut_steps", None) or getattr(config, "num_loops", None)
+            or getattr(config, "n_recurrent_loops", None) or 1)
+
+
+def model_sites(config) -> list[tuple[int, int]]:
+    """The (loop, layer) sites a forward pass visits, in execution order.
+
+    Ouro and Nanbeige run every layer in every loop. Dory runs its input and output sublayers once (reported as loop 0)
+    and its recurrent sublayers once per loop.
+    """
+    T, L = n_loops(config), config.num_hidden_layers
+    if getattr(config, "model_type", None) == "dory":
+        n_in, n_rec = config.n_input_layers, config.n_recurrent_layers
+        return ([(0, l) for l in range(n_in)] + [(t, l) for t in range(T) for l in range(n_in, n_in + n_rec)]
+                + [(0, l) for l in range(n_in + n_rec, L)])
+    return [(t, l) for t in range(T) for l in range(L)]
 
 
 def _remote_kwargs(model_name: str) -> dict:
+    if model_name == DORY_ID:  # no remote code: loop_steer.dory registers the classes
+        return {"revision": DORY_REVISION}
     if model_name in LOOPED:
         return {"revision": LOOPED[model_name][0], "trust_remote_code": True}
     if model_name == QWEN_ID:
@@ -87,6 +111,10 @@ def load_model(model_name: str, *, device="cuda:0", dtype=torch.bfloat16, n_loop
 
         if not hasattr(DynamicCache, "get_max_length"):
             DynamicCache.get_max_length = lambda self: None
+    if model_name == DORY_ID:
+        from loop_steer.dory import register
+
+        register()
     if model_name in LOOPED or is_ouro(model_name):
         config = AutoConfig.from_pretrained(model_name, **kwargs)
         if is_ouro(model_name):
@@ -138,6 +166,8 @@ def vllm_kwargs(model_name: str) -> dict:
                 "tokenizer_mode": "slow"}  # same SentencePiece tokenizer as the HF path
     if model_name == QWEN_ID:
         return {"revision": QWEN_REVISION, "tokenizer_revision": QWEN_REVISION}
+    if model_name == DORY_ID:
+        return {"revision": DORY_REVISION, "tokenizer_revision": DORY_REVISION}
     if model_name == GPT_OSS_ID:  # weights from the local bf16 copy (vllm_model), tokenizer from the hub snapshot
         return {"tokenizer": GPT_OSS_ID, "tokenizer_revision": GPT_OSS_REVISION}
     return {}
@@ -149,13 +179,19 @@ def prepare_vllm(model_name: str) -> bool:
     Returns True when prompts should be passed as token ids (tokenized with the HF tokenizer and
     ``add_special_tokens=False``) so vLLM cannot add a second BOS. Nanbeige has no native vLLM
     support; our port (``loop_steer.vllm_nanbeige``) is registered in-process, which needs the
-    engine core to run in this process too.
+    engine core to run in this process too. Dory likewise (``loop_steer.vllm_dory``).
     """
     import os
 
     if model_name == NANBEIGE_ID:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         from loop_steer.vllm_nanbeige import register
+
+        register()
+        return True
+    if model_name == DORY_ID:  # NVIDIA's vLLM PR, ported to 0.18 (loop_steer.vllm_dory)
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        from loop_steer.vllm_dory import register
 
         register()
         return True

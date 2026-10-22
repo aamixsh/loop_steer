@@ -58,7 +58,7 @@ def main():
     with torch.inference_mode():
         eye_norms = []
         def norm_hook(m, a, kw):
-            if loops is None or kw.get("current_ut", 0) in loops:
+            if loops is None or kw.get("current_ut", kw.get("loop_idx", 0)) in loops:
                 h = a[0] if a else kw["hidden_states"]
                 eye_norms.append(float(h[enc.attention_mask.bool()].float().norm(dim=-1).mean()))
         with hooked(lambda: [model.model.layers[args.layer].register_forward_pre_hook(norm_hook, with_kwargs=True)]):

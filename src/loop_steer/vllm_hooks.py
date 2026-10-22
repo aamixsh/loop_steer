@@ -12,7 +12,8 @@ Spec dicts (tensors may be on CPU):
       resid_pre(l) += coeff * vec in the given loops (all positions).
   {"kind": "ablate", "dir": [D], "loops": None | [t, ...], "positions": None | [cls, ...]}
       project dir out of every layer input and every residual write
-      (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms).
+      (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms; for Dory, each sublayer's mixer output and
+      the final stream before the unembedding).
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -37,8 +38,12 @@ def _is_gpt_oss(model) -> bool:
     return hasattr(model.model.layers[0], "attn") and not hasattr(model.model.layers[0], "self_attn")
 
 
+def _is_dory(model) -> bool:
+    return hasattr(model.model.layers[0], "mixer")
+
+
 def _is_looped(model) -> bool:
-    """Layers take (positions, hidden, loop_idx, residual): Ouro, or the Nanbeige port."""
+    """Layers take (positions, hidden, loop_idx[, residual]): Ouro, or the Nanbeige and Dory ports."""
     return _is_ouro(model) or hasattr(model.model, "num_loops")
 
 
@@ -108,6 +113,7 @@ def install(model, specs):
     ouro = _is_ouro(model)
     looped = _is_looped(model)
     gpt_oss = _is_gpt_oss(model)
+    dory = _is_dory(model)
     pos_arg = 1 if gpt_oss else 0  # index of the positions argument of a decoder layer
     device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
     state = {"loop": 0, "cls": None, "masks": {}}
@@ -157,6 +163,9 @@ def install(model, specs):
         if gpt_oss:
             h, pos, res = args[0], args[1], args[2] if len(args) > 2 else None
             return h, 0, res, lambda h2, r2: (h2, pos, r2, *args[3:])
+        if looped and len(args) == 3:  # Dory: (positions, hidden, loop_idx), no fused residual
+            pos, h, loop = args
+            return h, loop, None, lambda h2, r2: (pos, h2, loop)
         if looped:
             pos, h, loop, res = args[0], args[1], args[2], args[3] if len(args) > 3 else None
             return h, loop, res, lambda h2, r2: (pos, h2, loop, r2, *args[4:])
@@ -208,9 +217,17 @@ def install(model, specs):
                     return (proj(output[0]), *output[1:])
                 return proj(output)
 
+            if dory and pos_cls is None:  # final stream before the unembedding (logits_processor(lm_head, hidden));
+                # it sees only the sampled rows, so position-gated specs skip it
+                def final(module, args, proj=proj, active=active):
+                    return (args[0], proj(args[1]), *args[2:]) if active() else None
+
+                handles.append(model.logits_processor.register_forward_pre_hook(final))
             for layer in layers:
                 handles.append(layer.register_forward_pre_hook(pre))
-                if ouro:
+                if dory:
+                    handles.append(layer.mixer.register_forward_hook(post))
+                elif ouro:
                     handles.append(layer.input_layernorm_2.register_forward_hook(post))
                     handles.append(layer.post_attention_layernorm_2.register_forward_hook(post))
                 else:

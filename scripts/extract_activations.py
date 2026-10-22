@@ -48,7 +48,7 @@ def main():
     from loop_steer.hooks import capture_window_means
     from loop_steer.cot import format_prompt
     from loop_steer.models import eoi_length, is_gpt_oss, load_model, load_tokenizer
-    from loop_steer.models import n_loops as n_loops_of
+    from loop_steer.models import model_sites
 
     tok = load_tokenizer(args.model)
     model = load_model(args.model)
@@ -73,9 +73,7 @@ def main():
     df["n_prompt_tokens"] = [len(p) for p, _ in seqs]
     df["n_cot_tokens"] = [len(c) for _, c in seqs]
 
-    n_loops = n_loops_of(model.config)
-    n_layers = model.config.num_hidden_layers
-    sites = [(t, l) for t in range(n_loops) for l in range(n_layers)]
+    sites = model_sites(model.config)
     D = model.config.hidden_size
     acts = torch.zeros(len(df), len(WINDOWS), len(sites), D, dtype=torch.float16)
 

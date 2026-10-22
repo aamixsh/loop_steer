@@ -7,6 +7,9 @@ for pre-norm models whose sublayer outputs are added to the residual
 unnormalized (Qwen/Llama/Nanbeige): the edited matrices cannot write along the
 direction at all.
 
+Dory (looped nGPT) updates the stream as ``justnorm(â + lr * (justnorm(W x) - â))`` with a per-dimension ``lr``; the
+gainless justnorm keeps ``W x ⊥ u`` but the per-dimension ``lr`` (as ``gain``) does not, on the write or on ``â``.
+
 Ouro adds ``RMSNorm_2(sublayer(x))`` instead (sandwich norms). Its write along
 ``u`` is ``<g * x/rms(x), u> = <x, g*u>/rms(x)`` where ``g`` is the norm's gain,
 so projecting ``u`` out of ``x`` does NOT zero the write (``g`` is not uniform).
@@ -34,6 +37,12 @@ def _residual_writers(model):
     router-weighted sum of the selected experts' outputs; editing all of them makes every possible sum orthogonal.
     """
     inner = model.model
+    if hasattr(inner.layers[0], "mixer"):  # Dory: one sublayer per layer, written as lr * justnorm(W x)
+        yield "embed", inner.embeddings.weight, "rows", None, False
+        for i, layer in enumerate(inner.layers):
+            proj = layer.mixer.o_proj if layer.is_attention else layer.mixer.down_proj
+            yield f"{'o_proj' if layer.is_attention else 'down_proj'}.{i}", proj.weight, "cols", layer.lr(), False
+        return
     embed = inner.embed_tokens if hasattr(inner, "embed_tokens") else inner.embedding  # vLLM gpt-oss: embedding
     yield "embed", embed.weight, "rows", None, False
     for i, layer in enumerate(inner.layers):

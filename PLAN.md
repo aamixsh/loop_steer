@@ -36,9 +36,16 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
-Nothing (GPU 0 idle). gpt-oss runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`, `scripts/prepare_gpt_oss_bf16.py`):
-vLLM's MXFP4 experts cannot be edited. GPU 1 belongs to another project. gpuq kills a job silent for `--idle` seconds
-(default 1800).
+Nothing. **Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT) is ready to run** but waits for a free GPU 0 (other
+projects were using it on 2026-10-22). No transformers or vLLM release supports it: `loop_steer.dory` (config + HF
+implementation, follows NVIDIA's vLLM PR #60149) and `loop_steer.vllm_dory` (that PR ported to vLLM 0.18, in-process)
+are ours. Checked without GPU: the vLLM port matches the HF implementation to 4e-7 (fp32, tiny random config, the PR's
+CPU attention harness); the real checkpoint loads and reasons coherently on CPU (refuses a harmful prompt). Steps:
+`GPU=0 scripts/run_dory.sh validate|clean|directions`, then a layer screen chosen from the per-site analysis.
+Sites: 16 input + 40 recurrent x 2 loops + 16 output sublayers = 112 (input/output report loop 0). Prediction: weight
+ortho leaks at every sublayer (the stream update uses a per-dimension interpolation weight), hooks stay exact.
+gpt-oss runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`). GPU 1 belongs to another project. gpuq kills a job silent
+for `--idle` seconds (default 1800).
 
 ## Next TODO (in order)
 
@@ -65,6 +72,8 @@ vLLM's MXFP4 experts cannot be edited. GPU 1 belongs to another project. gpuq ki
 8. [ ] Retire `queue_*.sh` and `run_followups.sh` (keep `run_followups.sh` as the record of how the follow-ups ran).
 9. [ ] Render the Marp deck (no `marp` on this machine) and check slide overflow.
 10. [ ] Housekeeping before making the repo public: license, decide on rewriting git history.
+11. [ ] **Dory** (see Running now): validate on GPU, clean run, directions, screen, test set; compare the leak
+    prediction with `ortho_compare`-style measurements (needs a Dory branch: no `model.norm`, per-sublayer `lr`).
 
 ## Open questions for the user
 

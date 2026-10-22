@@ -96,7 +96,8 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
 
     For pre-norm models (Qwen/Llama) this is: layer input + self_attn output +
     mlp output at every layer, which is equivalent to weight orthogonalization.
-    Ouro is dispatched to ``ouro_ablation_hooks`` (sandwich norms).
+    Ouro is dispatched to ``ouro_ablation_hooks`` (sandwich norms). Dory: every sublayer input and every mixer output
+    (its write), and the final stream before the unembedding (its last interpolation is not followed by a sublayer).
     """
     if hasattr(decoder_layers(model)[0], "input_layernorm_2"):
         return ouro_ablation_hooks(model, direction, loops=loops)
@@ -122,16 +123,25 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
             return (_project_out(output[0], unit), *output[1:])
         return _project_out(output, unit)
 
+    def final(module, args):
+        return (_project_out(args[0], unit), *args[1:]) if active() else None
+
     def register():
         handles = []
         for block in blocks:
             handles.append(block.register_forward_pre_hook(track, with_kwargs=True))  # first: sets the loop
             if "resid_pre" in sites:
                 handles.append(block.register_forward_pre_hook(pre, with_kwargs=True))
+            if hasattr(block, "mixer"):  # Dory: one sublayer per block
+                if ("attn" if block.is_attention else "mlp") in sites:
+                    handles.append(block.mixer.register_forward_hook(post))
+                continue
             if "attn" in sites:
                 handles.append(block.self_attn.register_forward_hook(post))
             if "mlp" in sites:
                 handles.append(block.mlp.register_forward_hook(post))
+        if hasattr(blocks[0], "mixer") and "resid_pre" in sites:
+            handles.append(model.lm_head.register_forward_pre_hook(final))
         return handles
 
     return register
