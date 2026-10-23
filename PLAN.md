@@ -36,14 +36,46 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
-Nothing. **Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT) is ready to run** but waits for a free GPU 0 (other
-projects were using it on 2026-10-22). No transformers or vLLM release supports it: `loop_steer.dory` (config + HF
-implementation, follows NVIDIA's vLLM PR #60149) and `loop_steer.vllm_dory` (that PR ported to vLLM 0.18, in-process)
-are ours. Checked without GPU: the vLLM port matches the HF implementation to 4e-7 (fp32, tiny random config, the PR's
-CPU attention harness); the real checkpoint loads and reasons coherently on CPU (refuses a harmful prompt). Steps:
-`GPU=0 scripts/run_dory.sh validate|clean|directions`, then a layer screen chosen from the per-site analysis.
-Sites: 16 input + 40 recurrent x 2 loops + 16 output sublayers = 112 (input/output report loop 0). Prediction: weight
-ortho leaks at every sublayer (the stream update uses a per-dimension interpolation weight), hooks stay exact.
+**Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT)**: clean baselines queued 2026-10-22 19:32 ET (test set `none`
+in TAG `test`; MATH-500 and AIME 2025 `none` in TAG `cap`); `validate`, `clean`, `directions` and three screen rounds
+(32 candidates, `analysis/select_screen.csv`) are done. Which interventions go to the test set is open (see below).
+- **Dory resists single-direction ablation** (50 selection prompts, all_refusal / unclosed): clean 89%, random 91%.
+  `v4_baseline` hooks, u from: t0.l26 43% / 16%, t0.l22 47% / 13% (per-loop directions 38% / 12%), t0.l38 59% / 10%,
+  t1.l38 62% / 10%, t1.l30 77%, t0.l18-20 78-82%, t0.l30 81%, later sites 74-94%, input l10-14 89-92%, and **t0.l24 /
+  t0.l34 99%** (above clean). `v4_cot` 84-92% (no effect, CoTs intact, unlike Ouro and gpt-oss). Actadd t0.l22 c=-1 /
+  -1.5 / -2: 73 / 62 / 52% (4 / 8 / 23% unclosed); t1.l30 c=-2 26% with 61% unclosed (broken). Weight edit: t0.l22 70%,
+  t1.l38 77% plain, 78% lr-aware (hooks at the same sites 47% / 62%: the predicted leak).
+- **Why: zero is not "complying" along u, and removing u is not enough.** Which u works does not track AUC (rank corr.
+  -0.11 over 16 sites) but where 0 lies along it (CoT-window class midpoint over sites: -0.95). Affine ablation (ACE,
+  Marshall et al. 2024; `ace=<method>` in intervene.py, hooks in both engines) sets the component to the complying
+  class mean instead of 0, so the classes no longer differ along u anywhere: with the CoT-window reference it gives
+  64-89% (u from t0.l22 78%, t0.l24 75%, t0.l26 64%, t0.l34 89%, t0.l38 73%, t1.l38 77%; <= 6% unclosed; random 92%).
+  t0.l24 / t0.l34 drop from 99% (plain zeroing pushed toward refusal there). Lower refusal needs pushing past complying:
+  plain zeroing at t0.l22 / t0.l26 (shift 1.5x the class gap) 47% / 43%; the end-of-prompt reference at t0.l22 (shift
+  2.5x the gap) 26% with 19% unclosed. Over all 24 `v4_baseline` hook candidates, refusal follows the shift of the
+  refusing CoT mean along u (rank corr. 0.74). So in Dory the drop comes from steering along u, not from removing it;
+  refusal is largely carried outside u.
+- The direction rotates more across depth than in Ouro: u from t1.l38 has cos > 0.5 with 48/112 sites (Ouro's u from
+  t3.l16: 70/96), down to 0.16 in the second half (Ouro 0.55).
+- Clean train run: 92.4% refusal (4,446 judged answers), 1.2% unclosed; labels 1,362 refusing / 94 complying CoTs
+  (prompt level 457 / 33, 31 prompts mixed).
+- Directions at 112 sites (16 input + 40 recurrent x 2 loops + 16 output sublayers; input/output report loop 0).
+  End-of-prompt AUC rises through recurrent loop 0 and peaks at 0.95-0.96 at recurrent 34-42 in both loops (random
+  0.5-0.65), flat through the output stack; the CoT window is 0.95 everywhere but random directions reach 0.8-0.96 there
+  (as in Ouro and gpt-oss).
+- Screen candidates are listed in `scripts/run_dory.sh` (step `screen`); full table in
+  `analysis/select_screen.csv`.
+- `validate`: greedy HF~vLLM prefix agreement 0.83 clean, 0.60 under random-direction ablation (above HF~HFclean 0.50
+  and vLLM~vLLMclean 0.28, so both engines make the same change; bf16 greedy noise); actadd outputs match for the first
+  ~20 tokens.
+- No transformers or vLLM release supports Dory: `loop_steer.dory` (config + HF implementation, follows NVIDIA's vLLM
+  PR #60149) and `loop_steer.vllm_dory` (that PR ported to vLLM 0.18, in-process) are ours. CPU checks (fp32, tiny
+  random config, the PR's attention harness): port vs HF 4e-7; ablation hooks vLLM vs HF logits 6e-8 (ablation moves
+  them 0.06), u.h < 4e-8 at every block input in both; weight edit vLLM vs HF 6e-8, restore exact; affine ablation
+  vLLM vs HF 7e-8, every block input at its reference to 1e-7.
+- Prediction: weight ortho leaks at every sublayer (the stream update uses a per-dimension interpolation weight), hooks
+  stay exact. The tiny random model shows it: ortho leaves |u.h| 0.01-0.05 at block inputs (clean 0.15-0.17), lr-aware
+  ortho 0.01-0.03.
 gpt-oss runs use a bf16 copy (`data/models/gpt-oss-20b-bf16`). GPU 1 belongs to another project. gpuq kills a job silent
 for `--idle` seconds (default 1800).
 
@@ -72,14 +104,18 @@ for `--idle` seconds (default 1800).
 8. [ ] Retire `queue_*.sh` and `run_followups.sh` (keep `run_followups.sh` as the record of how the follow-ups ran).
 9. [ ] Render the Marp deck (no `marp` on this machine) and check slide overflow.
 10. [ ] Housekeeping before making the repo public: license, decide on rewriting git history.
-11. [ ] **Dory** (see Running now): validate on GPU, clean run, directions, screen, test set; compare the leak
-    prediction with `ortho_compare`-style measurements (needs a Dory branch: no `model.norm`, per-sublayer `lr`).
+11. [ ] **Dory** (see Running now): validate, clean run, directions, three screen rounds (done), clean baselines
+    (queued), then test set, capability; compare the leak prediction with `ortho_compare`-style measurements (needs a
+    Dory branch: no `model.norm`, per-sublayer `lr`).
 
 ## Open questions for the user
 
 - Selection-set-only results remain (all-subsets sweep, loop x layer map, Ouro weight edit). Rerun any of them on the
   test set before reporting?
 - GPU use: GPU 0 only so far (GPU 1 runs another project's jobs).
+- Dory test set: by the usual rule (lowest refusal with unclosed <= ~10%) the hook winner is u from t0.l38 (59%);
+  the strongest are t0.l26 (43%, 16% unclosed) and affine t0.l22 with the end-of-prompt reference (26%, 19%). Which to
+  run (each ~1 h on the test set), and whether to test multi-direction (subspace) ablation first?
 
 ## How to resume
 

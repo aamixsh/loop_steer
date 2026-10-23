@@ -10,10 +10,11 @@ pass, where ``hidden_states`` is the full stream). Residual writes are the outpu
 Spec dicts (tensors may be on CPU):
   {"kind": "actadd", "vec": [D], "layer": l, "coeff": c, "loops": None | [t, ...], "positions": None | [cls, ...]}
       resid_pre(l) += coeff * vec in the given loops (all positions).
-  {"kind": "ablate", "dir": [D], "loops": None | [t, ...], "positions": None | [cls, ...]}
+  {"kind": "ablate", "dir": [D], "loops": None | [t, ...], "positions": None | [cls, ...], "ref": None | [T, L]}
       project dir out of every layer input and every residual write
       (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms; for Dory, each sublayer's mixer output and
-      the final stream before the unembedding).
+      the final stream before the unembedding). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
+      gets component ``ref[t, l]`` along dir instead of 0 (the final stream gets ``ref[0, -1]``); writes still get 0.
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -24,6 +25,8 @@ each request's ``SamplingParams.extra_args["ls_bounds"] = (P, C)``: positions ``
 ``C < 0``) CoT, the rest answer; ``loop_steer.sampling.vllm_generator(gated=True)`` sets them. Tokens of requests
 without bounds get no class and are never intervened on.
 """
+
+import functools
 
 import torch
 
@@ -198,17 +201,23 @@ def install(model, specs):
         elif spec["kind"] == "ablate":
             u = spec["dir"].float()
             u = (u / u.norm()).to(device=device, dtype=dtype)
+            ref = spec.get("ref")
+            if ref is not None and ouro:
+                raise NotImplementedError("affine ablation (ref) is not implemented for Ouro's sandwich norms")
+            ref = None if ref is None else ref.float().tolist()
 
-            def proj(x, u=u, pos_cls=pos_cls):
-                coef = (x @ u).unsqueeze(-1)
+            def proj(x, target=0.0, u=u, pos_cls=pos_cls):
+                coef = (x @ u).unsqueeze(-1) - target
                 m = fit(mask(pos_cls), x)
                 return x - (coef if m is None else m * coef) * u
 
-            def pre(module, args, proj=proj, active=active):
+            def pre(module, args, i=None, proj=proj, active=active, ref=ref):
                 if not active():
                     return None
-                h, _, res, rebuild = unpack(args)
-                return rebuild(proj(h), None if res is None else proj(res))
+                h, loop, res, rebuild = unpack(args)
+                # affine: the stream (h + res when the residual is fused) gets the reference value along u
+                target = 0.0 if ref is None else ref[int(loop)][i]
+                return rebuild(proj(h, target), None if res is None else proj(res))
 
             def post(module, args, output, proj=proj, active=active):
                 if not active():
@@ -219,12 +228,12 @@ def install(model, specs):
 
             if dory and pos_cls is None:  # final stream before the unembedding (logits_processor(lm_head, hidden));
                 # it sees only the sampled rows, so position-gated specs skip it
-                def final(module, args, proj=proj, active=active):
-                    return (args[0], proj(args[1]), *args[2:]) if active() else None
+                def final(module, args, proj=proj, active=active, target=0.0 if ref is None else ref[0][-1]):
+                    return (args[0], proj(args[1], target), *args[2:]) if active() else None
 
                 handles.append(model.logits_processor.register_forward_pre_hook(final))
-            for layer in layers:
-                handles.append(layer.register_forward_pre_hook(pre))
+            for i, layer in enumerate(layers):
+                handles.append(layer.register_forward_pre_hook(functools.partial(pre, i=i)))
                 if dory:
                     handles.append(layer.mixer.register_forward_hook(post))
                 elif ouro:

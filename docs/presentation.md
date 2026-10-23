@@ -7,6 +7,7 @@ title: Refusal directions in looped reasoning models
 # Refusal directions in looped reasoning models
 
 Qwen3-8B (reproduction) → Ouro-1.4B-Thinking (4 loops) → Nanbeige4.2-3B (2 loops) → gpt-oss-20b (MoE)
+→ Nemotron-Labs Dory 1.0 4B (looped nGPT; screen only)
 
 Method: *reasoning-manipulation* (arXiv 2507.03167), built on *refusal_direction* (Arditi et al.)
 
@@ -40,6 +41,7 @@ Questions:
 | Ouro-1.4B-Thinking | 24 × 4 | 96 | **sandwich norm on every write** | shared, 3 passes |
 | Nanbeige4.2-3B | 22 × 2 | 44 | none | shared, 1 pass |
 | gpt-oss-20b (MoE: 4 of 32 experts per token) | 24 × 1 | 24 | none (biases on `o_proj` and experts) | – |
+| Dory 1.0 4B (nGPT, unit-norm stream) | 16 + 40 × 2 + 16 sublayers | 112 | **per-dimension blend on every write** | input re-injected, 1 pass |
 
 ---
 
@@ -382,6 +384,41 @@ Logit lens on clean traces (decode each loop's output directly):
   close are as accurate. AIME at 16k: 65.4 / 57.1 / 57.5% (gap 8 points, still from capped CoTs).
 ---
 
+## Dory 1.0 4B: a looped nGPT (screen, 50 prompts)
+
+- **Architecture:** 16 input sublayers, 40 recurrent sublayers run twice, 16 output (each sublayer is attention *or*
+  MLP). The stream has unit length; every sublayer blends its normalised write in with a learned per-dimension weight:
+  `h ← norm(h + lr ⊙ (norm(write) − h))`. No release of transformers or vLLM runs it; we ported NVIDIA's vLLM PR
+  (matches our HF implementation to 1e-7; hooks, weight edit and affine ablation checked the same way).
+- **Clean:** 92% refusal on the train prompts, 89% on the screen; directions separate refusing and complying best at
+  recurrent sublayers 34–42 (AUC 0.95–0.96, both loops).
+
+| Screen (u measured at; all sites intervened) | refusal | unclosed CoTs |
+|---|---|---|
+| clean / random direction | 89% / 91% | 0 / 0 |
+| hooks, `v4_baseline` u from loop 1 L22 / L26 / L38 | 47% / 43% / 59% | 13% / 16% / 10% |
+| hooks, u from loop 1 L24 or L34 | **99%** | 0 |
+| affine ablation (classes made equal along u), 6 sites | 64–89% | ≤ 6% |
+| weight ortho, u from loop 1 L22 / loop 2 L38 | 70% / 77% | 2% / 3% |
+| actadd at loop 1 L22, c = −1 / −2 | 73% / 52% | 4% / 23% |
+| CoT-window directions | 84–92% | ≤ 5% |
+
+---
+
+## Dory: ablation works only as a push
+
+![w:1050](figures/dory_push.png)
+
+- Figure labels: `t0.l22` = loop 1, sublayer 22 (`t1` = loop 2; `l14` = input sublayer).
+- Zeroing u is not a neutral "off" in a unit-norm stream: depending on the site, 0 lies past the complying mean (a
+  push toward complying) or on the refusing side (L24, L34: refusal *rises* to 99%).
+- **Affine ablation** (ACE, Marshall et al. 2024) sets the component to the complying mean, so refusing and complying no
+  longer differ along u anywhere: refusal stays at 64–89%. Lower needs pushing past complying, which costs closed CoTs.
+- Unlike Qwen, Ouro, Nanbeige and gpt-oss, **one direction does not carry Dory's refusal**. The weight edit leaks at
+  every sublayer (the per-dimension blend), so it is weaker than hooks at the same site (70% vs 47%).
+
+---
+
 ## Next steps
 
 1. **Deck:** add the loop-rebuild result (ablating loop 1 only: Ouro rebuilds 93% of the clean prompt-end separation by
@@ -390,7 +427,9 @@ Logit lens on clean traces (decode each loop's output directly):
    on the test set; then gpt-oss.
 3. **Statistics:** bootstrap confidence intervals over prompts for every table.
 4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-5. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
+5. **Dory:** test-set runs of the chosen interventions; subspace ablation (does refusal live in a few directions?);
+   capability baselines are running.
+6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
    whole-CoT gap (15% vs the paper's 7.5%).
 
 ---

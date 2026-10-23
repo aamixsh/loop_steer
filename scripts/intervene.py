@@ -17,6 +17,10 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
                          expert; the reasoning-manipulation edit leaves them, so it is not an exact ablation)
           pos=<cls+cls>  ablate / actadd only on tokens of these position classes: prompt (the user turn), cot
                          (thinking, incl. </think>), answer; e.g. pos=prompt, pos=cot+answer. vLLM backend only.
+          ace=<method>   ablate only: affine ablation (Marshall et al. 2024, ACE): at every layer input set the
+                         component along the direction to the non-refusal class mean of <method>'s window at that
+                         site (e.g. ace=v4_cot: the complying CoTs' mean) instead of 0. Needs the class means in
+                         the directions file (scripts/directions.py). vLLM hooks: Dory and standard models
           dir=perloop    take the direction of each loop's own site (loop t, the site's layer) and apply it only in
                          loop t, instead of the site's single direction in every selected loop (ablate / actadd only;
                          the site's loop number is then ignored)
@@ -52,7 +56,7 @@ def parse_candidate(text):
         raise ValueError(f"bad site {site!r}")
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
-            "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True}
+            "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None}
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -67,6 +71,10 @@ def parse_candidate(text):
             cand["norm_aware"] = bool(int(val))
         elif key == "bias":
             cand["biases"] = bool(int(val))
+        elif key == "ace":
+            if kind != "ablate":
+                raise ValueError(f"ace= is an ablate option: {text!r}")
+            cand["ace"] = val
         elif key == "pos":
             cand["positions"] = val.split("+")
             bad = set(cand["positions"]) - {"prompt", "cot", "answer"}
@@ -75,6 +83,22 @@ def parse_candidate(text):
         else:
             raise ValueError(f"unknown option {key!r}")
     return cand
+
+
+def ace_ref(c, vec, dirs):
+    """[n_loops, n_layers] reference components along ``vec`` for affine ablation (None without ``ace=``)."""
+    if not c.get("ace"):
+        return None
+    import torch
+
+    if "mean_non" not in dirs[c["ace"]]:
+        raise ValueError(f"no class means for {c['ace']!r} in the directions file; rerun scripts/directions.py")
+    r = dirs[c["ace"]]["mean_non"].float() @ (vec.float() / vec.float().norm())  # [S]
+    sites = dirs["sites"]
+    table = torch.full((max(t for t, _ in sites) + 1, max(l for _, l in sites) + 1), float("nan"))
+    for (t, l), x in zip(sites, r.tolist()):
+        table[t, l] = x
+    return table
 
 
 def intervention_specs(c, dirs, site_index):
@@ -94,7 +118,8 @@ def intervention_specs(c, dirs, site_index):
     layer = c["layer"] if c["layer"] is not None else c["site"][1]
     pos = c.get("positions")
     if c["kind"] == "ablate":
-        return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos} for loops, vec in groups]
+        return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos, "ref": ace_ref(c, vec, dirs)}
+                for loops, vec in groups]
     return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer, "positions": pos}
             for loops, vec in groups]
 
@@ -202,7 +227,8 @@ def main():
             stack = contextlib.ExitStack()
             for spec in specs:
                 if spec["kind"] == "ablate":
-                    stack.enter_context(hooked(ablation_hooks(model, spec["dir"], loops=spec["loops"])))
+                    stack.enter_context(hooked(ablation_hooks(model, spec["dir"], loops=spec["loops"],
+                                                              ref=spec.get("ref"))))
                 else:
                     stack.enter_context(hooked(actadd_hooks(model, spec["vec"], spec["layer"], coeff=spec["coeff"],
                                                             loops=spec["loops"])))

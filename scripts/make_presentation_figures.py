@@ -720,6 +720,69 @@ def fig_moe():
     fig.savefig(OUT / "moe.png", dpi=150); plt.close(fig)
 
 
+def fig_dory():
+    """Dory screen: refusal vs how far each hook intervention moves the refusing CoTs along u (units of the class gap)."""
+    import re
+
+    import torch
+
+    run = RUNS / "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"
+    blob = torch.load(run / "activations" / "train.pt", weights_only=False, mmap=True)
+    meta, acts, sites = blob["meta"], blob["acts"], blob["sites"]
+    D = torch.load(run / "directions" / "train.pt", weights_only=False)
+    idx = {s: i for i, s in enumerate(sites)}
+    X = acts[:, list(blob["windows"]).index("cot")].float()
+    ref = meta.index[meta.label_cot == "refusal"].to_numpy(); non = meta.index[meta.label_cot == "non_refusal"].to_numpy()
+    sc = pd.read_csv(run / "analysis" / "select_screen.csv").set_index("candidate")
+    rows = []
+    for cand in sc.index:
+        m = re.fullmatch(r"ablate_v4_baseline_(?:t(\d+)\.)?l(\d+)(?:_ace(\w+))?", cand)
+        if not m:
+            continue
+        s = (int(m.group(1) or 0), int(m.group(2)))
+        u = D["v4_baseline"]["dirs"][idx[s]].float(); u = u / u.norm()
+        pr, pn = (X[ref] @ u).mean(0)[1:], (X[non] @ u).mean(0)[1:]
+        target = torch.zeros_like(pr) if not m.group(3) else (D[m.group(3)]["mean_non"].float() @ u)[1:]
+        rows.append(dict(site=f"t{s[0]}.l{s[1]}" if 16 <= s[1] < 56 else f"l{s[1]}", ace=m.group(3),
+                         push=float((pr - target).mean() / (pr - pn).mean()),
+                         refusal=100 * sc.loc[cand, "all_refusal"], unclosed=100 * sc.loc[cand, "invalid_cot_frac"]))
+    df = pd.DataFrame(rows)
+    clean, rnd = 100 * sc.loc["none", "all_refusal"], 100 * sc.loc["ablate_random_t1.l38", "all_refusal"]
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    kinds = [(None, "hooks: component along u set to 0 (plain ablation)", C["hook"], "o"),
+             ("v4_cot", "affine: set to the complying CoT mean (classes equal along u)", C["ortho_na"], "s"),
+             ("v4_baseline", "affine: set to the complying end-of-prompt mean", C["actadd"], "D")]
+    for ace, label, color, mk in kinds:
+        d = df[df.ace.isna()] if ace is None else df[df.ace == ace]
+        ax.scatter(d.push, d.refusal, s=40 + 9 * d.unclosed, color=color, marker=mk, label=label, alpha=0.85,
+                   edgecolor="k", lw=0.5, zorder=3)
+        for r in d.itertuples():
+            if (r.refusal < 60 and r.site != "t0.l38") or (ace is None and r.site == "t0.l38"):
+                ax.annotate(r.site, (r.push, r.refusal), xytext=(6, 3), textcoords="offset points", fontsize=8.5,
+                            color=color)
+    ax.annotate("t0.l24, t0.l34: zeroing\npushes toward refusal", (0.33, 98.7), xytext=(0.42, 93), fontsize=8.5,
+                color=C["hook"], arrowprops=dict(arrowstyle="-", color=C["hook"], lw=0.6))
+    ax.text(0.83, 66, "6 sites", fontsize=8.5, color=C["ortho_na"], ha="right")
+    ax.annotate("weak u (l14, t0.l18, t0.l20):\nsmall gap, large push in its units", (1.62, 81.6), xytext=(1.75, 70),
+                fontsize=8.5, color=C["hook"], arrowprops=dict(arrowstyle="-", color=C["hook"], lw=0.6))
+    ax.axhline(clean, color=C["clean"], ls="--", lw=1); ax.text(-0.45, clean + 1, f"clean {clean:.0f}%", fontsize=9,
+                                                                color=C["clean"])
+    ax.axhline(rnd, color=C["random"], ls=":", lw=1)
+    ax.axvline(0, color="#999", lw=0.8); ax.axvline(1, color=C["ortho_na"], lw=0.8, ls="--")
+    ax.text(1.03, 22, "push = 1:\nrefusing CoTs moved\nexactly onto the\ncomplying mean", fontsize=8.5,
+            color=C["ortho_na"])
+    ax.set_xlabel("push of the refusing CoTs along u, averaged over the 111 sites (units of the refusing−complying gap)")
+    ax.set_ylabel("refusal (%), 50 selection prompts")
+    ax.set_ylim(15, 104); ax.set_xlim(-0.5, 2.8)
+    ax.legend(loc="lower left", fontsize=8.5, frameon=False)
+    ax.set_title("Dory: removing u leaves 64–89% refusal; lower needs pushing past complying (marker size = unclosed CoTs)",
+                 fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "dory_push.png", dpi=150); plt.close(fig)
+    print(df.sort_values("push").round(2).to_string(index=False))
+
+
 def copy_sweep_figures():
     """Loop-subset sweep and loop x layer map figures (made by scripts/loop_sweep_summary.py and
     scripts/loop_layer_summary.py under data/runs/<model>/figures) -> docs/figures."""
@@ -736,5 +799,5 @@ def copy_sweep_figures():
 if __name__ == "__main__":
     fig_interventions(); fig_norm_leak(); fig_leak1(); fig_leak2(); fig_loop_count()
     fig_results(); fig_sites(); copy_sweep_figures()
-    fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe()
+    fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe(); fig_dory()
     print("figures ->", OUT)

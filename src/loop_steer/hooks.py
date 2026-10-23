@@ -10,6 +10,7 @@ All hooks act on the *residual stream*:
 - ablate: every write into the residual stream (see ``ablation_hooks``).
 """
 
+import functools
 from contextlib import contextmanager
 
 import torch
@@ -91,15 +92,19 @@ def actadd_hooks(model, vector: torch.Tensor, layer: int, coeff: float = 1.0, lo
     return lambda: [block.register_forward_pre_hook(hook, with_kwargs=True)]
 
 
-def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre", "attn", "mlp")):
+def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre", "attn", "mlp"), ref=None):
     """Project ``direction`` out of every residual write (Arditi et al. directional ablation).
 
     For pre-norm models (Qwen/Llama) this is: layer input + self_attn output +
     mlp output at every layer, which is equivalent to weight orthogonalization.
     Ouro is dispatched to ``ouro_ablation_hooks`` (sandwich norms). Dory: every sublayer input and every mixer output
     (its write), and the final stream before the unembedding (its last interpolation is not followed by a sublayer).
+    ``ref`` ([n_loops, n_layers]): affine ablation (ACE) -- layer l's input in loop t gets component ``ref[t, l]``
+    along the direction instead of 0 (the final stream ``ref[0, -1]``); writes still get 0. Not for Ouro.
     """
     if hasattr(decoder_layers(model)[0], "input_layernorm_2"):
+        if ref is not None:
+            raise NotImplementedError("affine ablation (ref) is not implemented for Ouro's sandwich norms")
         return ouro_ablation_hooks(model, direction, loops=loops)
     unit = direction / direction.norm()
     blocks = decoder_layers(model)
@@ -111,10 +116,14 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
     def track(module, args, kwargs):
         state["loop"] = _loop(kwargs)
 
-    def pre(module, args, kwargs):
+    def set_to(x, target):
+        return _project_out(x, unit) if target is None else _project_out(x, unit) + target * unit.to(x)
+
+    def pre(module, args, kwargs, i=None):
         if not active():
             return None
-        return _replace_layer_input(args, kwargs, _project_out(_layer_input(args, kwargs), unit))
+        target = None if ref is None else float(ref[state["loop"]][i])
+        return _replace_layer_input(args, kwargs, set_to(_layer_input(args, kwargs), target))
 
     def post(module, args, output):
         if not active():
@@ -124,14 +133,14 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
         return _project_out(output, unit)
 
     def final(module, args):
-        return (_project_out(args[0], unit), *args[1:]) if active() else None
+        return (set_to(args[0], None if ref is None else float(ref[0][-1])), *args[1:]) if active() else None
 
     def register():
         handles = []
-        for block in blocks:
+        for i, block in enumerate(blocks):
             handles.append(block.register_forward_pre_hook(track, with_kwargs=True))  # first: sets the loop
             if "resid_pre" in sites:
-                handles.append(block.register_forward_pre_hook(pre, with_kwargs=True))
+                handles.append(block.register_forward_pre_hook(functools.partial(pre, i=i), with_kwargs=True))
             if hasattr(block, "mixer"):  # Dory: one sublayer per block
                 if ("attn" if block.is_attention else "mlp") in sites:
                     handles.append(block.mixer.register_forward_hook(post))

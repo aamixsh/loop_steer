@@ -11,7 +11,8 @@ Methods (label granularity x token window):
   random       Gaussian control, same per-site norm as v4_cot
 
 direction[site] = mean(refusal) - mean(non_refusal), raw (unnormalized), per (loop, layer).
-Writes ``directions/<name>.pt`` = {method: {"dirs": [S, D] fp32, "n_ref", "n_non"}, "sites": ...}.
+Writes ``directions/<name>.pt`` = {method: {"dirs": [S, D] fp32, "n_ref", "n_non", "mean_ref", "mean_non"}, "sites":
+...}; the class means ([S, D]) give the reference values of affine ablation (intervene.py ``ace=``).
 """
 
 import argparse
@@ -49,8 +50,9 @@ def main():
         ref = sub.index[sub[label_col] == "refusal"].to_numpy()
         non = sub.index[sub[label_col] == "non_refusal"].to_numpy()
         X = acts[:, w].float()
-        dirs = X[ref].mean(0) - X[non].mean(0)
-        result[method] = {"dirs": dirs, "n_ref": len(ref), "n_non": len(non), "window": window}
+        mean_ref, mean_non = X[ref].mean(0), X[non].mean(0)
+        result[method] = {"dirs": mean_ref - mean_non, "n_ref": len(ref), "n_non": len(non), "window": window,
+                          "mean_ref": mean_ref, "mean_non": mean_non}
         print(f"{method:12s} n_ref={len(ref):4d} n_non={len(non):4d}")
 
     # Within-prompt paired contrast on full-CoT means.
