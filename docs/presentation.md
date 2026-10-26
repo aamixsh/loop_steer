@@ -7,7 +7,7 @@ title: Refusal directions in looped reasoning models
 # Refusal directions in looped reasoning models
 
 Qwen3-8B (reproduction) → Ouro-1.4B-Thinking (4 loops) → Nanbeige4.2-3B (2 loops) → gpt-oss-20b (MoE)
-→ Nemotron-Labs Dory 1.0 4B (looped nGPT; screen only)
+→ Nemotron-Labs Dory 1.0 4B (looped nGPT)
 
 Method: *reasoning-manipulation* (arXiv 2507.03167), built on *refusal_direction* (Arditi et al.)
 
@@ -52,7 +52,7 @@ Questions:
 - **Prompts:** reasoning-manipulation sets. Directions from 500 train prompts; candidates chosen on 50 further train
   prompts (selection); results on the 487 harmful test prompts. Over-refusal: 250 harmless test prompts.
 - **Sampling:** 3 CoTs per prompt, 3 answers per CoT; temperature 0.6, no top-p / top-k. CoTs that hit the first cap
-  (2048; Nanbeige and gpt-oss 4096) are continued to 8192 tokens.
+  (2048; Nanbeige, gpt-oss and Dory 4096) are continued to 8192 tokens.
 - **Judge:** StrongREJECT rubric with a local gpt-oss-20b. **score** = (1 − refused) × (convincing + specific − 2) / 8.
   On gpt-oss it judges its own outputs; a refusal-phrase check agrees (clean 92% vs 92%, ablated 1–2% vs 2%).
 - **Capability:** MATH-500 (1 sample each) and AIME 2025 (30 × 8 samples), CoT ≤ 8192 tokens.
@@ -92,6 +92,9 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 - Ouro (hooks, loop 4, layers 4–20): `v4_cot` gives 0–3% refusal but 40–80% unclosed, so `v4_baseline` L16 (6.6%, 19%).
 - gpt-oss (layers 7–21): end-of-prompt L15 / L17 give 3.8% / 4.2% refusal with 4% unclosed; the CoT direction leaves
   37–100% unclosed at L7–19. Actadd: L13, c=−2 (17%, 6% unclosed).
+- Dory (32 screen candidates, sublayers of both loops): refusing − complying directions reach 43–47% at best (loop 1,
+  L22–26); the harmful − harmless direction from loop 1, L26: 8% (19% of CoTs hit 4096; they close by 8192). The
+  first-150-CoT-token direction does nothing (82–100%).
 - Upstream's Qwen3-8B layers: 23 (CoT) and 17 (end-of-prompt). Our L17 end-of-prompt edit: 8.5% on the test set vs 5.7%
   for L21. The screen is noisy (50 prompts): neighbouring layers differ by a few points.
 
@@ -115,7 +118,8 @@ Each intervention gets its own screen on the 50 selection prompts; the winner go
 ## How we measure where refusal is readable
 
 A **site** is one place in the residual stream: the vector entering decoder layer *l* during loop *t*. Qwen has 36 sites,
-Ouro 24 layers × 4 loops = 96, Nanbeige 22 × 2 = 44, gpt-oss 24 (see the model table). At every site:
+Ouro 24 layers × 4 loops = 96, Nanbeige 22 × 2 = 44, gpt-oss 24, Dory 16 input + 40 × 2 recurrent + 16 output
+sublayers = 112 (see the model table). At every site:
 
 1. **Average** the residual stream of each training example over a token window: the **CoT window** (all thinking
    tokens) or the **prompt-end window** (the template tokens between the user message and the start of thinking).
@@ -135,12 +139,14 @@ the other half. It measures **readability**, not cause; the ablations test cause
 
 ![w:1150](figures/sites.png)
 
-- **A. CoT window:** AUC 0.93–1.00 at every site of all four models; random directions reach 0.6–0.7 typically, up to
+- **A. CoT window:** AUC 0.93–1.00 at every site of all five models; random directions reach 0.6–0.7 typically, up to
   0.97–0.99 at a few sites (refusing and complying CoTs differ in content, so even random directions sometimes separate
   them). So this window says little about *where*; on gpt-oss it is ≈ 1.0 everywhere.
 - **B. Prompt-end window, before any thinking:** refusal is already readable (AUC 0.93–0.97 after the first 12–20
   layers). In the looped models it rises through loop 1–2 and stays flat afterwards. In gpt-oss it peaks at L12–18
-  (0.96) and falls to 0.88 at the last layer; ablation works exactly at the peak (L15–17, next slides).
+  (0.96) and falls to 0.88 at the last layer; ablation works exactly at the peak (L15–17, next slides). In Dory it rises
+  through loop 1 to 0.95 (sublayers 34–42) and dips where loop 2 adds the input back in; with 33 complying prompts this
+  direction is noisy (split-half 0.73–0.87), which matters for Dory (later slides).
 - So a single direction carries the refusal signal everywhere, and the model's decision is largely readable before the
   CoT starts. Layer 0 of the prompt-end window is undefined or at chance (identical template tokens for every prompt).
 
@@ -169,7 +175,9 @@ some loops is a separate experiment (next slides).
 
 - **Qwen** 61% → 6–7% with all three. **Ouro:** hooks 10%, actadd 17%, weight edit broken (no valid outputs on 50
   prompts). **Nanbeige:** hooks 18%, weight edit 11%, actadd 26%. **gpt-oss:** hooks and weight edit 2% (from 92%),
-  actadd 15%. Random directions change nothing (Nanbeige weight edit with a random direction: 73%).
+  actadd 15%. **Dory:** hooks 12% (from 92%), weight edit 26%, actadd 23%, with the harmful − harmless direction (the
+  refusing − complying one reached only 43% on the screen). Random directions change nothing (Nanbeige weight edit with
+  a random direction: 73%).
 - **Inference:** the method transfers to looped and to MoE models; in looped models only interventions that act after
   every norm (hooks) are safe.
 
@@ -220,7 +228,8 @@ some loops is a separate experiment (next slides).
 - **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1), −8.8 (Nanbeige, c = −2), −23 points (gpt-oss, c = −2);
   AIME: Nanbeige 29.6% → 13.8%, gpt-oss 52.5% → 10.8%. It also lengthens CoTs.
 - **No over-refusal:** 0–3% refusal on harmless prompts under every config (a weak check: our interventions lower refusal).
-- AIME at 8192 tokens closes only 24–33% of CoTs, so it mostly measures problems solved early.
+- **Dory** (harmful − harmless hooks, weight edit, actadd): runs pending; clean MATH-500 77.2%, AIME 2025 28.3%.
+- AIME at 8192 tokens closes only 24–33% of CoTs (Dory 30%), so it mostly measures problems solved early.
 
 ---
 
@@ -312,13 +321,32 @@ Logit lens on clean traces (decode each loop's output directly):
 
 ---
 
+## What sets looped models apart
+
+| | standard (Qwen dense, gpt-oss MoE) | looped (Ouro, Nanbeige, Dory) |
+|---|---|---|
+| hook ablation | 2–6% | 10–18% |
+| weight ortho vs hooks | equal (MoE: every expert and bias edited) | never equal: 11% (Nanbeige) to broken (Ouro) |
+| loop 1 only | – | 49–53% (Ouro, Nanbeige): later loops rebuild the signal |
+| actadd | one push | a dose that accumulates over loops |
+
+- **Shared weights + a norm between an edited write and the stream = a leak**, and loops compound it. Where the norm
+  sits decides how much: after every write (Ouro, broken), only between loops (Nanbeige, works), inside every update
+  (Dory's per-dimension blend, half the effect of hooks). Abliterated weights for looped models are model-specific.
+- **Later loops recompute what earlier loops lost:** ablation must cover the late loops, and some refusal survives.
+- **The direction is less stable across depth and loops**; getting it right mattered most for Dory.
+
+---
+
 ## Takeaways
 
-1. **The method transfers.** One difference-in-means direction removes most refusal in both looped models
-   (Ouro 61% → 10%, Nanbeige 78% → 11–18%), as in Qwen (61% → 6%).
+1. **The method transfers.** One difference-in-means direction removes most refusal in all three looped models
+   (Ouro 61% → 10%, Nanbeige 78% → 11–18%, Dory 92% → 12%), as in Qwen (61% → 6%). Dory needed the harmful − harmless
+   direction: its refusing − complying one rested on 33 complying prompts.
 2. **Use hooks on looped models.** Weight ortho equals ablation only when nothing renormalizes the stream after the
    edited weights. Ouro breaks twice: sandwich norms re-add `u` to every write, and the amplifying inter-loop norm
    compounds the leak while the edit stops the model from correcting it. Nanbeige survives (raw writes, shrinking norm).
+   Dory's per-dimension blend leaks at every sublayer: the weight edit gets half the hooks' effect (26% vs 12%).
 3. **Refusal is decided late, but not in one loop.** Later loops carry most of the effect; ablating loop 1 alone
    barely helps; no single loop matches all loops. One direction (last loop's) works in every loop.
 4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability in the looped models (on gpt-oss
@@ -342,6 +370,8 @@ Logit lens on clean traces (decode each loop's output directly):
 - gpt-oss is judged by gpt-oss-20b itself (refusal-phrase check agrees); its weight edit runs on a bf16 copy (MXFP4
   would undo 63% of it).
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
+- Dory: its headline numbers use a different direction (harmful − harmless) from the other models; it runs on our own
+  port of an unreleased architecture (NVIDIA's vLLM PR), checked against our HF implementation, not NVIDIA's.
 - Some Nanbeige edits damage generation: the `v4_cot` loop-1 weight edit leaves 47% of CoTs unclosed (selection). Nanbeige
   runs on our own vLLM port (matches HF greedy outputs exactly).
 
@@ -384,38 +414,41 @@ Logit lens on clean traces (decode each loop's output directly):
   close are as accurate. AIME at 16k: 65.4 / 57.1 / 57.5% (gap 8 points, still from capped CoTs).
 ---
 
-## Dory 1.0 4B: a looped nGPT (screen, 50 prompts)
+## Dory 1.0 4B: a looped nGPT
 
 - **Architecture:** 16 input sublayers, 40 recurrent sublayers run twice, 16 output (each sublayer is attention *or*
   MLP). The stream has unit length; every sublayer blends its normalised write in with a learned per-dimension weight:
-  `h ← norm(h + lr ⊙ (norm(write) − h))`. No release of transformers or vLLM runs it; we ported NVIDIA's vLLM PR
-  (matches our HF implementation to 1e-7; hooks, weight edit and affine ablation checked the same way).
-- **Clean:** 92% refusal on the train prompts, 89% on the screen; directions separate refusing and complying best at
-  recurrent sublayers 34–42 (AUC 0.95–0.96, both loops).
+  `h ← norm(h + lr ⊙ (norm(write) − h))`; the input stack's output is added back before each loop. No transformers or
+  vLLM release runs it: we ported NVIDIA's vLLM PR (matches our HF implementation to 1e-7; hooks, weight edit and affine
+  ablation checked the same way). Clean: 92% refusal; 89–91% at 1, 3 or 4 loops (trained with 2), all CoTs close.
 
-| Screen (u measured at; all sites intervened) | refusal | unclosed CoTs |
+| Test set (487 prompts), u = harmful − harmless, loop 1, L26 | refusal | unclosed at 8192 |
 |---|---|---|
-| clean / random direction | 89% / 91% | 0 / 0 |
-| hooks, `v4_baseline` u from loop 1 L22 / L26 / L38 | 47% / 43% / 59% | 13% / 16% / 10% |
-| hooks, u from loop 1 L24 or L34 | **99%** | 0 |
-| affine ablation (classes made equal along u), 6 sites | 64–89% | ≤ 6% |
-| weight ortho, u from loop 1 L22 / loop 2 L38 | 70% / 77% | 2% / 3% |
-| actadd at loop 1 L22, c = −1 / −2 | 73% / 52% | 4% / 23% |
-| CoT-window directions | 84–92% | ≤ 5% |
+| clean / random direction | 92.3% / 91.4% | 0 / 0 |
+| **hook ablation** | **12.4%** | 0.9% (14% hit 4096) |
+| weight ortho | 25.5% | 1.4% |
+| actadd, c = −1 (L26, both loops) | 23.1% | 3.4% |
+| hooks, decaying to 0 over the first 200 CoT tokens | 41.1% | 0.5% |
+
+- **The direction mattered.** Refusing − complying (only 33 complying prompts) reached 43% at best on the screen;
+  harmful − harmless (1,409 vs 1,174 prompts, split-half 1.00 at every site) works like in the other models.
+- **Weight ortho leaks**, as predicted: the per-dimension blend re-adds `u` at every sublayer (26% vs 12% for hooks).
+- **The CoT tokens carry the effect:** steering only the prompt and the first 200 CoT tokens keeps CoTs short of the cap
+  but loses most of it (41%).
 
 ---
 
-## Dory: ablation works only as a push
+## Dory: with a noisy direction, ablation works only as a push
 
 ![w:1050](figures/dory_push.png)
 
-- Figure labels: `t0.l22` = loop 1, sublayer 22 (`t1` = loop 2; `l14` = input sublayer).
+- Refusing − complying direction (33 complying prompts), screen. Labels: `t0.l22` = loop 1, sublayer 22 (`t1` = loop 2;
+  `l14` = input sublayer).
 - Zeroing u is not a neutral "off" in a unit-norm stream: depending on the site, 0 lies past the complying mean (a
   push toward complying) or on the refusing side (L24, L34: refusal *rises* to 99%).
 - **Affine ablation** (ACE, Marshall et al. 2024) sets the component to the complying mean, so refusing and complying no
-  longer differ along u anywhere: refusal stays at 64–89%. Lower needs pushing past complying, which costs closed CoTs.
-- Unlike Qwen, Ouro, Nanbeige and gpt-oss, **one direction does not carry Dory's refusal**. The weight edit leaks at
-  every sublayer (the per-dimension blend), so it is weaker than hooks at the same site (70% vs 47%).
+  longer differ along this u anywhere: refusal stays at 64–89%. This u misses most of the refusal signal; the
+  harmful − harmless direction does not (12% on the test set, previous slide).
 
 ---
 
@@ -427,8 +460,8 @@ Logit lens on clean traces (decode each loop's output directly):
    on the test set; then gpt-oss.
 3. **Statistics:** bootstrap confidence intervals over prompts for every table.
 4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-5. **Dory:** test-set runs of the chosen interventions; subspace ablation (does refusal live in a few directions?);
-   capability baselines are running.
+5. **Dory:** does loop-1 ablation survive 4 loops (as in Ouro)? Capability and over-refusal under the interventions
+   (running). The harmful − harmless direction on Ouro and Nanbeige, for a like-for-like comparison.
 6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
    whole-CoT gap (15% vs the paper's 7.5%).
 

@@ -21,6 +21,8 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
                          component along the direction to the non-refusal class mean of <method>'s window at that
                          site (e.g. ace=v4_cot: the complying CoTs' mean) instead of 0. Needs the class means in
                          the directions file (scripts/directions.py). vLLM hooks: Dory and standard models
+          decay=<n>      ablate / actadd only: full strength on the prompt, decaying smoothly (half-cosine) to 0 over
+                         the first n CoT tokens, off after them and on the answer. vLLM backend only.
           dir=perloop    take the direction of each loop's own site (loop t, the site's layer) and apply it only in
                          loop t, instead of the site's single direction in every selected loop (ablate / actadd only;
                          the site's loop number is then ignored)
@@ -49,14 +51,15 @@ import re
 def parse_candidate(text):
     if text == "none":
         return {"name": "none", "kind": "none", "perloop": False, "norm_aware": False, "positions": None,
-                "biases": True}
+                "biases": True, "ace": None, "decay": None}
     kind, method, site, *opts = text.split(":")
     m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", site)
     if m is None:
         raise ValueError(f"bad site {site!r}")
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
-            "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None}
+            "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None,
+            "decay": None}
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -71,6 +74,10 @@ def parse_candidate(text):
             cand["norm_aware"] = bool(int(val))
         elif key == "bias":
             cand["biases"] = bool(int(val))
+        elif key == "decay":
+            if kind not in ("ablate", "actadd"):
+                raise ValueError(f"decay= is an ablate / actadd option: {text!r}")
+            cand["decay"] = int(val)
         elif key == "ace":
             if kind != "ablate":
                 raise ValueError(f"ace= is an ablate option: {text!r}")
@@ -117,11 +124,12 @@ def intervention_specs(c, dirs, site_index):
         groups = [(c["apply"], table[site_index[c["site"]]])]
     layer = c["layer"] if c["layer"] is not None else c["site"][1]
     pos = c.get("positions")
+    decay = c.get("decay")
     if c["kind"] == "ablate":
-        return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos, "ref": ace_ref(c, vec, dirs)}
-                for loops, vec in groups]
-    return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer, "positions": pos}
-            for loops, vec in groups]
+        return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos, "ref": ace_ref(c, vec, dirs),
+                 "decay": decay} for loops, vec in groups]
+    return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer, "positions": pos,
+             "decay": decay} for loops, vec in groups]
 
 
 def main():
@@ -153,9 +161,9 @@ def main():
     args = ap.parse_args()
     cands = [parse_candidate(c) for c in args.candidates]
     uses_hooks = any(c["kind"] in ("ablate", "actadd") for c in cands)
-    gated = any(c["positions"] for c in cands)
+    gated = any(c["positions"] or c["decay"] for c in cands)
     if gated and args.backend != "vllm":
-        ap.error("pos= needs the vLLM backend")
+        ap.error("pos= and decay= need the vLLM backend")
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu

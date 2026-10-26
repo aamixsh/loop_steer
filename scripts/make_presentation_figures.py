@@ -338,6 +338,7 @@ def _test_row(model, run, name, cap, ext=None):
 def fig_results():
     """Same five columns in the same order for every model: the best test-set candidate of each intervention."""
     q, o, n, g = "Qwen3-8B", "Ouro-1.4B-Thinking", "Nanbeige4.2-3B", "gpt-oss-20b"
+    d = "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"
     cols = [("clean model", "clean"), ("random direction\n(hook ablation)", "random"), ("hook ablation", "hook"),
             ("weight\northogonalization", "ortho"), ("activation\naddition", "actadd")]
     # per model: (summary row or None, note under the bar) for each column
@@ -345,8 +346,8 @@ def fig_results():
         "Qwen3-8B  (36 layers)": [
             (_test_row(q, "clean_test_8k", "none", 8192), ""),
             (_test_row(q, "test_hooks", "ablate_random_l17", 2048, "test_hooks_ext"), "same norm as u"),
-            (_test_row(q, "test_hooks", "ablate_v4_baseline_l21", 2048, "test_hooks_ext"), "u measured at L21;\nremoved at all 36 layers"),
-            (_test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "u measured at L21;\nedited out of the weights"),
+            (_test_row(q, "test_hooks", "ablate_v4_baseline_l21", 2048, "test_hooks_ext"), "u measured at L21;\nremoved at all\n36 layers"),
+            (_test_row(q, "test_ortho", "ortho_v4_baseline_l21", 2048, "test_ortho_ext"), "u measured at L21;\nedited out of\nthe weights"),
             (_test_row(q, "test_hooks", "actadd_v4_baseline_l17_c-2", 2048, "test_hooks_ext"), "added at L17 only,\nc=−2")],
         "Ouro-1.4B  (24 layers × 4 loops)": [
             (_test_row(o, "clean_test_8k", "none", 8192), ""),
@@ -368,15 +369,33 @@ def fig_results():
         "gpt-oss-20b  (24 MoE layers)": [
             (_test_row(g, "test", "none", 4096, "test_ext"), ""),
             (_test_row(g, "test", "ablate_random_l15", 4096, "test_ext"), "same norm as u"),
-            (_test_row(g, "test", "ablate_v4_baseline_l15", 4096, "test_ext"), "u measured at L15;\nremoved at all 24 layers"),
+            (_test_row(g, "test", "ablate_v4_baseline_l15", 4096, "test_ext"), "u measured at L15;\nremoved at all\n24 layers"),
             (_test_row(g, "test", "ortho_v4_baseline_l15", 4096, "test_ext"),
              "u measured at L15;\nweights and biases edited\n(biases kept: {bias0:.0f}%)"),
             (_test_row(g, "test", "actadd_v4_baseline_l13_c-2", 4096, "test_ext"), "added at L13 only,\nc=−2")],
+        "Dory 1.0 4B  (16 + 40 × 2 loops + 16 sublayers)": [
+            (_test_row(d, "test", "none", 4096, "test_ext"), ""),
+            (_test_row(d, "test", "ablate_random_t1.l38", 4096, "test_ext"), "same norm as u"),
+            (_test_row(d, "test", "ablate_hh_eoi_t0.l26", 4096, "test_ext"),
+             "harmful − harmless u,\nmeasured at loop 1, L26;\nremoved at all 112 sites"),
+            (_test_row(d, "test", "ortho_hh_eoi_t0.l26", 4096, "test_ext"), "same u;\nedited out of\nthe weights"),
+            (_test_row(d, "test", "actadd_hh_eoi_t0.l26_c-1", 4096, "test_ext"), "added at L26 only,\nin both loops, c=−1")],
     }
     bias0 = 100 * _test_row(g, "test", "ortho_v4_baseline_l15_bias0", 4096, "test_ext")["all_refusal"]
-    fig, axes = plt.subplots(2, 2, figsize=(17, 10), sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(27, 10.5), sharey=True)
     x = np.arange(len(cols))
-    for ax, (model, rows) in zip(axes.flat, data.items()):
+    axes[0, 2].axis("off")
+    axes[0, 2].text(0.02, 0.95, "Directions: refusing − complying at the prompt end (v4_baseline) for Qwen, Ouro,\n"
+                    "Nanbeige and gpt-oss. For Dory that direction (33 complying prompts) was too noisy\n"
+                    "(best hooks 43% on the screen); the harmful − harmless prompt direction\n"
+                    "(1,409 vs 1,174 prompts, Arditi et al.) works.\n\n"
+                    "Dory's sites: 16 input sublayers, 40 recurrent sublayers × 2 loops, 16 output\n"
+                    "sublayers (each is attention or MLP).\n\nTop: standard models (dense, MoE). Bottom: looped models.",
+                    transform=axes[0, 2].transAxes, va="top",
+                    fontsize=10.5, color="#444")
+    place = {"Qwen": axes[0, 0], "gpt-oss": axes[0, 1], "Ouro": axes[1, 0], "Nanbeige": axes[1, 1], "Dory": axes[1, 2]}
+    for model, rows in data.items():
+        ax = place[next(k for k in place if model.startswith(k))]
         for i, ((_, kind), (r, note)) in enumerate(zip(cols, rows)):
             if r is None:
                 ax.text(i, 4, note, ha="center", color=C["ortho"], fontsize=9)
@@ -385,7 +404,7 @@ def fig_results():
             ax.bar(i, v, color=C[kind], width=0.72)
             ax.text(i, v + 1.5, f"{v:.0f}%", ha="center", fontsize=11, weight="bold")
             if note:
-                ax.text(i, v + 5, note.format(bias0=bias0), ha="center", va="bottom", fontsize=8.5, color="#444")
+                ax.text(i, v + 5, note.format(bias0=bias0), ha="center", va="bottom", fontsize=8.2, color="#444")
         ax.set_xticks(x); ax.set_xticklabels([c for c, _ in cols], fontsize=9)
         ax.set_title(model, fontsize=11); ax.set_ylim(0, 108); ax.set_yticks(range(0, 101, 20))
     for ax in axes[:, 0]:
@@ -403,15 +422,31 @@ def fig_results():
 def fig_sites():
     """Held-out AUC of the refusal direction at every site, for both windows, against a random direction."""
     models = [("Qwen3-8B", "Qwen3-8B (36 layers)"), ("Ouro-1.4B-Thinking", "Ouro-1.4B (24 layers × 4 loops)"),
-              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (22 layers × 2 loops)"), ("gpt-oss-20b", "gpt-oss-20b (24 MoE layers)")]
+              ("Nanbeige4.2-3B", "Nanbeige4.2-3B (22 layers × 2 loops)"), ("gpt-oss-20b", "gpt-oss-20b (24 MoE layers)"),
+              ("NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", "Dory 1.0 4B (16 in + 40 × 2 loops + 16 out sublayers)")]
     windows = [("v4_cot", "CoT direction: activations averaged over all CoT tokens, CoT labels", "CoTs"),
                ("v4_baseline", "Prompt-end direction: activations averaged over the template tokens before thinking, "
                                "prompt labels", "prompts")]
-    fig, axes = plt.subplots(2, 4, figsize=(20, 7.4), sharey=True, gridspec_kw={"width_ratios": [36, 96, 44, 30]})
+    fig, axes = plt.subplots(2, 5, figsize=(26, 7.4), sharey=True,
+                             gridspec_kw={"width_ratios": [36, 96, 44, 30, 112]})
     for i, (meth, wtitle, unit) in enumerate(windows):
         for j, (m, title) in enumerate(models):
             ax = axes[i, j]
             a = pd.read_csv(RUNS / m / "analysis" / f"{meth}_sites.csv")
+            if m.startswith("NVIDIA-Nemotron-Labs-Dory"):  # input 0-15, recurrent 16-55 per loop, output 56-71
+                a["x"] = np.where(a.layer < 16, a.layer, np.where(a.layer < 56, 16 + a.loop * 40 + a.layer - 16,
+                                                                    96 + a.layer - 56))
+                a = a.sort_values("x")
+                for t, (x0, x1, lab) in enumerate([(0, 16, "in"), (16, 56, "loop 1"), (56, 96, "loop 2"), (96, 112, "out")]):
+                    if t % 2:
+                        ax.axvspan(x0 - 0.5, x1 - 0.5, color="#f2f2f2", zorder=0)
+                    ax.text((x0 + x1) / 2, 0.42, lab, ha="center", fontsize=9, color="#666")
+                ax.plot(a.x, a.auc, color=C["hook"], lw=1.8)
+                ax.plot(a.x, a.auc_random, color="#999", lw=1.0)
+                ax.axhline(0.5, color="#ccc", lw=0.8, ls=":")
+                ax.set_xlim(-0.5, 111.5); ax.set_xlabel("sublayer (input, loop by loop, output)")
+                ax.set_title(f"{title}\nn = {a.n_ref.iloc[0]} refusing / {a.n_non.iloc[0]} complying {unit}", fontsize=9.5)
+                continue
             L = a.layer.max() + 1
             a["x"] = a.loop * L + a.layer
             a = a.sort_values("x")
@@ -447,18 +482,45 @@ def fig_models():
             ("Ouro-1.4B-Thinking", 24, 4, True, "sandwich norm on every write; shared norm after every loop"),
             ("Nanbeige4.2-3B", 22, 2, False, "writes added raw; shared norm after every loop"),
             ("gpt-oss-20b", 24, 1, False, "standard pre-norm, MoE: each MLP routes a token to 4 of 32 experts; "
-                                          "biases on o_proj and experts")]
-    fig, ax = plt.subplots(figsize=(15, 6.0))
+                                          "biases on o_proj and experts"),
+            ("Dory 1.0 4B", 40, 2, False, "nGPT: unit-norm stream, each sublayer blends in its normalised write\n"
+                                          "with a learned per-dimension weight; input re-injected every loop")]
+    fig, ax = plt.subplots(figsize=(15, 7.4))
     ax.set_xlim(-0.2, 17.6); ax.set_ylim(-0.2, len(rows) * 1.5 + 0.1); ax.axis("off")
     loop_colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, 4))
     for i, (name, L, T, sandwich, note) in enumerate(rows):
         y = (len(rows) - 1 - i) * 1.5 + 0.55
         ax.text(0, y + 0.55, name, fontsize=12, weight="bold")
-        ax.text(4.2, y + 0.55, f"{L} layers × {T} loop{'s' * (T > 1)}  ·  {note}", fontsize=10, style="italic")
+        if not name.startswith("Dory"):
+            ax.text(4.2, y + 0.55, f"{L} layers × {T} loop{'s' * (T > 1)}  ·  {note}", fontsize=10, style="italic")
         x = 0.0
         ax.add_patch(FancyBboxPatch((x, y - 0.22), 0.9, 0.44, boxstyle="round,pad=0.03", fc="#eee", ec="k"))
         ax.text(x + 0.45, y, "embed", ha="center", va="center", fontsize=9)
         x += 1.15
+        if name.startswith("Dory"):  # input stack, recurrent block twice (input re-injected), output stack
+            ax.text(4.2, y + 0.68, f"16 + 40 × 2 + 16 sublayers  ·  {note.splitlines()[0]}", fontsize=10, style="italic")
+            ax.text(4.2, y + 0.42, note.splitlines()[1], fontsize=10, style="italic")
+            def blk(x, w, lab, fc, color="k"):
+                ax.annotate("", xy=(x, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
+                ax.add_patch(FancyBboxPatch((x, y - 0.25), w, 0.5, boxstyle="round,pad=0.03", fc=fc, ec="k", alpha=0.85))
+                ax.text(x + w / 2, y + 0.02, lab, ha="center", va="center", fontsize=9, color=color)
+                return x + w + 0.25
+            x = blk(x, 1.5, "16 input", "#d9d9d9")
+            x_in = x - 0.25
+            for t in range(2):
+                ax.annotate("", xy=(x + 0.05, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
+                ax.add_patch(Circle((x + 0.35, y), 0.3, fc="#fde8d0", ec="k"))
+                ax.text(x + 0.35, y, "+x,\nnorm", ha="center", va="center", fontsize=7.5, color="#8c564b")
+                x += 0.95
+                x = blk(x, 2.6, f"loop {t + 1}: same 40 sublayers", loop_colors[t], "white")
+            x = blk(x, 1.5, "16 output", "#d9d9d9") - 0.25
+            ax.text(x_in + 0.1, y - 0.47, "+x, norm: the input stack's output x is added back and the stream renormalised "
+                    "before every loop", fontsize=8,
+                    color="#8c564b")
+            ax.annotate("", xy=(x + 0.3, y), xytext=(x, y), arrowprops=dict(arrowstyle="-|>", color="k"))
+            ax.add_patch(FancyBboxPatch((x + 0.3, y - 0.22), 1.0, 0.44, boxstyle="round,pad=0.03", fc="#eee", ec="k"))
+            ax.text(x + 0.8, y, "lm_head", ha="center", va="center", fontsize=9)
+            continue
         width = 2.6 if T > 1 else 9.0 * L / 36  # one-pass models: length in proportion to depth
         for t in range(T):
             ax.annotate("", xy=(x, y), xytext=(x - 0.25, y), arrowprops=dict(arrowstyle="-|>", color="k"))
@@ -484,7 +546,7 @@ def fig_models():
         ax.add_patch(FancyBboxPatch((x + 0.05, y - 0.22), 1.0, 0.44, boxstyle="round,pad=0.03", fc="#eee", ec="k"))
         ax.text(x + 0.55, y, "lm_head", ha="center", va="center", fontsize=9)
     fig.suptitle("Looped models run the same layer stack several times; gpt-oss runs once but its MLPs are mixtures of "
-                 "experts.\nA site is (loop, layer): 36 (Qwen), 96 (Ouro), 44 (Nanbeige), 24 (gpt-oss). "
+                 "experts.\nA site is (loop, layer): 36 (Qwen), 96 (Ouro), 44 (Nanbeige), 24 (gpt-oss), 112 (Dory). "
                  "Orange = shared norm between loops", fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "models.png", dpi=150); plt.close(fig)
@@ -620,21 +682,22 @@ def fig_loops_dose():
 def fig_capability():
     cap = pd.read_csv(ROOT / "results" / "capability_summary.csv")
     cap = cap[cap.tag == "cap"]
-    o, n, g = "Ouro-1.4B-Thinking", "Nanbeige4.2-3B", "gpt-oss-20b"
-    models = [(o, "Ouro-1.4B"), (n, "Nanbeige4.2-3B"), (g, "gpt-oss-20b")]
+    o, n, g, d = "Ouro-1.4B-Thinking", "Nanbeige4.2-3B", "gpt-oss-20b", "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"
+    models = [(o, "Ouro-1.4B"), (n, "Nanbeige4.2-3B"), (d, "Dory 1.0 4B"), (g, "gpt-oss-20b")]
     configs = {  # label -> ({model: candidate}, color)
-        "clean": ({o: "none", n: "none", g: "none"}, C["clean"]),
+        "clean": ({o: "none", n: "none", g: "none", d: "none"}, C["clean"]),
         "ablate (all loops)": ({o: "ablate_v4_baseline_t3.l16", n: "ablate_v4_baseline_t1.l15",
-                                g: "ablate_v4_baseline_l15"}, C["hook"]),
+                                g: "ablate_v4_baseline_l15", d: "ablate_hh_eoi_t0.l26"}, C["hook"]),
         "ablate, loop 1 only": ({o: "ablate_v4_baseline_t3.l16_apply0", n: "ablate_v4_baseline_t1.l15_apply0"}, "#9ecae1"),
         "ablate, late loop only": ({o: "ablate_v4_baseline_t3.l16_apply2", n: "ablate_v4_baseline_t1.l15_apply1"},
                                    "#4292c6"),
-        "weight ortho": ({g: "ortho_v4_baseline_l15"}, C["ortho"]),
-        "actadd (Ouro c=−1, others c=−2)": ({o: "actadd_v4_baseline_t3.l16_c-1", n: "actadd_v4_baseline_t1.l15_c-2",
-                                             g: "actadd_v4_baseline_l13_c-2"}, C["actadd"]),
+        "weight ortho": ({g: "ortho_v4_baseline_l15", d: "ortho_hh_eoi_t0.l26"}, C["ortho"]),
+        "actadd (Ouro, Dory c=−1; others c=−2)": ({o: "actadd_v4_baseline_t3.l16_c-1", n: "actadd_v4_baseline_t1.l15_c-2",
+                                                   g: "actadd_v4_baseline_l13_c-2", d: "actadd_hh_eoi_t0.l26_c-1"},
+                                                  C["actadd"]),
     }
     w = 0.14
-    fig, axes = plt.subplots(1, 3, figsize=(18, 4.6))
+    fig, axes = plt.subplots(1, 3, figsize=(21, 4.6))
 
     def bars(ax, value):
         for j, (lab, (cands, col)) in enumerate(configs.items()):

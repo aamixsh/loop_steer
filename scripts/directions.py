@@ -6,6 +6,7 @@ Methods (label granularity x token window):
   v12_cot150   CoT-level labels, mean over first 150 CoT tokens  (v1/v2)
   cot_last150  CoT-level labels, mean over last 150 CoT tokens   (decision-adjacent control)
   v4_baseline  prompt-level labels, mean over EOI tokens         (v4 'baseline', Arditi-style)
+  hh_eoi       harmful - harmless prompts, EOI tokens (Arditi et al.; with --contrast)
   paired_cot   within-prompt: mean over prompts of (refusal CoT mean - non-refusal CoT mean),
                using only prompts that have both labels (controls prompt content)
   random       Gaussian control, same per-site norm as v4_cot
@@ -35,6 +36,8 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--activations", required=True, help="Name under activations/")
     ap.add_argument("--name", default=None)
+    ap.add_argument("--contrast", default=None,
+                    help="Prompt-only activations (scripts/contrast_prompts.py) for hh_eoi = harmful - harmless (EOI)")
     args = ap.parse_args()
 
     rd = run_dir(args.model)
@@ -73,6 +76,16 @@ def main():
     rand = torch.randn(result["v4_cot"]["dirs"].shape, generator=gen)
     rand = rand / rand.norm(dim=-1, keepdim=True) * result["v4_cot"]["dirs"].norm(dim=-1, keepdim=True)
     result["random"] = {"dirs": rand, "n_ref": 0, "n_non": 0, "window": None}
+
+    if args.contrast:  # Arditi et al.: harmful - harmless prompts, end-of-instruction tokens
+        cb = torch.load(rd / "activations" / f"{args.contrast}.pt", weights_only=False)
+        assert cb["sites"] == blob["sites"], "contrast activations come from a different site layout"
+        X = cb["acts"][:, list(cb["windows"]).index("eoi")].float()
+        pos, neg = (cb["meta"].index[cb["meta"].label_hh == k].to_numpy() for k in ("harmful", "harmless"))
+        mean_ref, mean_non = X[pos].mean(0), X[neg].mean(0)
+        result["hh_eoi"] = {"dirs": mean_ref - mean_non, "n_ref": len(pos), "n_non": len(neg), "window": "eoi",
+                            "mean_ref": mean_ref, "mean_non": mean_non}
+        print(f"{'hh_eoi':12s} n_harmful={len(pos):4d} n_harmless={len(neg):4d}")
 
     out = rd / "directions" / f"{args.name or args.activations}.pt"
     out.parent.mkdir(parents=True, exist_ok=True)

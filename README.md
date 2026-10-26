@@ -15,18 +15,20 @@ orthogonalization) or push against it (activation addition) and measure how ofte
 
 ## Findings
 
-| Judge refusal rate | Qwen3-8B | Ouro-1.4B (4 loops) | Nanbeige4.2-3B (2 loops) | gpt-oss-20b (MoE) |
-|---|---|---|---|---|
-| Clean model | 61% | 61% | 78% | 92% |
-| Hook ablation | **5.5%** | **10%** | 16–18% | **2.1%** |
-| Weight orthogonalization | **6–15%** | no valid outputs* | **11%** | **1.8%** (all experts) |
-| Activation addition | 6.8% (L17, c=−2) | 17% (L16, c=−1) | 26% (L15, c=−2) | 15% (L13, c=−2) |
-| Random-direction control | 61% (hooks, weights) | 59% (hooks) | 76% (hooks), 73% (weights) | 92% (hooks) |
+| Judge refusal rate | Qwen3-8B | Ouro-1.4B (4 loops) | Nanbeige4.2-3B (2 loops) | gpt-oss-20b (MoE) | Dory 1.0 4B (nGPT, 2 loops)† |
+|---|---|---|---|---|---|
+| Clean model | 61% | 61% | 78% | 92% | 92% |
+| Hook ablation | **5.5%** | **10%** | 16–18% | **2.1%** | **12%** |
+| Weight orthogonalization | **6–15%** | no valid outputs* | **11%** | **1.8%** (all experts) | 26% |
+| Activation addition | 6.8% (L17, c=−2) | 17% (L16, c=−1) | 26% (L15, c=−2) | 15% (L13, c=−2) | 23% (L26, c=−1) |
+| Random-direction control | 61% (hooks, weights) | 59% (hooks) | 76% (hooks), 73% (weights) | 92% (hooks) | 91% (hooks) |
 
 All 487 held-out test prompts, 3 CoTs per prompt, 3 answers per CoT, over all samples. The ranges are over the
 tested directions and layers. Mean StrongREJECT score rises from 0.22–0.37 (clean) to 0.83–0.91 with the best
 candidate per model. On Qwen3-8B our directions match the published layer-17 vectors (cosine 0.99).
 *Weight orthogonalization on Ouro was tested on 50 selection prompts only (the edit breaks generation, see below).
+†Dory uses the harmful − harmless prompt direction (Arditi et al.; loop 1, sublayer 26); its refusing − complying
+direction (33 complying prompts) reached only 43% on the selection screen. Dory runs on our port of NVIDIA's vLLM PR.
 On gpt-oss the weight edit covers every expert and the biases; leaving the biases (as upstream) gives 1.6%.
 
 **Why weight orthogonalization breaks Ouro but not Nanbeige.** Weight orthogonalization only stops the edited

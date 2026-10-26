@@ -15,6 +15,9 @@ Spec dicts (tensors may be on CPU):
       (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms; for Dory, each sublayer's mixer output and
       the final stream before the unembedding). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
       gets component ``ref[t, l]`` along dir instead of 0 (the final stream gets ``ref[0, -1]``); writes still get 0.
+  Either kind also takes ``"decay": n`` instead of ``positions``: full strength on the prompt, a half-cosine from 1
+  to 0 over the first n CoT tokens, nothing after them or on the answer (the strength scales the added vector, or the
+  removed / reset component along dir).
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -75,18 +78,20 @@ def _model_runner():
 
 
 def _token_classes(runner, positions):
-    """Per-token position class (-1: none) of the current forward pass, from the attention metadata."""
+    """Per-token position class (-1: none) and position relative to the end of the prompt (``pos - P``; 0 = first
+    CoT token) of the current forward pass, from the attention metadata."""
     from vllm.forward_context import get_forward_context, is_forward_context_available
 
     n = positions.shape[0]
     cls = torch.full((n,), -1, dtype=torch.int8, device=positions.device)
+    rel = torch.zeros(n, dtype=torch.long, device=positions.device)
     if not is_forward_context_available():
-        return cls, None
+        return cls, rel, None
     md = get_forward_context().attn_metadata
     if isinstance(md, list):
         md = md[0] if md else None
     if not md:
-        return cls, None
+        return cls, rel, None
     qsl = next(iter(md.values())).query_start_loc
     n_reqs = qsl.numel() - 1
     req_ids = runner.input_batch.req_ids[:n_reqs]
@@ -96,7 +101,7 @@ def _token_classes(runner, positions):
         extra = (state.sampling_params.extra_args or {}) if state is not None and state.sampling_params else {}
         bounds.append(extra.get("ls_bounds", (-1, -1)))
     if not bounds:
-        return cls, req_ids
+        return cls, rel, req_ids
     b = torch.tensor(bounds, dtype=torch.long, device=positions.device)
     tok = torch.arange(n, device=positions.device)
     req = torch.searchsorted(qsl[1:].long(), tok, right=True)  # request of each token (n_reqs: padding)
@@ -106,7 +111,7 @@ def _token_classes(runner, positions):
     pos = positions.long()
     c = torch.where(pos < P, 0, torch.where((C < 0) | (pos < C), 1, 2))
     cls = torch.where(valid & (P >= 0), c, -1).to(torch.int8)
-    return cls, (req_ids, req, valid)
+    return cls, pos - P, (req_ids, req, valid)
 
 
 def install(model, specs):
@@ -120,7 +125,7 @@ def install(model, specs):
     pos_arg = 1 if gpt_oss else 0  # index of the positions argument of a decoder layer
     device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
     state = {"loop": 0, "cls": None, "masks": {}}
-    gated = any(s.get("positions") is not None or s["kind"] == "record" for s in specs)
+    gated = any(s.get("positions") is not None or s.get("decay") or s["kind"] == "record" for s in specs)
     handles = []
 
     if gated:
@@ -132,7 +137,7 @@ def install(model, specs):
         def classify(module, args):
             if looped and args[2] != 0:
                 return
-            state["cls"], info = _token_classes(runner, args[pos_arg])
+            state["cls"], state["rel"], info = _token_classes(runner, args[pos_arg])
             state["masks"] = {}
             if recording and info is not None:
                 req_ids, req, valid = info
@@ -144,8 +149,17 @@ def install(model, specs):
 
         handles.append(layers[0].register_forward_pre_hook(classify))
 
-    def mask(positions):
-        """Float [N, 1] mask of the tokens in the given classes (None: every token)."""
+    def mask(positions, decay=None):
+        """Float [N, 1] per-token strength: 1 on the tokens in the given classes (None: every token); with ``decay`` =
+        n, 1 on the prompt, a half-cosine from 1 to 0 over the first n CoT tokens, 0 after them and on the answer."""
+        if decay:
+            key = ("decay", decay)
+            if key not in state["masks"]:
+                cls, rel = state["cls"], state["rel"].float()
+                ramp = 0.5 * (1 + torch.cos(torch.pi * rel.clamp(0, decay) / decay))
+                w = torch.where(cls == 0, 1.0, torch.where(cls == 1, ramp, 0.0))
+                state["masks"][key] = w.to(dtype).unsqueeze(-1)
+            return state["masks"][key]
         if positions is None:
             return None
         key = tuple(sorted(positions))
@@ -184,16 +198,17 @@ def install(model, specs):
             continue
         loops = spec.get("loops")
         pos_cls = spec.get("positions")
+        decay = spec.get("decay")
         active = (lambda: True) if loops is None else (lambda loops=loops: state["loop"] in loops)
 
         if spec["kind"] == "actadd":
             vec = (spec["coeff"] * spec["vec"].float()).to(device=device, dtype=dtype)
 
-            def add(module, args, vec=vec, active=active, pos_cls=pos_cls):
+            def add(module, args, vec=vec, active=active, pos_cls=pos_cls, decay=decay):
                 if not active():
                     return None
                 h, _, res, rebuild = unpack(args)
-                m = fit(mask(pos_cls), h)
+                m = fit(mask(pos_cls, decay), h)
                 return rebuild(h + (vec if m is None else m * vec), res)
 
             handles.append(layers[spec["layer"]].register_forward_pre_hook(add))
@@ -206,9 +221,9 @@ def install(model, specs):
                 raise NotImplementedError("affine ablation (ref) is not implemented for Ouro's sandwich norms")
             ref = None if ref is None else ref.float().tolist()
 
-            def proj(x, target=0.0, u=u, pos_cls=pos_cls):
+            def proj(x, target=0.0, u=u, pos_cls=pos_cls, decay=decay):
                 coef = (x @ u).unsqueeze(-1) - target
-                m = fit(mask(pos_cls), x)
+                m = fit(mask(pos_cls, decay), x)
                 return x - (coef if m is None else m * coef) * u
 
             def pre(module, args, i=None, proj=proj, active=active, ref=ref):
@@ -226,8 +241,8 @@ def install(model, specs):
                     return (proj(output[0]), *output[1:])
                 return proj(output)
 
-            if dory and pos_cls is None:  # final stream before the unembedding (logits_processor(lm_head, hidden));
-                # it sees only the sampled rows, so position-gated specs skip it
+            if dory and pos_cls is None and not decay:  # final stream before the unembedding (logits_processor(lm_head, hidden));
+                # it sees only the sampled rows, so position-gated and decaying specs skip it
                 def final(module, args, proj=proj, active=active, target=0.0 if ref is None else ref[0][-1]):
                     return (args[0], proj(args[1], target), *args[2:]) if active() else None
 

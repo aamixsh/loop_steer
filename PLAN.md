@@ -36,9 +36,20 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
-**Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT)**: clean baselines queued 2026-10-22 19:32 ET (test set `none`
-in TAG `test`; MATH-500 and AIME 2025 `none` in TAG `cap`); `validate`, `clean`, `directions` and three screen rounds
-(32 candidates, `analysis/select_screen.csv`) are done. Which interventions go to the test set is open (see below).
+**Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT)**: nothing running. **Test set** (487 prompts, `hh_eoi` u from
+t0.l26, capped CoTs extended to 8192): clean 92.3%, random 91.4%, **hooks 12.4%** (14% of CoTs hit 4096, 0.9% still
+unclosed at 8192), weight edit 25.5% (1.4%), actadd c=-1 23.1% (3.4%), hooks with decay=200 41.1% (0.5%). Clean
+capability: MATH-500 77.2% (86% of CoTs close at 8192), AIME 2025 28.3% (30% close). Next: capability under the
+interventions, deck update.
+- **The harmful - harmless direction works** (`scripts/run_dory.sh contrast`: 1,409 harmful train prompts minus the
+  selection set vs 1,174 harmless, end-of-prompt tokens; split-half 1.00 everywhere). Screen: hooks with u from t0.l26
+  8.4% refusal / 19% capped (t0.l22, t0.l38, t1.l38: 6-10% / 31-33%), affine 1-2% / 31-39%, l62 75%; actadd c=-1 21%.
+  The capped CoTs are coherent (the full answer written inside the thinking), except the affine variant (some
+  degenerate into random strings). The 33-prompt end-of-prompt direction below was too noisy.
+- **Decaying steering** (`decay=N`: full on the prompt, half-cosine to 0 over the first N CoT tokens; vLLM hooks):
+  decay=200 cuts capped CoTs (hh hooks 19% -> 14%, `v4_baseline` hooks 16% -> 9%, actadd 23% -> 9%) but loses most of
+  the effect (hh hooks 8% -> 38% refusal): the CoT tokens carry most of it.
+- `v12_cot150` (first 150 CoT tokens, AUC 0.96-0.97, split-half 0.95) does not work on Dory: hooks 82-100% refusal.
 - **Dory resists single-direction ablation** (50 selection prompts, all_refusal / unclosed): clean 89%, random 91%.
   `v4_baseline` hooks, u from: t0.l26 43% / 16%, t0.l22 47% / 13% (per-loop directions 38% / 12%), t0.l38 59% / 10%,
   t1.l38 62% / 10%, t1.l30 77%, t0.l18-20 78-82%, t0.l30 81%, later sites 74-94%, input l10-14 89-92%, and **t0.l24 /

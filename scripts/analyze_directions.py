@@ -23,7 +23,9 @@ from loop_steer.paths import run_dir
 LABEL_WINDOW = {
     "v4_cot": ("label_cot", "cot"), "v12_cot150": ("label_cot", "cot_first150"),
     "cot_last150": ("label_cot", "cot_last150"), "v4_baseline": ("label_prompt", "eoi"),
+    "hh_eoi": ("label_hh", "eoi"),  # harmful vs harmless prompts (--activations contrast; scripts/contrast_prompts.py)
 }
+CLASSES = {"label_hh": ("harmful", "harmless")}  # (positive, negative); default ("refusal", "non_refusal")
 
 
 def auc(pos, neg):
@@ -47,8 +49,9 @@ def main():
     label_col, window = LABEL_WINDOW[args.method]
     X = acts[:, list(blob["windows"]).index(window)].float()  # [N, S, D]
     sub = meta.drop_duplicates("prompt_idx") if label_col == "label_prompt" else meta
-    sub = sub[sub[label_col].isin(["refusal", "non_refusal"])]
-    y = (sub[label_col] == "refusal").to_numpy()
+    pos, neg = CLASSES.get(label_col, ("refusal", "non_refusal"))
+    sub = sub[sub[label_col].isin([pos, neg])]
+    y = (sub[label_col] == pos).to_numpy()
 
     rng = np.random.default_rng(args.seed)
     prompts = sub.prompt_idx.unique()
