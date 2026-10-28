@@ -228,7 +228,9 @@ some loops is a separate experiment (next slides).
 - **Actadd costs accuracy:** MATH-500 −3.6 (Ouro, c = −1), −8.8 (Nanbeige, c = −2), −23 points (gpt-oss, c = −2);
   AIME: Nanbeige 29.6% → 13.8%, gpt-oss 52.5% → 10.8%. It also lengthens CoTs.
 - **No over-refusal:** 0–3% refusal on harmless prompts under every config (a weak check: our interventions lower refusal).
-- **Dory** (harmful − harmless hooks, weight edit, actadd): runs pending; clean MATH-500 77.2%, AIME 2025 28.3%.
+- **Dory** (u = harmful − harmless): hooks and the weight edit cost 2–3 points (MATH-500 77.2 → 75.0 / 74.6%, AIME
+  28.3 → 25.4 / 26.3%), within about one s.e.; actadd c = −1 *raises* MATH-500 to 82.0% (shorter CoTs: 89% close vs
+  86%), AIME 26.7%. Over-refusal 0.8–2.8% (clean 2.4%).
 - AIME at 8192 tokens closes only 24–33% of CoTs (Dory 30%), so it mostly measures problems solved early.
 
 ---
@@ -327,7 +329,7 @@ Logit lens on clean traces (decode each loop's output directly):
 |---|---|---|
 | hook ablation | 2–6% | 10–18% |
 | weight ortho vs hooks | equal (MoE: every expert and bias edited) | never equal: 11% (Nanbeige) to broken (Ouro) |
-| loop 1 only | – | 49–53% (Ouro, Nanbeige): later loops rebuild the signal |
+| loop 1 only | – | 49–53% (Ouro, Nanbeige); Dory at 4 loops 92% (clean 90%): later loops rebuild the signal |
 | actadd | one push | a dose that accumulates over loops |
 
 - **Shared weights + a norm between an edited write and the stream = a leak**, and loops compound it. Where the norm
@@ -347,8 +349,9 @@ Logit lens on clean traces (decode each loop's output directly):
    edited weights. Ouro breaks twice: sandwich norms re-add `u` to every write, and the amplifying inter-loop norm
    compounds the leak while the edit stops the model from correcting it. Nanbeige survives (raw writes, shrinking norm).
    Dory's per-dimension blend leaks at every sublayer: the weight edit gets half the hooks' effect (26% vs 12%).
-3. **Refusal is decided late, but not in one loop.** Later loops carry most of the effect; ablating loop 1 alone
-   barely helps; no single loop matches all loops. One direction (last loop's) works in every loop.
+3. **Refusal is decided late.** Later loops carry most of the effect; ablating loop 1 alone barely helps. Dory run
+   with 4 loops is the extreme case: the last loop alone gives 15% (all loops 10–12%), loops 1–3 together 86%.
+   One direction works in every loop.
 4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability in the looped models (on gpt-oss
    it lengthens CoTs); actadd is a dose over loops, works at early-to-middle layers of late loops, and costs 4–23 points
    of MATH-500 accuracy.
@@ -370,6 +373,7 @@ Logit lens on clean traces (decode each loop's output directly):
 - gpt-oss is judged by gpt-oss-20b itself (refusal-phrase check agrees); its weight edit runs on a bf16 copy (MXFP4
   would undo 63% of it).
 - Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
+- Dory's loop-subset results are selection-set only (50 prompts), with 4 loops (trained with 2) and u measured at 2.
 - Dory: its headline numbers use a different direction (harmful − harmless) from the other models; it runs on our own
   port of an unreleased architecture (NVIDIA's vLLM PR), checked against our HF implementation, not NVIDIA's.
 - Some Nanbeige edits damage generation: the `v4_cot` loop-1 weight edit leaves 47% of CoTs unclosed (selection). Nanbeige
@@ -452,6 +456,20 @@ Logit lens on clean traces (decode each loop's output directly):
 
 ---
 
+## Dory at 4 loops: only the last loop matters
+
+![w:1150](figures/dory_loops.png)
+
+- Run with 4 loops (trained with 2; clean 90%), hooks remove u in a subset of the *recurrent* loops. The input and
+  output stacks run once and are a separate switch (`apply=-1`).
+- **Every set with loop 4 works** (loop 4 alone 15%, all loops 10–12%); **every set without it fails**: loop 1 92%,
+  loops 1–3 86%, input + output stacks 93%. Same 40 sublayers per single loop, so it is *where*, not how many.
+- Stronger than in Ouro (loop 1 alone 40%, any set with loop 3 or 4 8–15%): Dory adds the input stack's output back
+  before every loop, so after loop 1 the next loop starts with u again (input stack + loop 1: next run).
+- The cost moves with loop 4: 17–20% of CoTs still open at 4096 (19% at 2 loops); actadd only in loop 1 does nothing.
+
+---
+
 ## Next steps
 
 1. **Deck:** add the loop-rebuild result (ablating loop 1 only: Ouro rebuilds 93% of the clean prompt-end separation by
@@ -460,8 +478,10 @@ Logit lens on clean traces (decode each loop's output directly):
    on the test set; then gpt-oss.
 3. **Statistics:** bootstrap confidence intervals over prompts for every table.
 4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-5. **Dory:** does loop-1 ablation survive 4 loops (as in Ouro)? Capability and over-refusal under the interventions
-   (running). The harmful − harmless direction on Ouro and Nanbeige, for a like-for-like comparison.
+5. **Dory:** loop subsets at the trained 2 loops (running); input stack + loop 1 (the analogue of Ouro's loop 1),
+   leave-one-loop-out sets, ablation only at the site or only at the final stream; check that u still separates
+   refusing from complying in loops 3–4 and that adding it makes harmless prompts refused. The harmful − harmless
+   direction on Ouro and Nanbeige, for a like-for-like comparison.
 6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
    whole-CoT gap (15% vs the paper's 7.5%).
 

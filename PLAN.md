@@ -38,9 +38,16 @@ and why weight orthogonalization fails on Ouro.
 
 **Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT)**: nothing running. **Test set** (487 prompts, `hh_eoi` u from
 t0.l26, capped CoTs extended to 8192): clean 92.3%, random 91.4%, **hooks 12.4%** (14% of CoTs hit 4096, 0.9% still
-unclosed at 8192), weight edit 25.5% (1.4%), actadd c=-1 23.1% (3.4%), hooks with decay=200 41.1% (0.5%). Clean
-capability: MATH-500 77.2% (86% of CoTs close at 8192), AIME 2025 28.3% (30% close). Next: capability under the
-interventions, deck update.
+unclosed at 8192), weight edit 25.5% (1.4%), actadd c=-1 23.1% (3.4%), hooks with decay=200 41.1% (0.5%). Capability
+(CoT <= 8192): MATH-500 clean 77.2%, hooks 75.0%, weight edit 74.6%, actadd c=-1 82.0% (shorter CoTs); AIME 2025
+28.3 / 25.4 / 26.3 / 26.7%. Over-refusal 0.8-2.8% (clean 2.4%).
+- **Loop subsets at 4 loops** (selection set, TAG `loops4`, `scripts/run_select.sh` with N_LOOPS=4; u = hh_eoi t0.l26;
+  `apply=` now counts recurrent loops only, Dory's input / output stacks are loop -1): every set containing loop 4
+  gives 10-15% all_refusal (17-20% capped), every set without it 86-93% (loop 1 92%, loops 1-3 86%, in/out only 93%);
+  clean 90%, random 93%; actadd c=-1 all loops 20%, loop 1 only 92%. Running: the same at 2 loops (TAG `loop_gate`).
+  Next: input stack + loop 1 (`apply=-1,0`), leave-one-out (`0,1,3`, `0,2,3`), ablation at the site only / final
+  stream only (needs a `layers=` option), u's separation in loops 3-4 at 4 loops, and the actadd(+u)-on-harmless
+  check of the direction; `loop_rebuild.py` Dory branch.
 - **The harmful - harmless direction works** (`scripts/run_dory.sh contrast`: 1,409 harmful train prompts minus the
   selection set vs 1,174 harmless, end-of-prompt tokens; split-half 1.00 everywhere). Screen: hooks with u from t0.l26
   8.4% refusal / 19% capped (t0.l22, t0.l38, t1.l38: 6-10% / 31-33%), affine 1-2% / 31-39%, l62 75%; actadd c=-1 21%.

@@ -21,6 +21,14 @@ def _loop(kwargs) -> int:
     return kwargs.get("current_ut", kwargs.get("loop_idx", 0))
 
 
+def _dory_recurrent(model):
+    """Dory: per sublayer, whether it is recurrent (input and output sublayers run once); None for other models."""
+    c = model.config
+    if not hasattr(c, "n_recurrent_layers"):
+        return None
+    return [c.n_input_layers <= i < c.n_input_layers + c.n_recurrent_layers for i in range(c.num_hidden_layers)]
+
+
 def _layer_input(args, kwargs) -> torch.Tensor:
     return args[0] if args else kwargs["hidden_states"]
 
@@ -82,9 +90,11 @@ def _project_out(x: torch.Tensor, unit: torch.Tensor) -> torch.Tensor:
 def actadd_hooks(model, vector: torch.Tensor, layer: int, coeff: float = 1.0, loops=None):
     """Add ``coeff * vector`` to resid_pre of ``layer`` (at all positions) in the given loops."""
     block = decoder_layers(model)[layer]
+    recurrent = _dory_recurrent(model)
+    once = recurrent is not None and not recurrent[layer]  # Dory input / output sublayer: loop -1 for ``loops``
 
     def hook(module, args, kwargs):
-        if loops is not None and _loop(kwargs) not in loops:
+        if loops is not None and (-1 if once else _loop(kwargs)) not in loops:
             return None
         h = _layer_input(args, kwargs)
         return _replace_layer_input(args, kwargs, h + coeff * vector.to(h))
@@ -101,6 +111,8 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
     (its write), and the final stream before the unembedding (its last interpolation is not followed by a sublayer).
     ``ref`` ([n_loops, n_layers]): affine ablation (ACE) -- layer l's input in loop t gets component ``ref[t, l]``
     along the direction instead of 0 (the final stream ``ref[0, -1]``); writes still get 0. Not for Ouro.
+    Dory's input and output sublayers and final stream run once; ``loops`` counts them as loop -1 (``loops=[0]`` is
+    the first recurrent loop only).
     """
     if hasattr(decoder_layers(model)[0], "input_layernorm_2"):
         if ref is not None:
@@ -108,13 +120,15 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
         return ouro_ablation_hooks(model, direction, loops=loops)
     unit = direction / direction.norm()
     blocks = decoder_layers(model)
-    state = {"loop": 0}  # set by each layer's tracker pre-hook; sublayers run inside that call
+    state = {"loop": 0, "gate": 0}  # set by each layer's tracker pre-hook; sublayers run inside that call
+    recurrent = _dory_recurrent(model)
 
     def active():
-        return loops is None or state["loop"] in loops
+        return loops is None or state["gate"] in loops
 
-    def track(module, args, kwargs):
+    def track(module, args, kwargs, i=None):
         state["loop"] = _loop(kwargs)
+        state["gate"] = state["loop"] if recurrent is None or recurrent[i] else -1
 
     def set_to(x, target):
         return _project_out(x, unit) if target is None else _project_out(x, unit) + target * unit.to(x)
@@ -133,12 +147,14 @@ def ablation_hooks(model, direction: torch.Tensor, loops=None, sites=("resid_pre
         return _project_out(output, unit)
 
     def final(module, args):
-        return (set_to(args[0], None if ref is None else float(ref[0][-1])), *args[1:]) if active() else None
+        if loops is not None and -1 not in loops:
+            return None
+        return (set_to(args[0], None if ref is None else float(ref[0][-1])), *args[1:])
 
     def register():
         handles = []
         for i, block in enumerate(blocks):
-            handles.append(block.register_forward_pre_hook(track, with_kwargs=True))  # first: sets the loop
+            handles.append(block.register_forward_pre_hook(functools.partial(track, i=i), with_kwargs=True))  # first
             if "resid_pre" in sites:
                 handles.append(block.register_forward_pre_hook(functools.partial(pre, i=i), with_kwargs=True))
             if hasattr(block, "mixer"):  # Dory: one sublayer per block

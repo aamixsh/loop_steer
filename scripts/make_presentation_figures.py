@@ -730,9 +730,10 @@ def fig_capability():
     axes[2].set_title("Over-refusal (250 harmless test prompts)", fontsize=11)
     h, l = axes[0].get_legend_handles_labels()
     fig.legend(h, l, loc="lower center", ncol=6, fontsize=9.5, frameon=False, bbox_to_anchor=(0.5, -0.07))
-    fig.suptitle("Collateral effects (CoT ≤ 8192 tokens): ablation is free in the looped models; on gpt-oss it lengthens "
-                 "CoTs, so more hit the cap (MATH −3, AIME −12 points);\nactadd costs more everywhere; no intervention "
-                 "adds refusals", fontsize=11)
+    fig.suptitle("Collateral effects (CoT ≤ 8192 tokens): ablation is free or nearly free in the looped models (Dory −2 "
+                 "to −3 points, within noise); on gpt-oss it lengthens CoTs, so more hit the cap (MATH −3, AIME −12);\n"
+                 "actadd costs accuracy except on Dory (c = −1: shorter CoTs, MATH +5); no intervention adds refusals",
+                 fontsize=11)
     fig.tight_layout()
     fig.savefig(OUT / "capability.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 
@@ -846,6 +847,68 @@ def fig_dory():
     print(df.sort_values("push").round(2).to_string(index=False))
 
 
+# ---------------------------------------------------------------- 13. Dory: which loops carry the refusal at 4 loops
+def fig_dory_loops():
+    """Hook ablation of u (harmful - harmless, loop 1 L26) in subsets of Dory's recurrent loops, run with 4 loops (and
+    with the trained 2, when loop_gate.csv exists). Dot rows: the input + output stacks ('in/out', run once) and each
+    recurrent loop."""
+    d = "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"
+    a = "ablate_hh_eoi_t0.l26"
+    io = "in/out"
+    panels = [("loops4", "4 loops (trained with 2)", 4, [
+        ("random u, everywhere", "ablate_random_t0.l26", {io, 1, 2, 3, 4}, "random"),
+        ("", a + "_apply-1", {io}, "ablate"),
+        ("", a + "_apply0", {1}, "ablate"), ("", a + "_apply1", {2}, "ablate"), ("", a + "_apply2", {3}, "ablate"),
+        ("", a + "_apply0-1", {1, 2}, "ablate"), ("", a + "_apply0-1-2", {1, 2, 3}, "ablate"),
+        ("", a + "_apply3", {4}, "ablate"), ("", a + "_apply2-3", {3, 4}, "ablate"),
+        ("", a + "_apply1-2-3", {2, 3, 4}, "ablate"), ("", a + "_apply0-1-2-3", {1, 2, 3, 4}, "ablate"),
+        ("", a, {io, 1, 2, 3, 4}, "ablate"),
+        ("actadd", "actadd_hh_eoi_t0.l26_c-1_apply0", {1}, "actadd"),
+        ("actadd", "actadd_hh_eoi_t0.l26_c-1", {1, 2, 3, 4}, "actadd")])]
+    if (ROOT / "results" / d / "loop_gate.csv").exists():
+        panels.append(("loop_gate", "2 loops (as trained)", 2, [
+            ("", a + "_apply-1", {io}, "ablate"), ("", a + "_apply0", {1}, "ablate"), ("", a + "_apply1", {2}, "ablate"),
+            ("", a + "_apply0-1", {1, 2}, "ablate"), ("", a, {io, 1, 2}, "ablate"),
+            ("actadd", "actadd_hh_eoi_t0.l26_c-1_apply0", {1}, "actadd")]))
+    widths = [len(r) + 1 for *_, r in panels]
+    fig, axes = plt.subplots(2, len(panels), figsize=(4.2 + 0.62 * sum(widths), 5.8), squeeze=False,
+                             gridspec_kw={"width_ratios": widths, "height_ratios": [4, 1.5], "hspace": 0.05,
+                                          "wspace": 0.12})
+    for j, (tag, title, T, rows) in enumerate(panels):
+        t = pd.read_csv(ROOT / "results" / d / f"{tag}.csv").set_index("candidate")
+        if tag == "loop_gate":  # the 2-loop clean and full-ablation runs live in the screen
+            t = pd.concat([t, pd.read_csv(ROOT / "results" / d / "select_screen.csv").set_index("candidate")
+                           .loc[["none", a]].drop(index=[c for c in ("none", a) if c in t.index], errors="ignore")])
+        ax, dots = axes[0, j], axes[1, j]
+        x = np.arange(len(rows))
+        ref = [100 * t.loc[c, "all_refusal"] for _, c, _, _ in rows]
+        cap = [100 * t.loc[c, "capped_frac"] for _, c, _, _ in rows]
+        ax.bar(x, ref, width=0.7, color=[C["hook"] if k == "ablate" else C[k] for *_, k in rows])
+        for i, (v, cp) in enumerate(zip(ref, cap)):
+            ax.text(i, v + 1.5, f"{v:.0f}%", ha="center", fontsize=10, weight="bold")
+            if cp >= 1:
+                ax.text(i, v + 7.5, f"{cp:.0f}% unf.", ha="center", fontsize=7.5, color=C["ortho"])
+        clean = 100 * t.loc["none", "all_refusal"]
+        ax.axhline(clean, color=C["clean"], ls="--", lw=1.3)
+        gap = next((i for i in range(len(ref) - 1) if ref[i] > 50 > ref[i + 1]), len(ref) - 1)  # first tall -> short step
+        ax.text(gap + 0.4, clean + 1.5, f"clean {clean:.0f}%", color=C["clean"], fontsize=9)
+        ax.set_ylim(0, 110); ax.set_xticks([]); ax.set_xlim(-0.6, len(rows) - 0.4); ax.set_title(title, fontsize=11)
+        labels = [io] + list(range(1, T + 1))
+        for i, (_, _, on, kind) in enumerate(rows):
+            for k, lab in enumerate(labels):
+                col = {"ablate": "black", "actadd": C["actadd"], "random": "#999999"}[kind]
+                dots.plot(i, k, "o", ms=7, color=col if lab in on else "#dddddd")
+        dots.set_yticks(range(len(labels))); dots.set_yticklabels(["in/out"] + [f"loop {k}" for k in range(1, T + 1)])
+        dots.set_ylim(len(labels) - 0.4, -0.6); dots.set_xlim(-0.6, len(rows) - 0.4)
+        dots.set_xticks(x); dots.set_xticklabels([lab for lab, *_ in rows], fontsize=8, rotation=20)
+        dots.spines[["left", "bottom"]].set_visible(False)
+    axes[0, 0].set_ylabel("judge refusal, all samples (%)")
+    fig.suptitle("Dory, 50 selection prompts: hook ablation of u (harmful − harmless, loop 1 · L26) where the dots are "
+                 "black. At 4 loops only sets with the last loop work;\nloop 1 (even loops 1–3) is undone by the "
+                 "later loops. 'unf.' = CoTs still open at 4096 tokens. Actadd c = −1 (green).", fontsize=11, y=1.02)
+    fig.savefig(OUT / "dory_loops.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+
+
 def copy_sweep_figures():
     """Loop-subset sweep and loop x layer map figures (made by scripts/loop_sweep_summary.py and
     scripts/loop_layer_summary.py under data/runs/<model>/figures) -> docs/figures."""
@@ -863,4 +926,5 @@ if __name__ == "__main__":
     fig_interventions(); fig_norm_leak(); fig_leak1(); fig_leak2(); fig_loop_count()
     fig_results(); fig_sites(); copy_sweep_figures()
     fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe(); fig_dory()
+    fig_dory_loops()
     print("figures ->", OUT)

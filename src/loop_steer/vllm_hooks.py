@@ -15,6 +15,8 @@ Spec dicts (tensors may be on CPU):
       (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms; for Dory, each sublayer's mixer output and
       the final stream before the unembedding). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
       gets component ``ref[t, l]`` along dir instead of 0 (the final stream gets ``ref[0, -1]``); writes still get 0.
+  ``loops`` selects recurrent loops. Dory's input and output sublayers (and its final stream) run once; ``loops`` counts
+  them as loop -1, so ``loops=[0]`` is the first recurrent loop only and ``loops=[-1, 0]`` adds them.
   Either kind also takes ``"decay": n`` instead of ``positions``: full strength on the prompt, a half-cosine from 1
   to 0 over the first n CoT tokens, nothing after them or on the answer (the strength scales the added vector, or the
   removed / reset component along dir).
@@ -124,7 +126,7 @@ def install(model, specs):
     dory = _is_dory(model)
     pos_arg = 1 if gpt_oss else 0  # index of the positions argument of a decoder layer
     device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
-    state = {"loop": 0, "cls": None, "masks": {}}
+    state = {"loop": 0, "gate": 0, "cls": None, "masks": {}}  # gate: the loop that ``loops`` selects on
     gated = any(s.get("positions") is not None or s.get("decay") or s["kind"] == "record" for s in specs)
     handles = []
 
@@ -189,17 +191,22 @@ def install(model, specs):
         pos, h, res = args[0], args[1], args[2] if len(args) > 2 else None
         return h, 0, res, lambda h2, r2: (pos, h2, r2, *args[3:])
 
-    def track(module, args):
-        state["loop"] = args[2] if looped else 0
+    if dory:  # Dory's input and output sublayers run once: gate them as loop -1
+        n_in, n_rec = model.model.config.n_input_layers, model.model.config.n_recurrent_layers
+        recurrent = [n_in <= i < n_in + n_rec for i in range(len(layers))]
 
-    handles += [layer.register_forward_pre_hook(track) for layer in layers]
+    def track(module, args, i=None):
+        state["loop"] = args[2] if looped else 0
+        state["gate"] = state["loop"] if not dory or recurrent[i] else -1
+
+    handles += [layer.register_forward_pre_hook(functools.partial(track, i=i)) for i, layer in enumerate(layers)]
     for spec in specs:
         if spec["kind"] == "record":
             continue
         loops = spec.get("loops")
         pos_cls = spec.get("positions")
         decay = spec.get("decay")
-        active = (lambda: True) if loops is None else (lambda loops=loops: state["loop"] in loops)
+        active = (lambda: True) if loops is None else (lambda loops=loops: state["gate"] in loops)
 
         if spec["kind"] == "actadd":
             vec = (spec["coeff"] * spec["vec"].float()).to(device=device, dtype=dtype)
@@ -243,8 +250,8 @@ def install(model, specs):
 
             if dory and pos_cls is None and not decay:  # final stream before the unembedding (logits_processor(lm_head, hidden));
                 # it sees only the sampled rows, so position-gated and decaying specs skip it
-                def final(module, args, proj=proj, active=active, target=0.0 if ref is None else ref[0][-1]):
-                    return (args[0], proj(args[1], target), *args[2:]) if active() else None
+                def final(module, args, proj=proj, loops=loops, target=0.0 if ref is None else ref[0][-1]):
+                    return (args[0], proj(args[1], target), *args[2:]) if loops is None or -1 in loops else None
 
                 handles.append(model.logits_processor.register_forward_pre_hook(final))
             for i, layer in enumerate(layers):

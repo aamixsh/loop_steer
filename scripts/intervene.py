@@ -9,7 +9,8 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
   site    l<layer> or t<loop>.l<layer> -- where the direction was extracted
   opts    c=<coeff>      actadd coefficient (default -1.0: subtract the refusal direction)
-          apply=<t,t..>  loops to intervene in (default: all loops)
+          apply=<t,t..>  loops to intervene in (default: all loops). Dory: recurrent loops; its input and output
+                         sublayers (run once) are loop -1, so apply=0 is the first recurrent loop alone
           layer=<l>      actadd at a different layer than the extraction site
           na=1           ortho only: norm-aware weight edit (project g*u, g = gain of the sandwich norm after each
                          writer, instead of u; see loop_steer.ortho). Matters for Ouro.
@@ -120,6 +121,8 @@ def intervention_specs(c, dirs, site_index):
     if c["perloop"]:
         n_loops = max(t for t, _ in dirs["sites"]) + 1
         groups = [([t], table[site_index[(t, c["site"][1])]]) for t in (c["apply"] or range(n_loops))]
+        if not c["apply"]:  # Dory: its input and output sublayers (loop -1 for the hooks) go with loop 0, as their sites
+            groups[0] = ([-1, 0], groups[0][1])
     else:
         groups = [(c["apply"], table[site_index[c["site"]]])]
     layer = c["layer"] if c["layer"] is not None else c["site"][1]
