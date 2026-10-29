@@ -44,7 +44,8 @@ unclosed at 8192), weight edit 25.5% (1.4%), actadd c=-1 23.1% (3.4%), hooks wit
 - **Loop subsets at 4 loops** (selection set, TAG `loops4`, `scripts/run_select.sh` with N_LOOPS=4; u = hh_eoi t0.l26;
   `apply=` now counts recurrent loops only, Dory's input / output stacks are loop -1): every set containing loop 4
   gives 10-15% all_refusal (17-20% capped), every set without it 86-93% (loop 1 92%, loops 1-3 86%, in/out only 93%);
-  clean 90%, random 93%; actadd c=-1 all loops 20%, loop 1 only 92%. Running: the same at 2 loops (TAG `loop_gate`).
+  clean 90%, random 93%; actadd c=-1 all loops 20%, loop 1 only 92%. Same at 2 loops (TAG `loop_gate`): loop 2 alone 16% (16% capped), loops 1+2 10%, everything 8% (screen); loop 1
+  alone 84%, in/out only 91%, actadd c=-1 loop 1 only 84%; clean 90%.
   Next: input stack + loop 1 (`apply=-1,0`), leave-one-out (`0,1,3`, `0,2,3`), ablation at the site only / final
   stream only (needs a `layers=` option), u's separation in loops 3-4 at 4 loops, and the actadd(+u)-on-harmless
   check of the direction; `loop_rebuild.py` Dory branch.

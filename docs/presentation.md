@@ -456,7 +456,7 @@ Logit lens on clean traces (decode each loop's output directly):
 
 ---
 
-## Dory at 4 loops: only the last loop matters
+## Dory: only the last loop matters (4 loops and 2)
 
 ![w:1150](figures/dory_loops.png)
 
@@ -466,7 +466,10 @@ Logit lens on clean traces (decode each loop's output directly):
   loops 1–3 86%, input + output stacks 93%. Same 40 sublayers per single loop, so it is *where*, not how many.
 - Stronger than in Ouro (loop 1 alone 40%, any set with loop 3 or 4 8–15%): Dory adds the input stack's output back
   before every loop, so after loop 1 the next loop starts with u again (input stack + loop 1: next run).
-- The cost moves with loop 4: 17–20% of CoTs still open at 4096 (19% at 2 loops); actadd only in loop 1 does nothing.
+- **The same at the trained 2 loops:** loop 2 alone 16%, both loops 10%, everything 8%; loop 1 alone 84%, input +
+  output stacks 91% (clean 90%).
+- The cost moves with the last loop: 16–20% of CoTs still open at 4096 whenever it is ablated, about 1% otherwise
+  (same at 2 and 4 loops); actadd only in loop 1 does nothing (84–92%).
 
 ---
 
@@ -478,7 +481,7 @@ Logit lens on clean traces (decode each loop's output directly):
    on the test set; then gpt-oss.
 3. **Statistics:** bootstrap confidence intervals over prompts for every table.
 4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-5. **Dory:** loop subsets at the trained 2 loops (running); input stack + loop 1 (the analogue of Ouro's loop 1),
+5. **Dory:** input stack + loop 1 (the analogue of Ouro's loop 1),
    leave-one-loop-out sets, ablation only at the site or only at the final stream; check that u still separates
    refusing from complying in loops 3–4 and that adding it makes harmless prompts refused. The harmful − harmless
    direction on Ouro and Nanbeige, for a like-for-like comparison.

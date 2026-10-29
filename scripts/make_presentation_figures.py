@@ -904,8 +904,8 @@ def fig_dory_loops():
         dots.spines[["left", "bottom"]].set_visible(False)
     axes[0, 0].set_ylabel("judge refusal, all samples (%)")
     fig.suptitle("Dory, 50 selection prompts: hook ablation of u (harmful − harmless, loop 1 · L26) where the dots are "
-                 "black. At 4 loops only sets with the last loop work;\nloop 1 (even loops 1–3) is undone by the "
-                 "later loops. 'unf.' = CoTs still open at 4096 tokens. Actadd c = −1 (green).", fontsize=11, y=1.02)
+                 "black. Only sets with the last loop work, at 4 loops\nand at the trained 2; loop 1 (even loops 1–3) is "
+                 "undone by the later loops. 'unf.' = CoTs still open at 4096 tokens. Actadd c = −1 (green).", fontsize=11, y=1.02)
     fig.savefig(OUT / "dory_loops.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
