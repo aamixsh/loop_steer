@@ -100,18 +100,24 @@ for `--idle` seconds (default 1800).
 
 ## Next TODO (in order)
 
+**Paper plan:** `docs/paper_plan.md` lists the experiments that must run before publishing (one setup for all looped
+models, seeds and intervals, dense controls for self-correction, causal tests of the norm mechanism, attacks). Pick
+work from there; the items below are the older queue.
+
 1. [x] **Why late loops?** `scripts/loop_rebuild.py` (teacher-forced clean traces, separation of refusing vs complying
-   along depth). Later loops rebuild the signal ablated upstream: prompt-end separation in Ouro's last loop is 93% of
-   clean after ablating loop 1 only, 75% after loop 2, 37% after loop 3, 19% after loop 4, 10% after all. Nanbeige:
-   59% after loop 1, 15% after loop 2. This ordering matches test-set refusal. Add to the deck (figure:
-   `data/runs/<model>/figures/loop_rebuild_*.png`).
+   along depth). Later loops rebuild the signal ablated upstream: prompt-end separation along u at Ouro's last layer
+   is 94% of clean after ablating loop 1 only, 78% after loop 2, 49% after loop 3 (0% when the last loop is ablated).
+   Nanbeige: 67% after loop 1. This ordering matches test-set refusal. In the deck (`figures/rebuild.png`):
+   after a loop-1 ablation Ouro's loop 2 rebuilds 4% -> 83% of the separation along u (Nanbeige 0% -> 67%); the
+   inter-loop norm contributes 4% / 0%, so the rebuild is recomputation, not the norm.
 2. [x] **1- and 2-loop Ouro weight edits** (selection set, tags `loops2`, `loops1`). 1-loop Ouro does not work even
    clean (96% unclosed). At 2 loops: plain ortho with a random direction still breaks generation (leak 1); norm-aware
    ortho with the refusal direction gives 10% refusal like hooks (clean 40%) but 54% unclosed vs 38% for hooks,
    whereas at 4 loops it leaves 99% unclosed (leak 2 compounds with loops). Add to the deck's "Testing the
-   explanation"; continuing the capped CoTs (2-loop Ouro thinks longer) would sharpen the comparison.
-3. [ ] **Read the position-restricted runs** (done, selection set, tag `select_pos` for Ouro and Nanbeige): which token
-   classes carry the effect? Confirm the main ones on the test set (`run_test_set.sh` takes the same candidates).
+   explanation" (done); continuing the capped CoTs (2-loop Ouro thinks longer) would sharpen the comparison.
+3. [x] **Read the position-restricted runs** (selection set, tag `select_pos`, in the deck): prompt-only ablation does
+   nothing (Ouro 64%, Nanbeige 74%), CoT only 22% / 44%, prompt + CoT 9% / 19% (all tokens 8% / 16%). Test-set
+   confirmation is in `docs/paper_plan.md` (B.3).
    `pos=` is vLLM-only; validated by `scripts/validate_position_gates.py` (exact).
 3b. [x] **gpt-oss (MoE)**: validation, screen, test set, capability, over-refusal done (deck: MoE slides). Left: the
    position-restricted ablation on gpt-oss (Harmony bounds) once item 3 is read; AIME at 32k (does the gap close?);

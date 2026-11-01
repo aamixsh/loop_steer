@@ -216,6 +216,45 @@ some loops is a separate experiment (next slides).
 
 ---
 
+## Self-correction: the next loop recomputes what an ablated loop removed
+
+![w:1150](figures/rebuild.png)
+
+- Teacher-forced clean traces (selection prompts, ≤ 40 per class); u ablated in some loops, the rest run clean.
+- **Ablate loop 1 only (Ouro):** the separation along u is 4% of clean at the start of loop 2, 20% at L2, 79% at L12,
+  83% at the end of loop 2, 94% at the end of loop 4. Nanbeige: 0% at the start of loop 2, 67% at its end.
+- **Rebuild capacity falls with depth:** a clean loop after ablated loop 1 / 2 / 3 recovers 83 / 63 / 49% within that
+  loop. Same order as refusal under one-loop ablation (test set 49 / 28 / 18%).
+- **Not the norm:** the inter-loop norm restores only 4% (Ouro) / 0% (Nanbeige) at the boundary. The next loop's
+  layers recompute u from what ablation left: each site's own refusal direction keeps 67% (Ouro) / 31% (Nanbeige) of
+  its separation, and harmfulness itself is untouched.
+- **A set point:** in clean Ouro the writes of loops 2–4 oppose the u they inherit (slope −0.11 to −0.19, corr. −0.31
+  to −0.52); loop 1 amplifies it (+0.07). Correlational: no intervention on the slope yet.
+- **Removal is corrected, a push only partly:** actadd in loop 1 alone barely helps (42%), yet it adds to later pushes
+  (loops 1+4 31% vs loop 4 alone 51%). Dory (input stack re-added before every loop): loop 1 alone does nothing.
+
+---
+
+## Which tokens carry the effect? (position-restricted hooks, selection)
+
+| u ablated only on (`v4_baseline`) | Ouro refusal / invalid | Nanbeige refusal / invalid |
+|---|---|---|
+| clean | 56% / 11% | 79% / 0% |
+| every token | 8% / 24% | 16% / 4% |
+| prompt only | 64% / 15% | 74% / 1% |
+| CoT only | 22% / 29% | 44% / 3% |
+| answer only | 53% / 17% | 77% / 0% |
+| prompt + CoT | 9% / 18% | 19% / 6% |
+| CoT + answer | 15% / 20% | 26% / 6% |
+
+- The direction is measured at the prompt end, but **ablating the prompt alone does nothing**: the decision is remade
+  at the CoT tokens, which carry most of the effect. Prompt + CoT matches every token. Dory agrees (steering that
+  decays over the first 200 CoT tokens keeps only a third of the effect).
+- Ouro's CoT-window direction (`v4_cot`) works from the answer tokens alone (14%), unlike the prompt-end one (53%).
+- 50 prompts, one run each; invalid = direct answer or capped CoT. Not yet on the test set or gpt-oss.
+
+---
+
 ## What does steering cost?
 
 ![w:1150](figures/capability.png)
@@ -290,6 +329,10 @@ Two fixes, each targeting one leak: **norm-aware ortho** (edit against `g ⊙ u`
 - Norm-aware ortho matches hooks at 1–2 loops and degrades at 4 → leak 2 needs several passes.
 - In generation (4 loops): norm-aware ortho is harmless with a random direction (63% refusal vs 57% clean) but leaves
   99% of CoTs unclosed with the refusal direction → **the inter-loop norm is the main cause**.
+- **Ouro run with 2 loops** (selection; clean 40% refusal, 23% invalid): norm-aware ortho 10% refusal with 54% invalid
+  (hooks 10% / 38%), plain ortho 12% / 59%, random plain ortho 100% invalid (leak 1), random norm-aware 34% / 31%.
+  Fewer passes, less compounding: the edit works again, at a cost in closed CoTs.
+- The culprit is the **learned per-dimension gain**, not normalization itself: dividing by rms(x) alone keeps x ⊥ u.
 
 ---
 
@@ -340,6 +383,28 @@ Logit lens on clean traces (decode each loop's output directly):
 
 ---
 
+## Concurrent and prior work
+
+**Concurrent** (this project started in late September 2026; each appeared within a week of the start or during it):
+
+- **LessWrong, 24 Sep 2026** ("A recurrent LLM is quite easy to interpret but complex to steer", Ouro-1.4B-Thinking):
+  concept vectors similar across loops (cos 0.82–1.00), steering works best in the last loop, early injections are
+  "neutralized" and rotate away. Six CAA concepts, 16 MBPP + 24 GSM8K items, no judge, no ablation or weight edits.
+- **arXiv 2610.15218 (USC, Oct 2026)**, "Running fewer loops removes refusal": Ouro 1.4B / 2.6B (± Thinking), Huginn.
+  Fewer loops → compliance (1.4B-Thinking at 2 of 4 loops: 0.04 → 0.21); harm probes AUC 0.96–0.98 after one loop;
+  refusal direction settles late (cos to full depth 0.41 / 0.80 / 0.98 / 1.00, ours 0.56 / 0.86 / 0.98 / 1.00);
+  full-depth ablation 0.98 → 0.75 on 1.4B-Thinking (ours 61% → 10%); LoRA fix by training at random depths.
+- **arXiv 2610.10625** (Oct 2026): jailbreak success depends on the loop count; a training fix. No interpretability.
+
+**Prior:** self-repair in dense models (hydra effect, McGrath et al. 2023; Rushing & Nanda 2024); Gemma 2
+abliteration notes the same norm-after-write issue in a non-looped model.
+
+- **Not in any of them:** loop-restricted ablation with a judge on 487 test prompts in three looped architectures; the rebuild
+  measurement and what drives it; why the weight edit fails (two leaks, tested fixes, no weight-only fix); Dory's
+  last-loop result; capability and over-refusal costs; the MoE check.
+
+---
+
 ## Takeaways
 
 1. **The method transfers.** One difference-in-means direction removes most refusal in all three looped models
@@ -349,9 +414,10 @@ Logit lens on clean traces (decode each loop's output directly):
    edited weights. Ouro breaks twice: sandwich norms re-add `u` to every write, and the amplifying inter-loop norm
    compounds the leak while the edit stops the model from correcting it. Nanbeige survives (raw writes, shrinking norm).
    Dory's per-dimension blend leaks at every sublayer: the weight edit gets half the hooks' effect (26% vs 12%).
-3. **Refusal is decided late.** Later loops carry most of the effect; ablating loop 1 alone barely helps. Dory run
-   with 4 loops is the extreme case: the last loop alone gives 15% (all loops 10–12%), loops 1–3 together 86%.
-   One direction works in every loop.
+3. **Looped models self-correct a removed direction.** Ablating loop 1 alone barely helps because loop 2 recomputes
+   83% of the separation along u (Nanbeige 67%) from features the ablation left; the rebuild weakens with depth, so
+   the last loops decide. Dory run with 4 loops is the extreme case: the last loop alone gives 15% (all loops
+   10–12%), loops 1–3 together 86%. One direction works in every loop. A push (actadd) is not undone: it adds up.
 4. **Ablation and actadd differ.** Ablation needs a late loop and costs no capability in the looped models (on gpt-oss
    it lengthens CoTs); actadd is a dose over loops, works at early-to-middle layers of late loops, and costs 4–23 points
    of MATH-500 accuracy.
@@ -372,7 +438,9 @@ Logit lens on clean traces (decode each loop's output directly):
 - AIME 2025 at 8192 tokens is a weak capability test (most CoTs do not close). Over-refusal is a weak check.
 - gpt-oss is judged by gpt-oss-20b itself (refusal-phrase check agrees); its weight edit runs on a bf16 copy (MXFP4
   would undo 63% of it).
-- Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each.
+- Mechanism numbers come from 8 traces (≈ 2.7k tokens) per model, one refusal site each. The rebuild runs on
+  teacher-forced clean traces (≤ 40 per class, selection prompts): it shows the signal coming back, not behaviour.
+- Position-restricted results and the all-subsets sweep are single runs on 50 prompts (no confidence intervals yet).
 - Dory's loop-subset results are selection-set only (50 prompts), with 4 loops (trained with 2) and u measured at 2.
 - Dory: its headline numbers use a different direction (harmful − harmless) from the other models; it runs on our own
   port of an unreleased architecture (NVIDIA's vLLM PR), checked against our HF implementation, not NVIDIA's.
@@ -475,18 +543,17 @@ Logit lens on clean traces (decode each loop's output directly):
 
 ## Next steps
 
-1. **Deck:** add the loop-rebuild result (ablating loop 1 only: Ouro rebuilds 93% of the clean prompt-end separation by
-   the last loop, Nanbeige 59%) and the 2-loop Ouro test of leak 2.
-2. **Position-restricted ablation** (prompt vs CoT vs answer tokens): runs done for Ouro and Nanbeige, to read and confirm
-   on the test set; then gpt-oss.
-3. **Statistics:** bootstrap confidence intervals over prompts for every table.
-4. **Capability at a longer cap** (AIME at 16–32k tokens) and actadd at matched strength across models.
-5. **Dory:** input stack + loop 1 (the analogue of Ouro's loop 1),
-   leave-one-loop-out sets, ablation only at the site or only at the final stream; check that u still separates
-   refusing from complying in loops 3–4 and that adding it makes harmless prompts refused. The harmful − harmless
-   direction on Ouro and Nanbeige, for a like-for-like comparison.
-6. Remaining sweeps: `paired_cot` directions, actadd coefficients, a teacher-forced per-loop screen; explain the Qwen
-   whole-CoT gap (15% vs the paper's 7.5%).
+Full list with rationale: `docs/paper_plan.md`. In order:
+
+1. **Same setup on all three looped models** (same direction recipe, layer choice, test set, loop subsets, rebuild,
+   positions, actadd), with seeds and bootstrap intervals.
+2. **Is self-correction special to loops?** Dense controls (Qwen3-8B, gpt-oss): ablate only the first k layers and
+   measure the rebuild.
+3. **Self-correction of pushes:** actadd dose by loop (coefficient sweep in loop 1 vs loop 4), +u on harmless
+   prompts, tracking the perturbation through later loops against a random push.
+4. **Causal tests of the mechanism:** flatten the inter-loop gain, Gemma 2 sandwich-norm control, reader-side weight
+   edit, blend-aware edit for Dory.
+5. **Tamper resistance as an attack question:** fewer loops plus weight edits, LoRA fine-tuning attacks, Ouro vs Qwen.
 
 ---
 

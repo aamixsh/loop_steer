@@ -51,6 +51,12 @@ all 15 subsets for Ouro and 3 for Nanbeige on the selection set; tables in `resu
 
 - The later loops carry most of the effect, but no single loop matches all loops; loop 1 alone barely helps. The
   selection set was optimistic by 5–10 points for single loops.
+- **Why loop 1 alone barely helps:** the next loop recomputes u. On teacher-forced clean traces, ablating u in Ouro's
+  loop 1 leaves 4% of the refusing − complying separation at the start of loop 2 and 83% at its end (Nanbeige 0% →
+  67%). The inter-loop norm contributes almost nothing; the layers rebuild u from features the ablation left. Rebuild
+  capacity falls with depth (83 / 63 / 49% after ablating loop 1 / 2 / 3).
+- Position-restricted hooks (selection): ablating only the prompt tokens does nothing (Ouro 64%, Nanbeige 74%); CoT
+  tokens carry most of the effect, prompt + CoT matches every token.
 - Ablation needs a late loop; actadd behaves like a dose (refusal falls with the number of loops, not which ones).
 - Each loop's *own* direction is not better than the last loop's direction used in every loop.
 - Actadd at one loop and one layer (Ouro, c=−2, selection): loop 4 works at layers 4 to 12 (11–17%), not at 16 and 20
@@ -195,7 +201,8 @@ source scripts/env.sh && scripts/verify_setup.sh --gpu 0             # GPU smoke
 ```
 
 Run data moves with `scripts/pack_data.sh` / `unpack_data.sh`; summary tables of every run are in `results/`
-(`scripts/export_results.sh`). `PLAN.md` holds the current plan and next steps.
+(`scripts/export_results.sh`). `PLAN.md` holds the current plan and next steps; `docs/paper_plan.md` the
+experiments needed before the looped-model claims can be published.
 
 ## Streaming demo
 

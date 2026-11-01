@@ -909,6 +909,54 @@ def fig_dory_loops():
     fig.savefig(OUT / "dory_loops.png", dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
+def fig_rebuild():
+    """Loop rebuild (scripts/loop_rebuild.py): teacher-forced clean selection traces, refusing - complying separation of
+    the prompt-end tokens along the ablated u at every (loop, layer), clean vs u ablated in one loop or all. Right: the
+    clean restoring force (slope of each loop's write along u on the stream's u-coordinate, ortho_feedback.py)."""
+    specs = [("Ouro-1.4B-Thinking", "loop_rebuild_v4_baseline_t3l16.csv", "Ouro (u: loop 4 · L16)",
+              ["1", "2", "3", "1,2,3,4"]),
+             ("Nanbeige4.2-3B", "loop_rebuild_v4_baseline_t1l15.csv", "Nanbeige (u: loop 2 · L15)", ["1", "1,2"])]
+    col = {"clean": "black", "1": "#1f77b4", "2": "#ff7f0e", "3": "#2ca02c", "1,2,3,4": "#999999", "1,2": "#999999"}
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.4), gridspec_kw={"width_ratios": [4, 2.2, 1.6], "wspace": 0.28})
+    for ax, (model, f, title, conds) in zip(axes, specs):
+        d = pd.read_csv(ROOT / "results" / model / f)
+        d = d[(d.window == "prompt_end") & (d.dir == "u")]
+        L = d.layer.max() + 1
+        T = d.loop.max()
+        for cond in ["clean"] + conds:
+            r = d[d.condition == cond].sort_values(["loop", "layer"])
+            x = (r.loop - 1) * L + r.layer
+            lab = "clean" if cond == "clean" else ("ablate all loops" if cond in ("1,2,3,4", "1,2") else
+                                                    f"ablate loop {cond} only")
+            ax.plot(x, r.sep, color=col[cond], lw=2.4 if cond == "clean" else 1.6,
+                    ls=":" if cond in ("1,2,3,4", "1,2") else "-", label=lab, zorder=3 if cond == "clean" else 2)
+            if cond != "clean":
+                last = r.iloc[-1]
+                ax.text(T * L + 0.5, last.sep, f"{100 * last.sep / last.sep_clean:.0f}%", color=col[cond],
+                        fontsize=9, va="center")
+        for k in range(1, T):
+            ax.axvline(k * L - 0.5, color="#cccccc", lw=1)
+        ax.set_xticks([(k + 0.5) * L for k in range(T)]); ax.set_xticklabels([f"loop {k + 1}" for k in range(T)])
+        ax.set_xlim(-1, T * L + 3); ax.axhline(0, color="#999999", lw=0.8)
+        ax.set_title(title, fontsize=11)
+    axes[0].set_ylabel("refusing − complying along u\n(prompt-end tokens)")
+    axes[0].legend(fontsize=8.5, loc="upper left", ncol=2, frameon=False)
+    axes[1].legend(fontsize=8.5, loc="upper right", frameon=False)
+    j = json.load(open(RUNS / "Ouro-1.4B-Thinking" / "analysis" / "ortho_feedback.json"))["clean"]
+    sl = [j[str(k)]["slope_write_on_resid"] for k in range(4)]
+    ax = axes[2]
+    ax.bar(range(1, 5), sl, color=[C["ortho"] if v > 0 else C["hook"] for v in sl], width=0.6)
+    for k, v in enumerate(sl, 1):
+        ax.text(k, v + (0.008 if v > 0 else -0.008), f"{v:+.2f}", ha="center", va="bottom" if v > 0 else "top",
+                fontsize=9)
+    ax.axhline(0, color="#999999", lw=0.8); ax.set_xticks(range(1, 5)); ax.set_xticklabels([f"loop {k}" for k in range(1, 5)])
+    ax.set_ylim(-0.25, 0.12); ax.set_title("Ouro, clean: loop's write along u\nvs the u it inherits (slope)", fontsize=11)
+    fig.suptitle("Ablating u in one loop: the next loop recomputes it (teacher-forced clean traces; % = share of the "
+                 "clean separation at the last layer). Right: loops 2–4 push u back toward a set point.",
+                 fontsize=11, y=1.03)
+    fig.savefig(OUT / "rebuild.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+
+
 def copy_sweep_figures():
     """Loop-subset sweep and loop x layer map figures (made by scripts/loop_sweep_summary.py and
     scripts/loop_layer_summary.py under data/runs/<model>/figures) -> docs/figures."""
@@ -926,5 +974,5 @@ if __name__ == "__main__":
     fig_interventions(); fig_norm_leak(); fig_leak1(); fig_leak2(); fig_loop_count()
     fig_results(); fig_sites(); copy_sweep_figures()
     fig_models(); fig_pipeline(); fig_loops_test(); fig_loops_dose(); fig_capability(); fig_moe(); fig_dory()
-    fig_dory_loops()
+    fig_dory_loops(); fig_rebuild()
     print("figures ->", OUT)
