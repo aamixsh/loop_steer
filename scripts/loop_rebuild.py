@@ -17,6 +17,13 @@ message, where ``v4_baseline`` is defined) and ``cot`` -- onto two unit directio
 and reports the **separation** = mean(refusing) - mean(complying) and the AUC of that projection. Comparing a condition
 with the clean model at sites after the ablated loops shows how much of the signal the later loops rebuild.
 Writes analysis/loop_rebuild_<method>_<site>.csv and figures/loop_rebuild_<method>_<site>.png. HF backend, one GPU.
+
+Dense control: ``--blocks N`` on a standard model splits its layers into N equal blocks and treats them as loops
+(ablation in a block = hooks only on that block's layer inputs and writes; ``loop`` / ``layer`` in the CSV are the
+block and the layer within it), e.g.
+    scripts/loop_rebuild.py --gpu 0 --model Qwen/Qwen3-8B --direction v4_baseline:l21 --blocks 4
+``--gen-path`` picks the clean traces (default: the selection-set clean run; e.g. ``train_clean.scored.parquet`` for
+gpt-oss and Dory, whose selection runs have too few complying CoTs).
 """
 
 import argparse
@@ -25,8 +32,8 @@ from itertools import combinations
 
 
 def parse_site(site):
-    loop, layer = site.replace("t", "").replace("l", "").split(".")
-    return int(loop), int(layer)
+    parts = site.replace("t", "").replace("l", "").split(".")
+    return (0, int(parts[0])) if len(parts) == 1 else (int(parts[0]), int(parts[1]))
 
 
 def auc(pos, neg):
@@ -78,6 +85,8 @@ def main():
     ap.add_argument("--max-per-class", type=int, default=40)
     ap.add_argument("--max-cot-tokens", type=int, default=256)
     ap.add_argument("--plot-only", action="store_true", help="Redraw the figure from the saved CSV")
+    ap.add_argument("--blocks", type=int, default=None, help="dense model: treat N equal blocks of layers as loops")
+    ap.add_argument("--gen-path", default=None, help="clean traces, relative to generations/")
     ap.add_argument("--subsets", default=None, help="Semicolon-separated 1-based loop sets, e.g. '1;1,2;3,4' "
                                                     "(default: every subset)")
     args = ap.parse_args()
@@ -102,7 +111,7 @@ def main():
     own = table / table.norm(dim=-1, keepdim=True)  # [n_sites, D]
     u = own[sites.index(parse_site(site))]
 
-    tagname = f"{method}_{site.replace('.', '')}"
+    tagname = f"{method}_{site.replace('.', '')}" + (f"_blocks{args.blocks}" if args.blocks else "")
     if args.plot_only:
         from transformers import AutoConfig
 
@@ -110,13 +119,18 @@ def main():
 
         res = pd.read_csv(rd / "analysis" / f"loop_rebuild_{tagname}.csv")
         cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
-        plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, n_loops(cfg),
-             cfg.num_hidden_layers)
+        T_, L_ = (args.blocks, cfg.num_hidden_layers // args.blocks) if args.blocks else (n_loops(cfg),
+                                                                                       cfg.num_hidden_layers)
+        plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, T_, L_)
         return
 
     tok = load_tokenizer(args.model)
     gen_path = (rd / "generations" / "select_clean.scored.parquet") if is_ouro(args.model) \
         else (rd / "generations" / "clean_select" / "none.scored.parquet")
+    if args.gen_path:
+        gen_path = rd / "generations" / args.gen_path
+    elif not gen_path.exists():
+        gen_path = rd / "generations" / "select_clean.scored.parquet"
     df = pd.read_parquet(gen_path).dropna(subset=["sr_score"])
     cots = df.groupby(["prompt_idx", "cot_rep"]).agg(prompt=("prompt", "first"), cot=("cot", "first"),
                                                      lo=("sr_score", "max"), hi=("sr_score", "min")).reset_index()
@@ -136,6 +150,15 @@ def main():
     model = load_model(args.model)
     T, L = n_loops(model.config), len(decoder_layers(model))
     site_idx = {s: i for i, s in enumerate(sites)}
+    if args.blocks:  # dense control: block b of size L // blocks plays loop b
+        if T != 1:
+            raise SystemExit("--blocks is for standard (non-looped) models")
+        T, size = args.blocks, L // args.blocks
+        block_layers = [set(range(b * size, L if b == T - 1 else (b + 1) * size)) for b in range(T)]
+        virt = lambda t, l: (min(l // size, T - 1), l - min(l // size, T - 1) * size)  # noqa: E731
+        L = size
+    else:
+        virt = lambda t, l: (t, l)  # noqa: E731
     dev = model.device
     U = torch.stack([u, *own]).to(dev)  # row 0: u; row 1 + i: own direction of site i
 
@@ -161,14 +184,20 @@ def main():
                     torch.stack([proj[cur["w"][0]].mean(0), proj[cur["w"][1]].mean(0)]).cpu())
             return hook
 
-        abl = ablation_hooks(model, u, loops=loops) if loops is not None else (lambda: [])
+        if loops is None:
+            abl = lambda: []  # noqa: E731
+        elif args.blocks:
+            abl = ablation_hooks(model, u, layers=set().union(*(block_layers[b] for b in loops)))
+        else:
+            abl = ablation_hooks(model, u, loops=loops)
         caps = lambda: [b.register_forward_pre_hook(capture(l), with_kwargs=True)
                         for l, b in enumerate(decoder_layers(model))]
         with torch.inference_mode(), hooked(abl), hooked(caps):
             for ids, _, w_p, w_c in seqs:
                 cur["w"] = (w_p, w_c)
                 model(input_ids=ids.to(dev), use_cache=False)
-        for (t, l), vals in store.items():
+        for (t0, l0), vals in store.items():
+            t, l = virt(t0, l0)
             v = torch.stack(vals)  # [n_seq, 2, 2]
             for wi, window in enumerate(("prompt_end", "cot")):
                 for di, dname in enumerate(("u", "own")):
