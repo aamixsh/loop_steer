@@ -36,6 +36,27 @@ and why weight orthogonalization fails on Ouro.
 
 ## Running now
 
+**Self-correction experiments** (queued 2026-11-06 by `scripts/queue_selfcorr.sh`, both GPUs; all HF unless noted;
+outputs under `data/runs/<model>/analysis/` and the model's run dir):
+- `perturb_response.py` (GPU 1): impulse response (eps x |h| x v added at one site; v = u, 8 random, or `--vec`) traced to
+  the output, loop contraction by power iteration, clean drift between loops. Ouro, Nanbeige, Dory, Qwen and gpt-oss
+  (dense: 4 blocks as virtual loops); extra loops (Ouro 8, Nanbeige 4, Dory 6); CAA and persona vectors as v.
+  Smoke test (Ouro, 8 prompts, eps 0.25): random kick at loop 1 L0 -> 0.002 KL at the output, at loop 4 L0 -> 0.16.
+- `loop_patch.py` (GPU 1): swap the stream entering loop k with a length-matched harmful/harmless prompt's (last token,
+  prompt-end tokens, all positions); recovery of u and of the whole state. Smoke (Ouro, 8 pairs): last-token swaps
+  recover 0.9-1.0; prompt-end swaps into loop 2 recover u 0.95 but the state only 0.5; all-position swaps 0.
+- `loop_rebuild.py --blocks 4` (GPU 1): dense control for the rebuild (Qwen, gpt-oss); Dory rebuild (train traces).
+- `caa_loops.py` (GPU 1): 7 behaviour A/B sets (Rimsky et al.), vectors at every site (`directions/caa.pt`), steering
+  in the first / last / every loop, P(matching answer).
+- `neuron_push.py` (GPU 0, vLLM): Neuron-Persona-Library-style pushes of 40 random neurons per MLP layer (x2 signs x
+  strengths 0.5, 1.0 of the median stream norm) in the first / last / every loop; gpt-oss labels non-AI identity claims.
+  Uses the new per-request `actadd_table` hook spec.
+- `persona_vectors.py` (GPU 0, vLLM + HF): 7 traits (Chen et al. 2025 data), vectors over answer tokens
+  (`directions/persona.pt`), steering at 3 layers x first / last / every loop x c = 0.05-0.2 of the stream norm, judged
+  for trait and coherence. Ouro breaks at c >= 0.25.
+- Ouro has no thinking switch: `selfcorr.no_think_prompt` gives it a one-line closed thought (empty block -> it ends
+  its turn at once); identity prompts use its plain template (it answers them directly).
+
 **Dory (NVIDIA Nemotron-Labs Dory 1.0 4B, looped nGPT)**: nothing running. **Test set** (487 prompts, `hh_eoi` u from
 t0.l26, capped CoTs extended to 8192): clean 92.3%, random 91.4%, **hooks 12.4%** (14% of CoTs hit 4096, 0.9% still
 unclosed at 8192), weight edit 25.5% (1.4%), actadd c=-1 23.1% (3.4%), hooks with decay=200 41.1% (0.5%). Capability
