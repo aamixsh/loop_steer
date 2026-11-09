@@ -25,6 +25,10 @@ Spec dicts (tensors may be on CPU):
       added to the input of layer ``layers[k]`` in loop t (dense models: t = 0); other requests are untouched. One
       generate call can then steer thousands of requests differently (``scripts/neuron_push.py``). Run the engine
       without prefix caching: requests that share a prompt but not a vector must not share cached KV.
+  {"kind": "kick", "vec": [D], "layer": l, "eps": e, "loops": None | [t, ...], "sink_ratio": r}
+      random-perturbation test: resid_pre(l) += eps * |stream| * unit(vec) per token in the given loops, on every token
+      except attention sinks (position 0, and tokens with |stream| > r * the median |stream| of the first forward pass
+      with >= 64 tokens at that site), as ``scripts/perturb_response.py --kick-mask nosink``.
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -301,6 +305,28 @@ def install(model, specs):
                 else:
                     handles.append((layer.attn if gpt_oss else layer.self_attn).register_forward_hook(post))
                     handles.append(layer.mlp.register_forward_hook(post))
+        elif spec["kind"] == "kick":
+            v = spec["vec"].float()
+            v = (v / v.norm()).to(device=device)
+            eps, ratio = float(spec["eps"]), float(spec.get("sink_ratio", 10.0))
+            ref = {}
+
+            def kick(module, args, v=v, eps=eps, ratio=ratio, ref=ref, active=active):
+                if not active():
+                    return None
+                h, _, res, rebuild = unpack(args)
+                x = (h if res is None else h + res).float()
+                n = x.norm(dim=-1, keepdim=True)
+                if "med" not in ref and n.shape[0] >= 64:
+                    ref["med"] = float(n.median())
+                med = ref.get("med", float(n.median()))
+                pos = args[pos_arg].reshape(-1)
+                keep = (n <= ratio * med).float()
+                k = min(pos.shape[0], keep.shape[0])
+                keep[:k] *= (pos[:k] != 0).float().unsqueeze(-1)
+                return rebuild((h.float() + eps * n * keep * v).to(h.dtype), res)
+
+            handles.append(layers[spec["layer"]].register_forward_pre_hook(kick))
         elif spec["kind"] == "actadd_table":
             vecs = spec["vecs"].float().to(device=device, dtype=dtype)
             scales = spec["scales"].float().to(device=device)

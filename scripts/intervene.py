@@ -6,6 +6,10 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
                  after the edited weights, e.g. Qwen, Nanbeige; breaks Ouro)
           ablate (hooks on every residual write; works for all models, incl. Ouro)
           actadd (add c * raw mean-diff vector at resid_pre of the site's layer)
+          kick   random-perturbation test: method rand<k> (the k-th random direction of perturb_response.py), added
+                 as eps * |stream| per token at resid_pre of the site's layer, in the site's loop only (attention
+                 sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10).
+                 E.g. kick:rand0:t0.l12:eps=1
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
   site    l<layer> or t<loop>.l<layer> -- where the direction was extracted
   opts    c=<coeff>      actadd coefficient (default -1.0: subtract the refusal direction)
@@ -60,7 +64,9 @@ def parse_candidate(text):
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
             "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None,
-            "decay": None}
+            "decay": None, "eps": 0.5, "sink": 10.0}
+    if kind == "kick" and not re.fullmatch(r"rand\d+", method):
+        raise ValueError(f"kick takes method rand<k>: {text!r}")
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -71,6 +77,10 @@ def parse_candidate(text):
             cand["layer"] = int(val)
         elif key == "dir" and val == "perloop":
             cand["perloop"] = True
+        elif key == "eps" and kind == "kick":
+            cand["eps"] = float(val)
+        elif key == "sink" and kind == "kick":
+            cand["sink"] = float(val)
         elif key == "na":
             cand["norm_aware"] = bool(int(val))
         elif key == "bias":
@@ -115,6 +125,16 @@ def intervention_specs(c, dirs, site_index):
     One spec with the site's direction (restricted to ``apply`` loops), or with ``dir=perloop`` one spec per loop
     using that loop's own direction at the site's layer, active only in that loop.
     """
+    if c["kind"] == "kick":
+        import torch
+
+        D = dirs[next(k for k in dirs if isinstance(dirs[k], dict) and "dirs" in dirs[k])]["dirs"].shape[-1]
+        g = torch.Generator().manual_seed(0)  # same draws as perturb_response.py's random0, random1, ...
+        for _ in range(int(c["method"][4:]) + 1):
+            vec = torch.randn(D, generator=g)
+        looped = max(t for t, _ in dirs["sites"]) > 0
+        return [{"kind": "kick", "vec": vec, "layer": c["site"][1], "eps": c["eps"], "sink_ratio": c["sink"],
+                 "loops": [c["site"][0]] if looped else None}]
     if c["kind"] not in ("ablate", "actadd"):
         return []
     table = dirs[c["method"]]["dirs"]

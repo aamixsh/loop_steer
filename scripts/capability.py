@@ -109,6 +109,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--n-loops", type=int, default=None,
+                    help="Run a looped model with this many loops instead of its trained number; use a separate --tag")
     args = ap.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -123,13 +125,13 @@ def main():
 
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, split_cot, strip_end
-    from loop_steer.models import load_tokenizer, prepare_vllm, vllm_kwargs, vllm_model
+    from loop_steer.models import load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
     from loop_steer.ortho import orthogonalize_
 
     cands = [parse_candidate(c) for c in args.candidates]
     if any(c["positions"] or c["decay"] for c in cands):
         ap.error("pos= and decay= are not supported here (capability prompts have no CoT/answer split)")
-    uses_hooks = any(c["kind"] in ("ablate", "actadd") for c in cands)
+    uses_hooks = any(c["kind"] in ("ablate", "actadd", "kick") for c in cands)
     rd = run_dir(args.model)
     if any(c["kind"] != "none" for c in cands):
         dirs = torch.load(rd / "directions" / f"{args.directions}.pt", weights_only=False)
@@ -142,7 +144,8 @@ def main():
 
     as_ids = prepare_vllm(args.model)
     llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
-              max_model_len=args.max_model_len, enforce_eager=uses_hooks, **vllm_kwargs(args.model))
+              max_model_len=args.max_model_len, enforce_eager=uses_hooks,
+              hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
     sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature, n=args.samples,
                               skip_special_tokens=False)
     inputs = [{"prompt_token_ids": tok(t, add_special_tokens=False).input_ids} for t in prompts] if as_ids else prompts
@@ -159,7 +162,7 @@ def main():
                                               biases=c["biases"]))
             weights_dirty = c["kind"] == "ortho"
         if uses_hooks:
-            specs = intervention_specs(c, dirs, site_index) if c["kind"] in ("ablate", "actadd") else []
+            specs = intervention_specs(c, dirs, site_index) if c["kind"] in ("ablate", "actadd", "kick") else []
             llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
         llm.reset_prefix_cache()
         rows = []
