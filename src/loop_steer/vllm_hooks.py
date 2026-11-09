@@ -20,6 +20,11 @@ Spec dicts (tensors may be on CPU):
   Either kind also takes ``"decay": n`` instead of ``positions``: full strength on the prompt, a half-cosine from 1
   to 0 over the first n CoT tokens, nothing after them or on the answer (the strength scales the added vector, or the
   removed / reset component along dir).
+  {"kind": "actadd_table", "vecs": [K, D], "scales": [K, T], "layers": [K], "loops": None | [t, ...]}
+      per-request activation addition: a request with ``extra_args["ls_vec"] = k`` gets ``scales[k, t] * vecs[k]``
+      added to the input of layer ``layers[k]`` in loop t (dense models: t = 0); other requests are untouched. One
+      generate call can then steer thousands of requests differently (``scripts/neuron_push.py``). Run the engine
+      without prefix caching: requests that share a prompt but not a vector must not share cached KV.
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -129,6 +134,38 @@ def install(model, specs):
     state = {"loop": 0, "gate": 0, "cls": None, "masks": {}}  # gate: the loop that ``loops`` selects on
     gated = any(s.get("positions") is not None or s.get("decay") or s["kind"] == "record" for s in specs)
     handles = []
+
+    table = [s for s in specs if s["kind"] == "actadd_table"]
+    if table:
+        runner_t = _model_runner()
+
+        def index_requests(module, args):  # once per forward pass: per-token vector index (-1: none)
+            if looped and args[2] != 0:
+                return
+            positions = args[pos_arg]
+            n = positions.shape[0]
+            vidx = torch.full((n,), -1, dtype=torch.long, device=positions.device)
+            from vllm.forward_context import get_forward_context, is_forward_context_available
+
+            md = get_forward_context().attn_metadata if is_forward_context_available() else None
+            if isinstance(md, list):
+                md = md[0] if md else None
+            if md:
+                qsl = next(iter(md.values())).query_start_loc
+                n_reqs = qsl.numel() - 1
+                ks = []
+                for r in runner_t.input_batch.req_ids[:n_reqs]:
+                    st_ = runner_t.requests.get(r)
+                    extra = (st_.sampling_params.extra_args or {}) if st_ is not None and st_.sampling_params else {}
+                    ks.append(int(extra.get("ls_vec", -1)))
+                if ks:
+                    tok = torch.arange(n, device=positions.device)
+                    req = torch.searchsorted(qsl[1:].long(), tok, right=True)
+                    k = torch.tensor(ks, dtype=torch.long, device=positions.device)
+                    vidx = torch.where(req < n_reqs, k[req.clamp(max=n_reqs - 1)], -1)
+            state["vidx"] = vidx
+
+        handles.append(layers[0].register_forward_pre_hook(index_requests))
 
     if gated:
         runner = _model_runner()
@@ -264,6 +301,31 @@ def install(model, specs):
                 else:
                     handles.append((layer.attn if gpt_oss else layer.self_attn).register_forward_hook(post))
                     handles.append(layer.mlp.register_forward_hook(post))
+        elif spec["kind"] == "actadd_table":
+            vecs = spec["vecs"].float().to(device=device, dtype=dtype)
+            scales = spec["scales"].float().to(device=device)
+            lay = torch.as_tensor(spec["layers"], dtype=torch.long, device=device)
+
+            def add_table(module, args, i=None, vecs=vecs, scales=scales, lay=lay, active=active):
+                if not active() or "vidx" not in state:
+                    return None
+                h, _, res, rebuild = unpack(args)
+                k = state["vidx"]
+                if k.shape[0] != h.shape[0]:
+                    k2 = torch.full((h.shape[0],), -1, dtype=torch.long, device=k.device)
+                    m_ = min(k.shape[0], h.shape[0])
+                    k2[:m_] = k[:m_]
+                    k = k2
+                kk = k.clamp(min=0)
+                sel = (k >= 0) & (lay[kk] == i)
+                if not bool(sel.any()):
+                    return None
+                gate = max(int(state["gate"]), 0)
+                w = (scales[kk, min(gate, scales.shape[1] - 1)] * sel).to(dtype).unsqueeze(-1)
+                return rebuild(h + w * vecs[kk], res)
+
+            for i in sorted(set(int(x) for x in spec["layers"])):
+                handles.append(layers[i].register_forward_pre_hook(functools.partial(add_table, i=i)))
         else:
             raise ValueError(f"unknown intervention kind {spec['kind']!r}")
     model._ls_handles = handles

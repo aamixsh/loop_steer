@@ -159,3 +159,35 @@ def load_offline_judge(gpu_memory_utilization=0.45, max_model_len=16384):
 
     return LLM(model=JUDGE_MODEL, revision=JUDGE_REVISION, tokenizer_revision=JUDGE_REVISION,
                gpu_memory_utilization=gpu_memory_utilization, max_model_len=max_model_len)
+
+
+def chat_offline(prompts, llm, *, max_tokens=2048, reasoning="low", retries=2, parse=None):
+    """Free-form judge calls (e.g. persona-trait scores, identity labels): one user message each, greedy, the final
+    channel's text returned. With ``parse`` (text -> value, raising ValueError on bad output) unparseable items are
+    resampled at temperature 1.0 up to ``retries`` times and the parsed values returned (None when they never parse).
+    """
+    from vllm import SamplingParams
+
+    convs = [[{"role": "user", "content": p}] for p in prompts]
+    results = [None] * len(prompts)
+    todo = list(range(len(prompts)))
+    for attempt in range(retries + 1):
+        sp = SamplingParams(temperature=0 if attempt == 0 else 1.0, max_tokens=max_tokens, skip_special_tokens=False)
+        outs = llm.chat([convs[i] for i in todo], sp, use_tqdm=True,
+                        chat_template_kwargs={"reasoning_effort": reasoning})
+        failed = []
+        for i, o in zip(todo, outs):
+            text = o.outputs[0].text
+            final = text.rsplit(_FINAL, 1)[-1] if _FINAL in text else ""
+            final = final.split("<|return|>")[0].split("<|end|>")[0].strip()
+            if parse is None:
+                results[i] = final
+                continue
+            try:
+                results[i] = parse(final)
+            except (ValueError, KeyError, IndexError, AttributeError, TypeError):
+                failed.append(i)
+        todo = failed
+        if not todo or parse is None:
+            break
+    return results
