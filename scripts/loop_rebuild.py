@@ -24,6 +24,13 @@ block and the layer within it), e.g.
     scripts/loop_rebuild.py --gpu 0 --model Qwen/Qwen3-8B --direction v4_baseline:l21 --blocks 4
 ``--gen-path`` picks the clean traces (default: the selection-set clean run; e.g. ``train_clean.scored.parquet`` for
 gpt-oss and Dory, whose selection runs have too few complying CoTs).
+
+Actadd instead of ablation: ``--actadd C`` adds ``C`` x the direction's raw mean-difference vector to the input of the
+site's layer in the chosen loops (as ``intervene.py``'s actadd restricted with ``apply=``); with ``--blocks``, block b
+gets the raw vector of its own layer at the same offset within the block as the site (the site's vector in the site's
+block). Actadd shifts both classes alike, so the separation barely changes where it is added; ``ref_level`` =
+(mean refusing - clean mean complying) / clean separation measures whether the refusing traces still look refusing
+(1: as clean, 0: like clean complying traces) and whether later loops restore that.
 """
 
 import argparse
@@ -42,12 +49,13 @@ def auc(pos, neg):
     return float((diff > 0).float().mean() + 0.5 * (diff == 0).float().mean())
 
 
-def plot(res, path, model_name, direction, T, L):
+def plot(res, path, model_name, direction, T, L, actadd=None):
     """Separation along depth for clean, ablation in each single loop, and in all loops."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    verb = "ablate" if actadd is None else f"actadd c={actadd:g} in"
     show = ["clean"] + [str(t) for t in range(1, T + 1)] + [",".join(map(str, range(1, T + 1)))]
     colors = dict(zip(show, ["k", "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"][: T + 1] + ["#999999"]))
     fig, axes = plt.subplots(2, 2, figsize=(15, 7.5), sharex=True)
@@ -58,7 +66,7 @@ def plot(res, path, model_name, direction, T, L):
                 d = res[(res.condition == name) & (res.window == window) & (res.dir == dname)].sort_values(["loop", "layer"])
                 ax.plot((d.loop - 1) * L + d.layer, d.sep, color=colors[name], lw=2.4 if name == "clean" else 1.4,
                         ls=":" if name == show[-1] else "-",
-                        label="clean" if name == "clean" else f"ablate loop{'s' * (',' in name)} {name}")
+                        label="clean" if name == "clean" else f"{verb} loop{'s' * (',' in name)} {name}")
             for t in range(1, T):
                 ax.axvline(t * L - 0.5, color="#ccc", lw=0.8)
             ax.axhline(0, color="#999", lw=0.6)
@@ -70,7 +78,8 @@ def plot(res, path, model_name, direction, T, L):
         ax.set_xticks([t * L + L // 2 for t in range(T)]); ax.set_xticklabels([f"loop {t + 1}" for t in range(T)])
     axes[0, 0].legend(fontsize=8.5, ncol=2)
     fig.suptitle(f"{model_name.split('/')[-1]}: refusal signal along depth (clean traces, teacher-forced) when u "
-                 f"({direction}) is ablated in one loop or all", fontsize=11)
+                 f"({direction}) is {'ablated' if actadd is None else f'subtracted (actadd c={actadd:g})'} in one loop or all",
+                 fontsize=11)
     fig.tight_layout()
     path.parent.mkdir(exist_ok=True)
     fig.savefig(path, dpi=150)
@@ -87,6 +96,7 @@ def main():
     ap.add_argument("--plot-only", action="store_true", help="Redraw the figure from the saved CSV")
     ap.add_argument("--blocks", type=int, default=None, help="dense model: treat N equal blocks of layers as loops")
     ap.add_argument("--gen-path", default=None, help="clean traces, relative to generations/")
+    ap.add_argument("--actadd", type=float, default=None, help="actadd with this coefficient instead of ablation")
     ap.add_argument("--subsets", default=None, help="Semicolon-separated 1-based loop sets, e.g. '1;1,2;3,4' "
                                                     "(default: every subset)")
     args = ap.parse_args()
@@ -100,7 +110,7 @@ def main():
     import torch
 
     from loop_steer.cot import format_prompt
-    from loop_steer.hooks import _layer_input, _loop, ablation_hooks, decoder_layers, hooked
+    from loop_steer.hooks import _layer_input, _loop, ablation_hooks, actadd_hooks, decoder_layers, hooked
     from loop_steer.models import eoi_length, is_ouro, load_model, load_tokenizer, n_loops
 
     rd = run_dir(args.model)
@@ -111,7 +121,8 @@ def main():
     own = table / table.norm(dim=-1, keepdim=True)  # [n_sites, D]
     u = own[sites.index(parse_site(site))]
 
-    tagname = f"{method}_{site.replace('.', '')}" + (f"_blocks{args.blocks}" if args.blocks else "")
+    tagname = f"{method}_{site.replace('.', '')}" + (f"_blocks{args.blocks}" if args.blocks else "") + \
+        (f"_actadd{args.actadd:g}" if args.actadd is not None else "")
     if args.plot_only:
         from transformers import AutoConfig
 
@@ -121,7 +132,7 @@ def main():
         cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
         T_, L_ = (args.blocks, cfg.num_hidden_layers // args.blocks) if args.blocks else (n_loops(cfg),
                                                                                        cfg.num_hidden_layers)
-        plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, T_, L_)
+        plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, T_, L_, args.actadd)
         return
 
     tok = load_tokenizer(args.model)
@@ -186,6 +197,14 @@ def main():
 
         if loops is None:
             abl = lambda: []  # noqa: E731
+        elif args.actadd is not None:
+            s_loop, s_layer = parse_site(site)
+            if args.blocks:  # block b: its own layer at the site's offset, that layer's raw vector
+                adds = [actadd_hooks(model, table[site_idx[(0, b * size + s_layer % size)]], b * size + s_layer % size,
+                                     args.actadd) for b in loops]
+            else:
+                adds = [actadd_hooks(model, table[site_idx[(s_loop, s_layer)]], s_layer, args.actadd, loops=loops)]
+            abl = lambda adds=adds: [h for a in adds for h in a()]  # noqa: E731
         elif args.blocks:
             abl = ablation_hooks(model, u, layers=set().union(*(block_layers[b] for b in loops)))
         else:
@@ -212,19 +231,22 @@ def main():
     clean = res[res.condition == "clean"].set_index(["loop", "layer", "window", "dir"])
     res["sep_clean"] = res.set_index(["loop", "layer", "window", "dir"]).index.map(clean.sep)
     res["auc_clean"] = res.set_index(["loop", "layer", "window", "dir"]).index.map(clean.auc)
+    com_clean = res.set_index(["loop", "layer", "window", "dir"]).index.map(clean.mean_com)
+    res["ref_level"] = (res.mean_ref - com_clean) / res.sep_clean
     (rd / "analysis").mkdir(exist_ok=True)
     res.to_csv(rd / "analysis" / f"loop_rebuild_{tagname}.csv", index=False)
 
     # summary: signal in the last loop relative to clean (own direction), by condition
     last = res[(res.loop == T) & (res.dir == "own")]
     summ = last.groupby(["condition", "window"]).apply(
-        lambda g: pd.Series({"sep_ratio": g.sep.sum() / g.sep_clean.sum(), "auc": g.auc.mean(),
+        lambda g: pd.Series({"sep_ratio": g.sep.sum() / g.sep_clean.sum(), "ref_level": g.ref_level.mean(),
+                             "auc": g.auc.mean(),
                              "auc_clean": g.auc_clean.mean()}), include_groups=False).reset_index()
     with pd.option_context("display.width", 200, "display.max_rows", 200):
         print(f"\nlast loop ({T}), own directions: separation relative to clean, mean AUC")
         print(summ.pivot(index="condition", columns="window").round(3).to_string())
 
-    plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, T, L)
+    plot(res, rd / "figures" / f"loop_rebuild_{tagname}.png", args.model, args.direction, T, L, args.actadd)
     print(f"\n-> analysis/loop_rebuild_{tagname}.csv, figures/loop_rebuild_{tagname}.png")
 
 
