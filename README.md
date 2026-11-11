@@ -200,6 +200,10 @@ scripts/setup_remote.sh --install-uv --cache-dir /workspace/cache   # uv sync, p
 source scripts/env.sh && scripts/verify_setup.sh --gpu 0             # GPU smoke test
 ```
 
+The self-correction experiments (loop-restricted steering, extra-loop recovery, random kicks, persona vectors) are
+numbered E1-E8 in `scripts/exp.py`, which queues them per GPU and syncs results through GCS; see
+[docs/experiments.md](docs/experiments.md) for the definitions, the extraction sites and the new-instance steps.
+
 Run data moves with `scripts/pack_data.sh` / `unpack_data.sh`; summary tables of every run are in `results/`
 (`scripts/export_results.sh`). `PLAN.md` holds the current plan and next steps; `docs/paper_plan.md` the
 experiments needed before the looped-model claims can be published.
