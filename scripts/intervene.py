@@ -9,13 +9,25 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
           kick   random-perturbation test: method rand<k> (the k-th random direction of perturb_response.py), added
                  as eps * |stream| per token at resid_pre of the site's layer, in the site's loop only (attention
                  sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10).
-                 E.g. kick:rand0:t0.l12:eps=1
+                 E.g. kick:rand0:t0.l12:eps=1. Method randp<seed>: a different random direction per problem
+                 (scripts/capability.py only; loop_steer.kicks.problem_directions), e.g. kick:randp0:t0.l12:eps=1
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
   site    l<layer> or t<loop>.l<layer> -- where the direction was extracted
   opts    c=<coeff>      actadd coefficient (default -1.0: subtract the refusal direction)
           apply=<t,t..>  loops to intervene in (default: all loops). Dory: recurrent loops; its input and output
-                         sublayers (run once) are loop -1, so apply=0 is the first recurrent loop alone
+                         sublayers (run once) are loop -1, so apply=0 is the first recurrent loop alone; apply=-2 the input
+                         sublayers alone, -3 the output sublayers alone (vLLM)
           layer=<l>      actadd at a different layer than the extraction site
+          layers=<a-b+c-d..>  standard models, the counterpart of apply= (blocks of layers as loops, as
+                         ``scripts/loop_rebuild.py --blocks``). ablate: only these layer ranges (their inputs and
+                         writes); actadd: add at each listed layer (single layers, e.g. layers=3+12+21) that layer's own
+                         raw vector of the method, times c (the site then only names the candidate)
+          at=<l+l..>     actadd, standard models: add the SITE's vector at each listed layer (the dense counterpart of
+                         apply=: one vector, extracted at the site, used in other parts of the network)
+          rel=1          actadd: scale the vector wherever it is added by (median stream norm there) / (median stream
+                         norm at the site), so it is the same fraction of the stream in every loop / at every at= layer
+                         (norms from scripts/stream_norms.py; matters for dense models, whose stream grows ~30x over
+                         depth; looped models' streams differ by < 30% across loops at one layer)
           na=1           ortho only: norm-aware weight edit (project g*u, g = gain of the sandwich norm after each
                          writer, instead of u; see loop_steer.ortho). Matters for Ouro.
           bias=0         ortho only: leave the writers' biases unedited (gpt-oss has biases on o_proj and every
@@ -64,9 +76,10 @@ def parse_candidate(text):
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
             "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None,
-            "decay": None, "eps": 0.5, "sink": 10.0}
-    if kind == "kick" and not re.fullmatch(r"rand\d+", method):
-        raise ValueError(f"kick takes method rand<k>: {text!r}")
+            "decay": None, "eps": 0.5, "sink": 10.0, "layers": None}
+    cand["at"], cand["rel"] = None, False
+    if kind == "kick" and not re.fullmatch(r"randp?\d+", method):
+        raise ValueError(f"kick takes method rand<k> or randp<seed>: {text!r}")
     for opt in opts:
         key, val = opt.split("=")
         if key == "c":
@@ -75,6 +88,22 @@ def parse_candidate(text):
             cand["apply"] = [int(x) for x in val.split(",")]
         elif key == "layer":
             cand["layer"] = int(val)
+        elif key == "layers":
+            if kind not in ("ablate", "actadd"):
+                raise ValueError(f"layers= is an ablate / actadd option: {text!r}")
+            ls = []
+            for part in val.split("+"):
+                a, _, b = part.partition("-")
+                ls += list(range(int(a), int(b or a) + 1))
+            cand["layers"] = sorted(set(ls))
+        elif key == "at":
+            if kind != "actadd":
+                raise ValueError(f"at= is an actadd option: {text!r}")
+            cand["at"] = sorted({int(x) for x in val.split("+")})
+        elif key == "rel":
+            if kind != "actadd":
+                raise ValueError(f"rel= is an actadd option: {text!r}")
+            cand["rel"] = bool(int(val))
         elif key == "dir" and val == "perloop":
             cand["perloop"] = True
         elif key == "eps" and kind == "kick":
@@ -119,28 +148,53 @@ def ace_ref(c, vec, dirs):
     return table
 
 
-def intervention_specs(c, dirs, site_index):
-    """Hook specs (``loop_steer.vllm_hooks`` format) for an ablate / actadd candidate.
+def load_norms(rd, n_loops=None):
+    """{(loop, layer): median stream norm} from ``directions/stream_norms[_loops<N>].pt`` (``scripts/stream_norms.py``),
+    for ``rel=1``. ``n_loops``: a looped model run with that many loops (None: as trained)."""
+    import torch
+
+    path = rd / "directions" / (f"stream_norms_loops{n_loops}.pt" if n_loops else "stream_norms.pt")
+    if not path.exists():
+        raise FileNotFoundError(f"{path} missing: run scripts/stream_norms.py"
+                                + (f" --n-loops {n_loops}" if n_loops else "") + " first (rel=1 needs it)")
+    d = torch.load(path, weights_only=False)
+    return {tuple(s): float(x) for s, x in zip(d["sites"], d["norms"])}
+
+
+def intervention_specs(c, dirs, site_index, norms=None, n_loops=None, n_requests=None):
+    """Hook specs (``loop_steer.vllm_hooks`` format) for an ablate / actadd / kick candidate.
 
     One spec with the site's direction (restricted to ``apply`` loops), or with ``dir=perloop`` one spec per loop
-    using that loop's own direction at the site's layer, active only in that loop.
+    using that loop's own direction at the site's layer, active only in that loop. ``rel=1`` (actadd) scales the
+    site's vector in each loop / at each ``at=`` layer by the ratio of median stream norms there and at the site
+    (``norms`` from ``load_norms``; ``n_loops``: loops of the run, for ``apply`` = every loop). A kick with method
+    ``randp<seed>`` gets one direction per request (``n_requests`` of them, ``loop_steer.kicks.problem_directions``).
     """
+    looped = max(t for t, _ in dirs["sites"]) > 0
     if c["kind"] == "kick":
         import torch
 
         D = dirs[next(k for k in dirs if isinstance(dirs[k], dict) and "dirs" in dirs[k])]["dirs"].shape[-1]
+        layer = c["site"][1]
+        # a layer that runs once per pass (Dory's input / output sublayers: no loop-1 site) is kicked whenever it runs
+        loops = [c["site"][0]] if looped and (1, layer) in site_index else None
+        spec = {"kind": "kick", "layer": layer, "eps": c["eps"], "sink_ratio": c["sink"], "loops": loops}
+        if c["method"].startswith("randp"):
+            from loop_steer.kicks import problem_directions
+
+            if n_requests is None:
+                raise ValueError(f"{c['name']}: per-request kick directions need n_requests")
+            return [{**spec, "vecs": problem_directions(int(c["method"][5:]), n_requests, D)}]
         g = torch.Generator().manual_seed(0)  # same draws as perturb_response.py's random0, random1, ...
         for _ in range(int(c["method"][4:]) + 1):
             vec = torch.randn(D, generator=g)
-        looped = max(t for t, _ in dirs["sites"]) > 0
-        return [{"kind": "kick", "vec": vec, "layer": c["site"][1], "eps": c["eps"], "sink_ratio": c["sink"],
-                 "loops": [c["site"][0]] if looped else None}]
+        return [{**spec, "vec": vec}]
     if c["kind"] not in ("ablate", "actadd"):
         return []
     table = dirs[c["method"]]["dirs"]
     if c["perloop"]:
-        n_loops = max(t for t, _ in dirs["sites"]) + 1
-        groups = [([t], table[site_index[(t, c["site"][1])]]) for t in (c["apply"] or range(n_loops))]
+        n_trained = max(t for t, _ in dirs["sites"]) + 1
+        groups = [([t], table[site_index[(t, c["site"][1])]]) for t in (c["apply"] or range(n_trained))]
         if not c["apply"]:  # Dory: its input and output sublayers (loop -1 for the hooks) go with loop 0, as their sites
             groups[0] = ([-1, 0], groups[0][1])
     else:
@@ -150,7 +204,31 @@ def intervention_specs(c, dirs, site_index):
     decay = c.get("decay")
     if c["kind"] == "ablate":
         return [{"kind": "ablate", "dir": vec, "loops": loops, "positions": pos, "ref": ace_ref(c, vec, dirs),
-                 "decay": decay} for loops, vec in groups]
+                 "decay": decay, "layers": c.get("layers")} for loops, vec in groups]
+    if c.get("layers"):  # standard model: each listed layer gets its own vector
+        return [{"kind": "actadd", "vec": table[site_index[(0, l)]], "coeff": c["coeff"], "loops": None, "layer": l,
+                 "positions": pos, "decay": decay} for l in c["layers"]]
+    if c.get("rel") and norms is None:
+        raise ValueError(f"{c['name']}: rel=1 needs stream norms (load_norms)")
+
+    def scale(t, l):  # stream norm where the vector is added / at the site it was extracted
+        return norms[(t, l)] / norms[c["site"]] if c.get("rel") else 1.0
+
+    if c.get("at"):  # standard model: the site's vector at each listed layer
+        if looped:
+            raise ValueError(f"{c['name']}: at= is for standard models (use apply= on looped ones)")
+        vec = groups[0][1]
+        return [{"kind": "actadd", "vec": vec * scale(0, l), "coeff": c["coeff"], "loops": None, "layer": l,
+                 "positions": pos, "decay": decay} for l in c["at"]]
+    if c.get("rel"):
+        out = []
+        for loops, vec in groups:
+            n_run = n_loops or (max(t for t, _ in dirs["sites"]) + 1)  # default: the trained number of loops
+            ts = loops if loops is not None else (list(range(n_run)) if looped else [0])
+            for t in ts:
+                out.append({"kind": "actadd", "vec": vec * scale(t, layer), "coeff": c["coeff"],
+                            "loops": [t] if looped else None, "layer": layer, "positions": pos, "decay": decay})
+        return out
     return [{"kind": "actadd", "vec": vec, "coeff": c["coeff"], "loops": loops, "layer": layer, "positions": pos,
              "decay": decay} for loops, vec in groups]
 
@@ -183,7 +261,7 @@ def main():
     ap.add_argument("--skip-existing", action="store_true")
     args = ap.parse_args()
     cands = [parse_candidate(c) for c in args.candidates]
-    uses_hooks = any(c["kind"] in ("ablate", "actadd") for c in cands)
+    uses_hooks = any(c["kind"] in ("ablate", "actadd", "kick") for c in cands)
     gated = any(c["positions"] or c["decay"] for c in cands)
     if gated and args.backend != "vllm":
         ap.error("pos= and decay= need the vLLM backend")
@@ -207,6 +285,7 @@ def main():
         ap.error("--directions is required for candidates other than `none`")
     dirs = torch.load(rd / "directions" / f"{args.directions}.pt", weights_only=False) if args.directions else None
     site_index = {site: i for i, site in enumerate(dirs["sites"])} if dirs else {}
+    norms = load_norms(rd, args.n_loops) if any(c.get("rel") for c in cands) else None
     out_dir = rd / "generations" / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
     prompts = load_prompts(args.split, args.kind)[args.offset:]
@@ -259,7 +338,7 @@ def main():
             for spec in specs:
                 if spec["kind"] == "ablate":
                     stack.enter_context(hooked(ablation_hooks(model, spec["dir"], loops=spec["loops"],
-                                                              ref=spec.get("ref"))))
+                                                              ref=spec.get("ref"), layers=spec.get("layers"))))
                 else:
                     stack.enter_context(hooked(actadd_hooks(model, spec["vec"], spec["layer"], coeff=spec["coeff"],
                                                             loops=spec["loops"])))
@@ -275,7 +354,7 @@ def main():
         if c["perloop"] and c["kind"] not in ("ablate", "actadd"):
             ap.error(f"dir=perloop only applies to ablate / actadd candidates, not {c['kind']}")
         vec = dirs[c["method"]]["dirs"][site_index[c["site"]]] if c["kind"] == "ortho" else None  # weight edit
-        specs = intervention_specs(c, dirs, site_index)
+        specs = intervention_specs(c, dirs, site_index, norms=norms, n_loops=args.n_loops)
         if args.extend_from:
             src = rd / "generations" / args.extend_from / "invalid" / f"{c['name']}.parquet"
             if not src.exists():

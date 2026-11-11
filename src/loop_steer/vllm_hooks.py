@@ -13,10 +13,12 @@ Spec dicts (tensors may be on CPU):
   {"kind": "ablate", "dir": [D], "loops": None | [t, ...], "positions": None | [cls, ...], "ref": None | [T, L]}
       project dir out of every layer input and every residual write
       (attn/mlp outputs; for Ouro, the outputs of the post-sublayer norms; for Dory, each sublayer's mixer output and
-      the final stream before the unembedding). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
+      the final stream before the unembedding). Optional ``"layers": [l, ...]``: only those layers' inputs and writes
+      (not Dory's final stream; not Ouro). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
       gets component ``ref[t, l]`` along dir instead of 0 (the final stream gets ``ref[0, -1]``); writes still get 0.
   ``loops`` selects recurrent loops. Dory's input and output sublayers (and its final stream) run once; ``loops`` counts
-  them as loop -1, so ``loops=[0]`` is the first recurrent loop only and ``loops=[-1, 0]`` adds them.
+  them as loop -1, so ``loops=[0]`` is the first recurrent loop only and ``loops=[-1, 0]`` adds them; -2 selects the
+  input sublayers alone (whose output is reinjected into every loop), -3 the output sublayers and final stream alone.
   Either kind also takes ``"decay": n`` instead of ``positions``: full strength on the prompt, a half-cosine from 1
   to 0 over the first n CoT tokens, nothing after them or on the answer (the strength scales the added vector, or the
   removed / reset component along dir).
@@ -28,7 +30,9 @@ Spec dicts (tensors may be on CPU):
   {"kind": "kick", "vec": [D], "layer": l, "eps": e, "loops": None | [t, ...], "sink_ratio": r}
       random-perturbation test: resid_pre(l) += eps * |stream| * unit(vec) per token in the given loops, on every token
       except attention sinks (position 0, and tokens with |stream| > r * the median |stream| of the first forward pass
-      with >= 64 tokens at that site), as ``scripts/perturb_response.py --kick-mask nosink``.
+      with >= 64 tokens at that site), as ``scripts/perturb_response.py --kick-mask nosink``. With ``"vecs": [K, D]``
+      instead of ``vec``, each request gets its own direction: row ``extra_args["ls_vec"]`` (as ``actadd_table``; run
+      without prefix caching), and requests without an index are not kicked.
   {"kind": "record"}
       count the tokens of each position class per request (``fetch_records``); for validation.
 
@@ -139,7 +143,7 @@ def install(model, specs):
     gated = any(s.get("positions") is not None or s.get("decay") or s["kind"] == "record" for s in specs)
     handles = []
 
-    table = [s for s in specs if s["kind"] == "actadd_table"]
+    table = [s for s in specs if s["kind"] == "actadd_table" or (s["kind"] == "kick" and s.get("vecs") is not None)]
     if table:
         runner_t = _model_runner()
 
@@ -232,13 +236,16 @@ def install(model, specs):
         pos, h, res = args[0], args[1], args[2] if len(args) > 2 else None
         return h, 0, res, lambda h2, r2: (pos, h2, r2, *args[3:])
 
-    if dory:  # Dory's input and output sublayers run once: gate them as loop -1
+    if dory:  # Dory's input and output sublayers run once: gate them as -2 (input) and -3 (output); -1 selects both
         n_in, n_rec = model.model.config.n_input_layers, model.model.config.n_recurrent_layers
-        recurrent = [n_in <= i < n_in + n_rec for i in range(len(layers))]
+        stack = [0 if n_in <= i < n_in + n_rec else (-2 if i < n_in else -3) for i in range(len(layers))]
 
     def track(module, args, i=None):
         state["loop"] = args[2] if looped else 0
-        state["gate"] = state["loop"] if not dory or recurrent[i] else -1
+        state["gate"] = state["loop"] if not dory or stack[i] == 0 else stack[i]
+
+    def selects(loops, gate):
+        return gate in loops or (gate in (-2, -3) and -1 in loops)
 
     handles += [layer.register_forward_pre_hook(functools.partial(track, i=i)) for i, layer in enumerate(layers)]
     for spec in specs:
@@ -247,7 +254,7 @@ def install(model, specs):
         loops = spec.get("loops")
         pos_cls = spec.get("positions")
         decay = spec.get("decay")
-        active = (lambda: True) if loops is None else (lambda loops=loops: state["gate"] in loops)
+        active = (lambda: True) if loops is None else (lambda loops=loops: selects(loops, state["gate"]))
 
         if spec["kind"] == "actadd":
             vec = (spec["coeff"] * spec["vec"].float()).to(device=device, dtype=dtype)
@@ -289,13 +296,18 @@ def install(model, specs):
                     return (proj(output[0]), *output[1:])
                 return proj(output)
 
-            if dory and pos_cls is None and not decay:  # final stream before the unembedding (logits_processor(lm_head, hidden));
+            only = spec.get("layers")
+            if only is not None and ouro:
+                raise NotImplementedError("layers= is not implemented for Ouro")
+            if dory and pos_cls is None and not decay and only is None:  # final stream before the unembedding (logits_processor(lm_head, hidden));
                 # it sees only the sampled rows, so position-gated and decaying specs skip it
                 def final(module, args, proj=proj, loops=loops, target=0.0 if ref is None else ref[0][-1]):
-                    return (args[0], proj(args[1], target), *args[2:]) if loops is None or -1 in loops else None
+                    return (args[0], proj(args[1], target), *args[2:]) if loops is None or selects(loops, -3) else None
 
                 handles.append(model.logits_processor.register_forward_pre_hook(final))
             for i, layer in enumerate(layers):
+                if only is not None and i not in only:
+                    continue
                 handles.append(layer.register_forward_pre_hook(functools.partial(pre, i=i)))
                 if dory:
                     handles.append(layer.mixer.register_forward_hook(post))
@@ -306,12 +318,17 @@ def install(model, specs):
                     handles.append((layer.attn if gpt_oss else layer.self_attn).register_forward_hook(post))
                     handles.append(layer.mlp.register_forward_hook(post))
         elif spec["kind"] == "kick":
-            v = spec["vec"].float()
-            v = (v / v.norm()).to(device=device)
+            per_request = spec.get("vecs") is not None
+            if per_request:  # [K, D]: request k gets unit row k (SamplingParams.extra_args["ls_vec"] = k)
+                v = spec["vecs"].float()
+                v = (v / v.norm(dim=-1, keepdim=True)).to(device=device)
+            else:
+                v = spec["vec"].float()
+                v = (v / v.norm()).to(device=device)
             eps, ratio = float(spec["eps"]), float(spec.get("sink_ratio", 10.0))
             ref = {}
 
-            def kick(module, args, v=v, eps=eps, ratio=ratio, ref=ref, active=active):
+            def kick(module, args, v=v, eps=eps, ratio=ratio, ref=ref, active=active, per_request=per_request):
                 if not active():
                     return None
                 h, _, res, rebuild = unpack(args)
@@ -324,7 +341,18 @@ def install(model, specs):
                 keep = (n <= ratio * med).float()
                 k = min(pos.shape[0], keep.shape[0])
                 keep[:k] *= (pos[:k] != 0).float().unsqueeze(-1)
-                return rebuild((h.float() + eps * n * keep * v).to(h.dtype), res)
+                if per_request:  # tokens of requests without an index (and padding rows) get no kick
+                    vidx = state.get("vidx")
+                    if vidx is None:
+                        return None
+                    idx = torch.full((h.shape[0],), -1, dtype=torch.long, device=h.device)
+                    m_ = min(vidx.shape[0], h.shape[0])
+                    idx[:m_] = vidx[:m_]
+                    keep = keep * (idx >= 0).float().unsqueeze(-1)
+                    vv = v[idx.clamp(min=0)]
+                else:
+                    vv = v
+                return rebuild((h.float() + eps * n * keep * vv).to(h.dtype), res)
 
             handles.append(layers[spec["layer"]].register_forward_pre_hook(kick))
         elif spec["kind"] == "actadd_table":

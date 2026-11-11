@@ -12,7 +12,8 @@ slightly pessimistic estimate and compare candidates with each other, not with p
         --candidates none ablate:v4_baseline:t3.l16 ablate:v4_baseline:t3.l16:apply=2
 
 Writes data/runs/<model>/capability/<dataset>/<tag>/<candidate>.parquet (skip-existing with --skip-existing) and
-prints accuracy and the share of closed samples. Datasets come from the Hugging Face Hub (public):
+prints accuracy and the share of closed samples. Kick candidates with method ``randp<seed>`` give problem i (its index
+among the first ``--limit``) its own random direction (``loop_steer.kicks.problem_directions``; prefix caching off). Datasets come from the Hugging Face Hub (public):
 ``HuggingFaceH4/MATH-500`` (500 problems) and ``opencompass/AIME2025`` (30 problems).
 """
 
@@ -120,7 +121,7 @@ def main():
     setup_job_env()
     import pandas as pd
     import torch
-    from intervene import intervention_specs, parse_candidate
+    from intervene import intervention_specs, load_norms, parse_candidate
     from vllm import LLM, SamplingParams
 
     from loop_steer import vllm_hooks
@@ -136,6 +137,8 @@ def main():
     if any(c["kind"] != "none" for c in cands):
         dirs = torch.load(rd / "directions" / f"{args.directions}.pt", weights_only=False)
         site_index = {site: i for i, site in enumerate(dirs["sites"])}
+    norms = load_norms(rd, args.n_loops) if any(c.get("rel") for c in cands) else None
+    per_request = any(c["kind"] == "kick" and c["method"].startswith("randp") for c in cands)
     out_dir = rd / "capability" / args.dataset / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
     problems = load_problems(args.dataset)[: args.limit]
@@ -145,9 +148,15 @@ def main():
     as_ids = prepare_vllm(args.model)
     llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
               max_model_len=args.max_model_len, enforce_eager=uses_hooks,
+              # per-problem kick directions: a cached prefix computed under another problem's kick must not be reused
+              enable_prefix_caching=not per_request,
               hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
     sampling = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature, n=args.samples,
                               skip_special_tokens=False)
+    if per_request:  # request i carries the index of its problem's kick direction (vllm_hooks: ls_vec)
+        sampling = [sampling.clone() for _ in problems]
+        for i, sp in enumerate(sampling):
+            sp.extra_args = {"ls_vec": i}
     inputs = [{"prompt_token_ids": tok(t, add_special_tokens=False).input_ids} for t in prompts] if as_ids else prompts
     weights_dirty = False
     for c in cands:
@@ -162,9 +171,11 @@ def main():
                                               biases=c["biases"]))
             weights_dirty = c["kind"] == "ortho"
         if uses_hooks:
-            specs = intervention_specs(c, dirs, site_index) if c["kind"] in ("ablate", "actadd", "kick") else []
+            specs = (intervention_specs(c, dirs, site_index, norms=norms, n_loops=args.n_loops, n_requests=len(problems))
+                     if c["kind"] in ("ablate", "actadd", "kick") else [])
             llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
-        llm.reset_prefix_cache()
+        if not per_request:
+            llm.reset_prefix_cache()
         rows = []
         for prob, req in zip(problems, llm.generate(inputs, sampling)):
             for k, o in enumerate(req.outputs):
