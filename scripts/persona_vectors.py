@@ -24,6 +24,9 @@ steer    20 evaluation questions x ``--n-eval`` samples, no system prompt, the u
 summary  mean trait score and coherence per condition -> ``analysis/persona_loops.csv``
 ``--vec-source own`` (steer): add in each loop the vector of that loop's own site instead of the last loop's
 (first and every loop) -> ``steer_gen_own``; judge and summarise with ``--file steer_gen_own`` (``persona_loops_own.csv``)
+``--n-loops N`` (steer): run the looped model with N loops, same vectors and norms -> ``steer_gen_loopsN``;
+``--loop-sets 12=0,1 last=-1`` replaces the first / last / every-loop conditions, e.g. steer loops 1 and 2 of 4 and
+see whether the remaining loops undo it.
 Artifacts in ``persona/`` under the model's run dir. vLLM for generation and judging, HF for extraction.
 """
 
@@ -93,6 +96,12 @@ def main():
     ap.add_argument("--vec-source", choices=["last", "own"], default="last",
                     help="steer: vector from the last loop's site at the layer, or from each loop's own site (own: "
                          "first and every loop only, -> steer_gen_own; summary: --file steer_gen_own)")
+    ap.add_argument("--n-loops", type=int, default=None,
+                    help="steer: run the looped model with this many loops (vectors and norms stay those of the "
+                         "trained loops; a loop past them uses the last trained loop's) -> steer_gen_loops<N>")
+    ap.add_argument("--loop-sets", nargs="+", default=None,
+                    help="steer: conditions as name=t,t,.. (0-based loops; -1 = the last loop), replacing "
+                         "first / last / all, e.g. 12=0,1 last=-1")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     args = ap.parse_args()
 
@@ -119,7 +128,7 @@ def main():
 
         prepare_vllm(args.model)
         return LLM(model=vllm_model(args.model), seed=0, gpu_memory_utilization=args.gpu_memory_utilization,
-                   max_model_len=4096, enforce_eager=True, hf_overrides=loop_overrides(args.model, None),
+                   max_model_len=4096, enforce_eager=True, hf_overrides=loop_overrides(args.model, args.n_loops),
                    **vllm_kwargs(args.model))
 
     def generate(llm, tok, convs, n):
@@ -236,7 +245,8 @@ def main():
 
     elif args.stage == "steer":
         own = args.vec_source == "own"
-        out = wd / ("steer_gen_own.parquet" if own else "steer_gen.parquet")
+        out = wd / (("steer_gen_own" if own else "steer_gen") + (f"_loops{args.n_loops}" if args.n_loops else "")
+                    + ".parquet")
         if out.exists():
             print(f"{out} exists; skipping")
             return
@@ -250,15 +260,22 @@ def main():
             from loop_steer.dory import register
             register()
         cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
-        T, sites = n_loops(cfg), model_sites(cfg)
+        T, sites = n_loops(cfg), model_sites(cfg)  # the trained loops: the sites of persona.pt
+        T_run = args.n_loops or T
         vecs = torch.load(rd / "directions" / "persona.pt", weights_only=False)
         if getattr(cfg, "model_type", None) == "dory":
             unit = list(range(cfg.n_input_layers, cfg.n_input_layers + cfg.n_recurrent_layers))
         else:
             unit = list(range(cfg.num_hidden_layers))
         layers = sorted({unit[min(int(round(f * len(unit))), len(unit) - 1)] for f in map(float, args.fracs.split(","))})
-        loopsets = {"first": [0], "last": [T - 1], "all": None} if T > 1 else {"layer": None}
-        if own:  # the last loop's own vector is the default one: steer_gen already has it
+        loopsets = {"first": [0], "last": [T_run - 1], "all": None} if T > 1 else {"layer": None}
+        if args.loop_sets:
+            assert T > 1, "--loop-sets is for looped models"
+            loopsets = {}
+            for item in args.loop_sets:
+                name, _, ts = item.partition("=")
+                loopsets[name] = sorted({int(x) % T_run for x in ts.split(",")})
+        elif own:  # the last loop's own vector is the default one: steer_gen already has it
             assert T > 1, "--vec-source own is for looped models"
             loopsets.pop("last")
         tok = load_tokenizer(args.model)
@@ -273,12 +290,12 @@ def main():
                     specs = []
                 else:
                     def unit_vec(tt):  # the last loop's vector, or (own) the vector of the loop it is added in
-                        v = vecs[t]["dirs"][sites.index((tt if own else T - 1, l) if T > 1 else (0, l))]
+                        v = vecs[t]["dirs"][sites.index((min(tt, T - 1) if own else T - 1, l) if T > 1 else (0, l))]
                         return v / v.norm()
-                    # scaled by the median stream norm of each loop it is added in
-                    specs = [{"kind": "actadd", "vec": unit_vec(tt) * vecs["norms"][sites.index((tt if T > 1 else 0, l))],
+                    # scaled by the median stream norm of each loop it is added in (past the trained loops: the last)
+                    specs = [{"kind": "actadd", "vec": unit_vec(tt) * vecs["norms"][sites.index((min(tt, T - 1) if T > 1 else 0, l))],
                               "coeff": c, "loops": [tt] if T > 1 else None, "layer": l, "positions": None}
-                             for tt in (loops if loops is not None else range(T))]
+                             for tt in (loops if loops is not None else range(T_run))]
                 llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
                 llm.reset_prefix_cache()
                 outs = generate(llm, tok, [[{"role": "user", "content": q}] for q in qs], args.n_eval)
