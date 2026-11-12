@@ -9,6 +9,8 @@
     scripts/persona_steer.py --gpu 0 --model nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16 --mode loops --n-loops 4 \\
         --sets 1=0 2=1 3=2 4=3 12=0,1 all=0,1,2,3
     scripts/persona_steer.py --gpu 0 --model Qwen/Qwen3-8B --mode loops --sets q1=0 q2=1 q3=2 q4=3 all=0,1,2,3
+    # 3. ablate: elicit the trait with its system prompts, project its vector out of single loops / sets of loops
+    scripts/persona_steer.py --gpu 0 --model Nanbeige/Nanbeige4.2-3B --mode ablate --sets 1=0 2=1 all=0,1
 
 Vectors are those of ``scripts/persona_vectors.py --stage extract`` (``directions/persona.pt``: mean answer-token
 activation with the trait minus without it, at every site). One vector per trait, from ONE site, is used everywhere:
@@ -23,9 +25,18 @@ tune   clean + every loop (quarter) at once, for each candidate site layer (loop
        stays >= clean coherence - ``--max-coh-drop``; ties go to the smaller c; ``steerable`` = gain >= 10 points.
 loops  the tuned (layer, c) of each steerable trait, added in each set of ``--sets`` (name=loop,loop,..; 0-based;
        dense: quarters), plus clean. ``--n-loops`` runs a looped model with more loops (same vectors and c).
+ablate the trait elicited by the persona-vectors repo's trait-eliciting system prompts (``trait_data_extract``: the
+       ``pos`` instructions the vectors were extracted with; evaluation question i gets instruction i mod 5), every
+       trait with a vector (steerable or not). Conditions: ``noprompt`` (no system prompt, no hook), ``prompted``
+       (system prompt, no hook), ``ablate_<set>`` (system prompt; the trait's unit vector, from the last trained
+       loop's site at the tuned layer of ``persona_tune.json`` or mid-loop without one, projected out of every layer
+       input and residual write in the set's loops, as the refusal ablation; dense: every layer of the set's quarters;
+       a set of every loop also covers Dory's input / output sublayers) and ``random_all`` (a seeded random unit
+       direction ablated in every loop: control). Summary: ``removed`` = (prompted - cond) / (prompted - noprompt)
+       trait score, ``coh_drop`` against prompted.
 Every mode generates (vLLM, thinking off as persona_vectors.py), judges trait and coherence with gpt-oss-20b (the
 repo's prompts), and summarises: ``persona/steer_<name>.judged.parquet``, ``analysis/persona_<name>.csv``; name =
-``tune`` or ``loops`` (+ ``_loops<N>`` with ``--n-loops``). Skip-existing per stage.
+``tune``, ``loops`` or ``ablate`` (+ ``_loops<N>`` with ``--n-loops``). Skip-existing per stage.
 """
 
 import argparse
@@ -40,13 +51,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gpu", default="0")
     ap.add_argument("--model", required=True)
-    ap.add_argument("--mode", choices=["tune", "loops"], required=True)
+    ap.add_argument("--mode", choices=["tune", "loops", "ablate"], required=True)
     ap.add_argument("--traits", default=None, help="comma-separated (default: every trait with a vector)")
     ap.add_argument("--coeffs", default="0.01,0.025,0.05,0.1,0.15,0.2,0.3")
     ap.add_argument("--fracs", default="0.25,0.5,0.75", help="tune, looped: candidate layers as fractions of a loop")
     ap.add_argument("--dense-layers", default="12,16,21", help="tune, dense: candidate site layers")
     ap.add_argument("--max-coh-drop", type=float, default=10.0)
-    ap.add_argument("--sets", nargs="+", default=None, help="loops: name=t,t,.. (0-based loops or quarters)")
+    ap.add_argument("--sets", nargs="+", default=None, help="loops, ablate: name=t,t,.. (0-based loops or quarters)")
     ap.add_argument("--n-loops", type=int, default=None)
     ap.add_argument("--n-eval", type=int, default=None, help="samples per question (default tune 3, loops 5)")
     ap.add_argument("--max-tokens", type=int, default=768)
@@ -89,6 +100,8 @@ def main():
     traits = args.traits.split(",") if args.traits else [t for t in vecs if t not in ("sites", "norms", "counts")]
     traits = [t for t in traits if t in vecs]
     evalq = {t: json.load(open(src / "trait_data_eval" / f"{t}.json")) for t in traits}
+    ablate = args.mode == "ablate"
+    ref_cond = "prompted" if ablate else "clean"
     stages = args.stages.split(",")
     n_eval = args.n_eval or (3 if args.mode == "tune" else 5)
 
@@ -130,6 +143,21 @@ def main():
                 out.append({"kind": "actadd", "vec": v * m, "coeff": c, "loops": loops, "layer": l, "positions": None})
             return out
 
+        def ablate_specs(trait, layer, units):
+            """Hook specs: the trait's vector (``trait="random"``: a seeded random direction) projected out in
+            ``units`` (loops; dense: quarters); every loop -> loops=None, which adds Dory's input / output sublayers."""
+            v = vecs[next(iter(traits))]["dirs"][0] if trait == "random" else \
+                vecs[trait]["dirs"][sites.index((T - 1, layer) if looped else (0, layer))]
+            if trait == "random":
+                v = torch.randn(v.shape[-1], generator=torch.Generator().manual_seed(0))
+            spec = {"kind": "ablate", "dir": v.float(), "positions": None, "loops": None}
+            if looped:
+                if sorted(units) != list(range(T_run)):
+                    spec["loops"] = list(units)
+            elif sorted(units) != list(range(4)):
+                spec["layers"] = [l for u in units for l in range(DENSE_BLOCK * u, DENSE_BLOCK * (u + 1))]
+            return [spec]
+
         conds = [("clean", -1, 0.0, [])]
         if args.mode == "tune":
             if looped:
@@ -139,6 +167,20 @@ def main():
                 layers = [int(x) for x in args.dense_layers.split(",")]
             conds += [("all", l, float(c), list(range(T_run))) for l in layers for c in args.coeffs.split(",")]
             per_trait = {t: conds for t in traits}
+        elif ablate:
+            tp = rd / "analysis" / f"persona_tune{sfx}.json"
+            tuned = json.load(open(tp)) if tp.exists() else {}
+            mid = unit[len(unit) // 2] if looped else DENSE_BLOCK * 2 + DENSE_BLOCK // 2
+            sets = []
+            for item in args.sets or [f"all={','.join(map(str, range(T_run)))}"]:
+                nm, _, ts = item.partition("=")
+                sets.append((nm, sorted({int(x) % T_run for x in ts.split(",")})))
+            per_trait = {}
+            for t in traits:
+                layer = (tuned.get(t) or {}).get("layer", mid)
+                per_trait[t] = ([("noprompt", -1, 0.0, []), ("prompted", -1, 0.0, [])]
+                                + [(f"ablate_{nm}", layer, 0.0, us) for nm, us in sets]
+                                + [("random_all", layer, 0.0, list(range(T_run)))])
         else:
             tuned = json.load(open(rd / "analysis" / f"persona_tune{sfx}.json"))
             sets = []
@@ -166,15 +208,27 @@ def main():
             qs = evalq[t]["questions"]
             ids = [{"prompt_token_ids": tok(no_think_prompt(tok, [{"role": "user", "content": q}]),
                                             add_special_tokens=False).input_ids} for q in qs]
+            if ablate:  # question i under the trait's i-th (mod 5) eliciting system prompt
+                inst = json.load(open(src / "trait_data_extract" / f"{t}.json"))["instruction"]
+                sys_of = [inst[qi % len(inst)]["pos"] for qi in range(len(qs))]
+                ids_sys = [{"prompt_token_ids": tok(no_think_prompt(tok, [{"role": "system", "content": sy},
+                                                                          {"role": "user", "content": q}]),
+                                                    add_special_tokens=False).input_ids} for q, sy in zip(qs, sys_of)]
             for cname, layer, c, units in tconds:
-                specs = specs_for(t, layer, c, units) if units else []
+                if ablate:
+                    specs = (ablate_specs("random" if cname.startswith("random") else t, layer, units)
+                             if units else [])
+                else:
+                    specs = specs_for(t, layer, c, units) if units else []
+                system = ablate and cname != "noprompt"
                 llm.apply_model(functools.partial(vllm_hooks.install, specs=specs))
                 llm.reset_prefix_cache()
-                outs = llm.generate(ids, sp, use_tqdm=False)
+                outs = llm.generate(ids_sys if system else ids, sp, use_tqdm=False)
                 for qi, (q, r) in enumerate(zip(qs, outs)):
                     for s, o in enumerate(r.outputs):
                         rows.append({"trait": t, "cond": cname, "units": ",".join(map(str, units)), "layer": layer,
-                                     "c": c, "q": qi, "question": q, "sample": s, "response": o.text})
+                                     "c": c, "q": qi, "question": q, "sample": s, "response": o.text,
+                                     "system": sys_of[qi] if system else ""})
                 print(f"  {t} {cname} layer {layer} c={c}: done", flush=True)
             pd.DataFrame(rows).to_parquet(gen_path.with_suffix(".partial.parquet"))
         llm.apply_model(vllm_hooks.clear)
@@ -200,9 +254,13 @@ def main():
         g = df.groupby(["trait", "cond", "units", "layer", "c"]).agg(
             trait_score=("trait_score", "mean"), coherence=("coherence", "mean"),
             unscored=("trait_score", lambda s: s.isna().mean()), n=("trait_score", "size")).reset_index()
-        clean = g[g.cond == "clean"].set_index("trait")
+        clean = g[g.cond == ref_cond].set_index("trait")
         g["trait_clean"], g["coherence_clean"] = g.trait.map(clean.trait_score), g.trait.map(clean.coherence)
         g["gain"], g["coh_drop"] = g.trait_score - g.trait_clean, g.coherence_clean - g.coherence
+        if ablate:  # trait_clean / coherence_clean are the prompted (unablated) run's
+            base = g[g.cond == "noprompt"].set_index("trait").trait_score
+            g["trait_noprompt"] = g.trait.map(base)
+            g["removed"] = (g.trait_clean - g.trait_score) / (g.trait_clean - g.trait_noprompt)
         (rd / "analysis").mkdir(exist_ok=True)
         g.to_csv(rd / "analysis" / f"persona_{name}.csv", index=False)
         with pd.option_context("display.width", 220, "display.max_rows", 500):

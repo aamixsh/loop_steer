@@ -55,6 +55,7 @@ One direction (or vector) per model and behaviour, extracted at one site and use
 | E6 | Persona with the tuned settings in single loops / quarters and in all; Dory also at 4 loops with loops 1+2 | E5 | 7 |
 | E7 | Random kicks on MATH-500 (100), per-problem directions, eps 0.5 / 0.7 / 1 / 1.5, each loop's mid-layer (Qwen quarters' mid-layers), plus Ouro at 6 loops (kick in loop 4 or 6), Nanbeige at 4 (loop 2 or 4), Dory at 4; accuracy + KL | - | 22 |
 | E8 | Pilot: Dory at 4 loops kicked at every 4th sublayer of every loop and in the input / output stacks (30 problems, eps 1), KL at every site (eps 0.5, 1) | - | 3.5 |
+| E9 | Nanbeige 2-loop completions: (a) kicks in both loops at once (`kick:...:apply=0,1`, same direction and size) at eps 0.5-1.5 + KL (`kick_kl.py --sites t0.l11+t1.l11`); (b) persona ablation: the trait elicited by the persona-vectors repo's system prompts, its vector projected out in loop 1, 2 or both (+ random-direction control; `persona_steer.py --mode ablate`); (c) refusal grid with norm-matched actadd at c = -1.5 and -2 in loop 1, 2, both (test set) | E2, E5 | 4.5 |
 
 Hours are for one 96 GB RTX PRO 6000; the judge (gpt-oss-20b) runs on the same GPU after each generation step.
 Biggest single jobs: E3 nanbeige4 (7 h), E7 ouro4 (6 h), E3 dory4 (5 h).
@@ -62,7 +63,7 @@ Biggest single jobs: E3 nanbeige4 (7 h), E7 ouro4 (6 h), E3 dory4 (5 h).
 Outputs (under `data/runs/<model>/`): E2 `generations/tune_actadd`, `capability/math500/tune_actadd`,
 `analysis/actadd_tune.json`; E3 `generations/grid_test{,4,6}`, `analysis/grid_test*.csv`; E4 `generations/ortho_test{,4}`;
 E5/E6 `persona/steer_{tune,loops,loops_loops4}*.parquet`, `analysis/persona_*.{csv,json}`; E7/E8
-`capability/math500/kickp*`, `analysis/kick_kl/kickp*.parquet`.
+`capability/math500/kickp*`, `analysis/kick_kl/kickp*.parquet`; E9 `persona/steer_ablate*.parquet`, `analysis/persona_ablate.csv`, `analysis/kick_kl/kickp_both.parquet` (summary: `kick_summary.py --tag kickp --kl-tag kickp --kl-tag kickp_both`).
 
 Reading results: `scripts/grid_ci.py data/runs/<model>/generations/<tag>`, `scripts/kick_summary.py --model <run dir>
 --tag kickp`, `analysis/persona_loops*.csv`.

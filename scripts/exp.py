@@ -75,13 +75,17 @@ def select(key, tag, cands, n_loops=None, test=True):
                                                                                  else f'"{c}"' for c in cands)
 
 
-def kick_job(key, tag, sites, n_loops=None, eps="0.5,0.7,1,1.5", limit=100, kl_sites=None, kl_eps=None):
+def kick_job(key, tag, sites, n_loops=None, eps="0.5,0.7,1,1.5", limit=100, kl_sites=None, kl_eps=None, apply=None,
+             kl_tag=None):
+    """``apply``: kick each site's layer in these loops at once; ``kl_tag``: KL output name (responses from ``tag``)."""
     hf = M[key][0]
     nl = f" --n-loops {n_loops}" if n_loops else ""
-    cands = ["none"] + [f"kick:randp0:{s}:eps={e}" for s in sites for e in eps.split(",")]
+    ap = apply_opt(apply)
+    cands = ["none"] + [f"kick:randp0:{s}:eps={e}{ap}" for s in sites for e in eps.split(",")]
     gen = (f"{PY} scripts/capability.py --gpu $GPU --model {hf} --dataset math500 --tag {tag} --limit {limit}{nl} "
            f"--skip-existing --candidates " + " ".join(cands))
-    kl = (f"{PY} scripts/kick_kl.py --gpu $GPU --model {hf}{nl} --tag {tag} --limit {limit} --skip-existing "
+    kt = f"{kl_tag} --resp-tag {tag}" if kl_tag else tag
+    kl = (f"{PY} scripts/kick_kl.py --gpu $GPU --model {hf}{nl} --tag {kt} --limit {limit} --skip-existing "
           f"--sites {kl_sites or ','.join(sites)} --eps {kl_eps or eps}")
     return gen + " && " + kl
 
@@ -110,6 +114,8 @@ def out(key, *paths):
 ORTHO = ["none", "ablate:hh_eoi:t0.l26", "ortho:hh_eoi:t0.l26", "ortho:hh_eoi:t0.l26:na=1"]  # na=1: lr-aware edit
 L4 = [[0], [1], [2], [3], [0, 1], None]  # 4 loops: single loops, first two, every loop
 L2 = [[0], [1], None]
+NB_C = ["-1.5", "-2"]  # E9: stronger norm-matched actadd for Nanbeige (E2 picked -1)
+NB_EPS = ["0.5", "0.7", "1", "1.5"]
 DORY_PILOT_SITES = (["t0.l4", "t0.l12"] + [f"t{t}.l{l}" for t in range(4) for l in range(16, 56, 4)]
                     + ["t0.l60", "t0.l68"])
 
@@ -168,6 +174,15 @@ EXPERIMENTS = {
         "dory4": {"hours": 3.5, "cmd": kick_job("dory", "kickp_pilot_loops4", DORY_PILOT_SITES, 4, eps="1", limit=30,
                                                 kl_sites="all", kl_eps="0.5,1")},
     }},
+    "E9": {"title": "Nanbeige 2-loop completions: kick both loops, persona ablation (trait elicited by system prompts) "
+                    "in loop 1 / 2 / both, stronger norm-matched actadd refusal grid (c = -1.5, -2)", "needs": [],
+           "jobs": {
+        "grid": {"hours": 2.0, "cmd": select("nanbeige", "grid_test", [
+            f"actadd:v4_baseline:t1.l15:c={c}:rel=1{apply_opt(s)}" for c in NB_C for s in L2])},
+        "kick": {"hours": 1.0, "cmd": kick_job("nanbeige", "kickp", ["t0.l11"], eps=",".join(NB_EPS), apply=[0, 1],
+                                               kl_tag="kickp_both", kl_sites="t0.l11+t1.l11")},
+        "persona": {"hours": 1.5, "cmd": persona("nanbeige", "ablate", ["1=0", "2=1", "all=0,1"])},
+    }},
 }
 
 OUTPUTS = {  # paths under data/runs pushed after each job (directories or files; missing ones are skipped)
@@ -203,6 +218,14 @@ OUTPUTS = {  # paths under data/runs pushed after each job (directories or files
            "dory4": out("dory", "capability/math500/kickp_loops4", "analysis/kick_kl/kickp_loops4.parquet"),
            "qwen": out("qwen", "capability/math500/kickp", "analysis/kick_kl/kickp.parquet")},
     "E8": {"dory4": out("dory", "capability/math500/kickp_pilot_loops4", "analysis/kick_kl/kickp_pilot_loops4.parquet")},
+    "E9": {"grid": out("nanbeige", *[f"generations/grid_test/actadd_v4_baseline_t1.l15_c{c}_rel1"
+                                     f"{apply_opt(s).replace(':apply=', '_apply')}.{x}parquet"
+                                     for c in NB_C for s in L2 for x in ("", "scored.")],
+                       "generations/grid_test/invalid", "analysis/grid_test.csv"),
+           "kick": out("nanbeige", *[f"capability/math500/kickp/kick_randp0_t0.l11_eps{e}_apply0-1.parquet"
+                                     for e in NB_EPS], "analysis/kick_kl/kickp_both.parquet"),
+           "persona": out("nanbeige", "persona/steer_ablate.parquet", "persona/steer_ablate.judged.parquet",
+                          "analysis/persona_ablate.csv")},
 }
 # E2 depends on E1's norms only through files; E3's coefficients come from E2 (analysis/actadd_tune.json per model)
 NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],

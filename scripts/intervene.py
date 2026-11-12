@@ -8,7 +8,8 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
           actadd (add c * raw mean-diff vector at resid_pre of the site's layer)
           kick   random-perturbation test: method rand<k> (the k-th random direction of perturb_response.py), added
                  as eps * |stream| per token at resid_pre of the site's layer, in the site's loop only (attention
-                 sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10).
+                 sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10),
+                 apply=<t,t..> (kick the site's layer in each of these loops instead, e.g. apply=0,1).
                  E.g. kick:rand0:t0.l12:eps=1. Method randp<seed>: a different random direction per problem
                  (scripts/capability.py only; loop_steer.kicks.problem_directions), e.g. kick:randp0:t0.l12:eps=1
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
@@ -176,8 +177,9 @@ def intervention_specs(c, dirs, site_index, norms=None, n_loops=None, n_requests
 
         D = dirs[next(k for k in dirs if isinstance(dirs[k], dict) and "dirs" in dirs[k])]["dirs"].shape[-1]
         layer = c["site"][1]
-        # a layer that runs once per pass (Dory's input / output sublayers: no loop-1 site) is kicked whenever it runs
-        loops = [c["site"][0]] if looped and (1, layer) in site_index else None
+        # a layer that runs once per pass (Dory's input / output sublayers: no loop-1 site) is kicked whenever it runs;
+        # ``apply=`` kicks the site's layer in each listed loop (same direction and size), instead of the site's loop
+        loops = (c["apply"] or [c["site"][0]]) if looped and (1, layer) in site_index else None
         spec = {"kind": "kick", "layer": layer, "eps": c["eps"], "sink_ratio": c["sink"], "loops": loops}
         if c["method"].startswith("randp"):
             from loop_steer.kicks import problem_directions

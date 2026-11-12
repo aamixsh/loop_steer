@@ -16,7 +16,10 @@ attention sinks (``|h| > --sink-ratio`` x the sequence median), as the vLLM kick
 Per problem, site and eps: ``kl`` = mean over response tokens of KL(clean || kicked) next-token distributions,
 ``agree`` = share of response tokens whose top-1 token is unchanged, ``kl_last`` = KL at the last response token.
 Writes ``analysis/kick_kl/<tag>.parquet``. Sites: ``t<loop>.l<layer>`` / ``l<layer>`` (comma-separated), ``all``
-(every site of the run) or ``mid`` (each loop's, or each of 4 dense blocks', middle layer). HF backend, one GPU.
+(every site of the run) or ``mid`` (each loop's, or each of 4 dense blocks', middle layer). A site group joined by
+``+`` (``t0.l11+t1.l11``) kicks every site of the group in one pass with the same direction and size, as
+``kick:randp0:t0.l11:eps=1:apply=0,1``; its rows carry the first site's loop / layer and ``apply`` = its loops
+(``"0,1"``; empty for a single site). HF backend, one GPU.
 """
 
 import argparse
@@ -79,20 +82,23 @@ def main():
     D = model.config.hidden_size
     V = problem_directions(args.seed, args.limit, D).to(dev)
     if args.sites == "all":
-        sites = list(st.sites)
+        groups = [(s,) for s in st.sites]
     elif args.sites == "mid":
-        sites = [st.site_at(k, 0.5) for k in range(st.T)]
+        groups = [(st.site_at(k, 0.5),) for k in range(st.T)]
     else:
-        sites = []
-        for s in args.sites.split(","):
-            m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", s.strip())
-            sites.append((int(m.group(1) or 0), int(m.group(2))))
-        bad = [s for s in sites if s not in st.order]
+        groups = []
+        for g in args.sites.split(","):
+            grp = []
+            for s in g.split("+"):
+                m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", s.strip())
+                grp.append((int(m.group(1) or 0), int(m.group(2))))
+            groups.append(tuple(grp))
+        bad = [s for g in groups for s in g if s not in st.order]
         if bad:
             raise ValueError(f"sites {bad} are not sites of this run (Dory input/output sublayers are loop 0)")
     eps_list = [float(e) for e in args.eps.split(",")]
     pad = tok.pad_token_id if tok.pad_token_id is not None else 0
-    print(f"{len(items)} responses, {len(sites)} sites x {len(eps_list)} eps", flush=True)
+    print(f"{len(items)} responses, {len(groups)} sites x {len(eps_list)} eps", flush=True)
 
     rows = []
     for b0 in range(0, len(items), args.batch):
@@ -111,10 +117,11 @@ def main():
 
         lp0 = logprobs()
         p0 = lp0.exp()
-        for site in sites:
+        for grp in groups:
+            site = grp[0]
             for eps in eps_list:
-                def inject(s, h, site=site, eps=eps):
-                    if s != site:
+                def inject(s, h, grp=grp, eps=eps):
+                    if s not in grp:
                         return None
                     n = h.float().norm(dim=-1)  # [B, S]
                     med = torch.stack([n[k][valid[k]].median() for k in range(n.shape[0])])[:, None]
@@ -128,6 +135,7 @@ def main():
                 for j, (i, _, a0, n) in enumerate(chunk):
                     m = sel[j]
                     rows.append({"problem_idx": i, "loop": site[0], "layer": site[1], "unit": st.unit[site],
+                                 "apply": ",".join(str(x[0]) for x in grp) if len(grp) > 1 else "",
                                  "order": st.order[site], "eps": eps, "kl": float(kl[j][m].mean()),
                                  "agree": float(agree[j][m].float().mean()), "kl_last": float(kl[j, a0 - 2 + n]),
                                  "n_tokens": n})
@@ -138,7 +146,7 @@ def main():
     df["n_loops"] = st.T if st.looped else 1
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out)
-    summ = df.groupby(["unit", "loop", "layer", "eps"])[["kl", "agree"]].mean().unstack("eps").round(3)
+    summ = df.groupby(["unit", "loop", "layer", "apply", "eps"])[["kl", "agree"]].mean().unstack("eps").round(3)
     with pd.option_context("display.width", 200, "display.max_rows", 400):
         print(summ.to_string())
     print(f"-> {out}")
