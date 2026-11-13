@@ -16,7 +16,8 @@ prints accuracy and the share of closed samples. Kick candidates with method ``r
 among the first ``--limit``) its own random direction (``loop_steer.kicks.problem_directions``; prefix caching off). Datasets come from the Hugging Face Hub (public):
 ``HuggingFaceH4/MATH-500`` (500 problems), ``opencompass/AIME2025`` (30 problems) and ``TIGER-Lab/MMLU-Pro``
 (``mmlupro``: a fixed subset of 20 test questions per category, 280 in all, drawn with seed 0; options A-J listed in the
-prompt, graded on the option letter in ``\\boxed{}``).
+prompt, graded on the option letter in ``\\boxed{}``, or failing that the last "answer is (X)"; files written before
+this fallback are regraded with ``scripts/regrade_capability.py``).
 """
 
 import argparse
@@ -72,6 +73,18 @@ def last_boxed(text: str) -> str | None:
         if depth == 0:
             return text[i + 1:j]
     return None
+
+
+ANSWER_IS = re.compile(r"answer is:?\s*\**\s*\(?([A-J])\)?(?![A-Za-z])")
+
+
+def extract_answer(answer: str, truth: str) -> str | None:
+    """The last ``\\boxed{}`` of the answer; for multiple choice (MMLU-Pro), else the last "answer is (X)" letter."""
+    pred = last_boxed(answer)
+    if pred is None and re.fullmatch(r"[A-J]", truth):  # Ouro answers in MMLU-Pro's own format, not \boxed{}
+        found = ANSWER_IS.findall(answer)
+        pred = found[-1] if found else None
+    return pred
 
 
 def normalize(ans: str) -> str:
@@ -202,7 +215,7 @@ def main():
                 cot, answer, closed = split_cot(o.text)
                 answer = strip_end(answer)
                 response = cot + answer if closed else strip_end(o.text)
-                pred = last_boxed(answer) if closed else None
+                pred = extract_answer(answer, prob["answer"]) if closed else None
                 rows.append({"problem_id": prob["id"], "sample": k, "truth": prob["answer"], "pred": pred,
                              "correct": is_correct(pred, prob["answer"]), "closed": closed,
                              "n_tokens": len(o.token_ids), "hit_limit": o.finish_reason == "length",

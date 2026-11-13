@@ -38,7 +38,8 @@ One direction (or vector) per model and behaviour, extracted at one site and use
   all CoTs of the share of refusing answers; CoTs that never close are judged whole. Test set: the first 250 test
   prompts. Intervals: `scripts/grid_ci.py` (prompt bootstrap).
 - **Capability**: MATH-500 accuracy (first 100 problems, one sample, CoT cap 8192 tokens, `scripts/capability.py`); E10 also
-  full MATH-500, AIME25 (8 samples) and an MMLU-Pro subset (280 questions, option letter in `\boxed{}`).
+  full MATH-500, AIME25 (8 samples) and an MMLU-Pro subset (280 questions, option letter in `\boxed{}`, or failing that the last "answer is (X)": Ouro
+  answers in MMLU-Pro's own format; run `scripts/regrade_capability.py` after pulling files graded before the fallback).
 - **Kick KL**: the unkicked model's own MATH-500 responses teacher-forced with and without the kick; mean KL(clean ||
   kicked) of the next-token distribution over the first 512 response tokens, and top-1 agreement (`kick_kl.py`).
 - **Persona**: trait expression (0-100) and coherence (0-100) by gpt-oss-20b with the persona-vectors repo prompts,
