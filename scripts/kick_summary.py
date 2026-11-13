@@ -53,10 +53,12 @@ def main():
         row = {"candidate": name, "acc": x.mean(), "lo": np.percentile(bx, 2.5), "hi": np.percentile(bx, 97.5),
                "drop": y.mean() - x.mean(), "drop_lo": np.percentile(bd, 2.5), "drop_hi": np.percentile(bd, 97.5),
                "closed": a.closed.mean(), "n": len(x)}
-        m = re.fullmatch(r"kick_randp?\d+_(?:t(\d+)\.)?l(\d+)_eps([\d.]+)(?:_apply([\d-]+))?", name)
-        if m:  # apply: the loops of an apply= kick ("0,1"), else empty (the site's loop alone)
+        m = re.fullmatch(r"kick_randp?\d+_(?:t(\d+)\.)?l(\d+)_eps([\d.]+)(?:_apply([\d-]+))?(?:_layers([\d-]+))?", name)
+        if m:  # apply: the loops of an apply= kick ("0,1"), the layers of a layers= kick ("l4,l13"), else empty
             apply = (m.group(4) or "").replace("-", ",")
-            loop = int(apply.split(",")[0]) if apply else int(m.group(1) or 0)
+            if m.group(5):
+                apply = ",".join(f"l{x}" for x in m.group(5).split("-"))
+            loop = int(apply.split(",")[0]) if apply and m.group(4) else int(m.group(1) or 0)
             row.update(loop=loop, layer=int(m.group(2)), apply=apply, eps=float(m.group(3)))
             key = (loop, row["layer"], apply, row["eps"])
             if kl is not None and key in kl.index:

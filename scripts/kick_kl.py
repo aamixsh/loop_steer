@@ -18,8 +18,8 @@ Per problem, site and eps: ``kl`` = mean over response tokens of KL(clean || kic
 Writes ``analysis/kick_kl/<tag>.parquet``. Sites: ``t<loop>.l<layer>`` / ``l<layer>`` (comma-separated), ``all``
 (every site of the run) or ``mid`` (each loop's, or each of 4 dense blocks', middle layer). A site group joined by
 ``+`` (``t0.l11+t1.l11``) kicks every site of the group in one pass with the same direction and size, as
-``kick:randp0:t0.l11:eps=1:apply=0,1``; its rows carry the first site's loop / layer and ``apply`` = its loops
-(``"0,1"``; empty for a single site). HF backend, one GPU.
+``kick:randp0:t0.l11:eps=1:apply=0,1`` (dense: ``l4+l13`` as ``layers=4+13``); its rows carry the first site's loop /
+layer and ``apply`` = its loops (``"0,1"``; dense: its layers, ``"l4,l13"``; empty for a single site). HF backend, one GPU.
 """
 
 import argparse
@@ -135,7 +135,8 @@ def main():
                 for j, (i, _, a0, n) in enumerate(chunk):
                     m = sel[j]
                     rows.append({"problem_idx": i, "loop": site[0], "layer": site[1], "unit": st.unit[site],
-                                 "apply": ",".join(str(x[0]) for x in grp) if len(grp) > 1 else "",
+                                 "apply": ",".join(str(x[0]) if st.looped else f"l{x[1]}" for x in grp)
+                                 if len(grp) > 1 else "",
                                  "order": st.order[site], "eps": eps, "kl": float(kl[j][m].mean()),
                                  "agree": float(agree[j][m].float().mean()), "kl_last": float(kl[j, a0 - 2 + n]),
                                  "n_tokens": n})

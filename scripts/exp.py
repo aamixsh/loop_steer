@@ -76,11 +76,12 @@ def select(key, tag, cands, n_loops=None, test=True):
 
 
 def kick_job(key, tag, sites, n_loops=None, eps="0.5,0.7,1,1.5", limit=100, kl_sites=None, kl_eps=None, apply=None,
-             kl_tag=None):
-    """``apply``: kick each site's layer in these loops at once; ``kl_tag``: KL output name (responses from ``tag``)."""
+             kl_tag=None, opts=""):
+    """``apply``: kick each site's layer in these loops at once; ``opts``: more candidate options (dense:
+    ``:layers=4+13``); ``kl_tag``: KL output name (responses from ``tag``)."""
     hf = M[key][0]
     nl = f" --n-loops {n_loops}" if n_loops else ""
-    ap = apply_opt(apply)
+    ap = apply_opt(apply) + opts
     cands = ["none"] + [f"kick:randp0:{s}:eps={e}{ap}" for s in sites for e in eps.split(",")]
     gen = (f"{PY} scripts/capability.py --gpu $GPU --model {hf} --dataset math500 --tag {tag} --limit {limit}{nl} "
            f"--skip-existing --candidates " + " ".join(cands))
@@ -143,7 +144,7 @@ DORY_PILOT_SITES = (["t0.l4", "t0.l12"] + [f"t{t}.l{l}" for t in range(4) for l 
                     + ["t0.l60", "t0.l68"])
 
 ORTHO_CANDS = {"ouro": ortho_cands("ouro"), "nanbeige": ortho_cands("nanbeige", norm_aware=False),
-               "dory": ortho_cands("dory")}  # Nanbeige is pre-norm: plain orthogonalization is exact, na=1 the same
+               "dory": ortho_cands("dory"), "qwen": ortho_cands("qwen", norm_aware=False)}  # Nanbeige is pre-norm: plain orthogonalization is exact, na=1 the same
 
 EXPERIMENTS = {
     "E1": {"title": "Stream norms at every site (for norm-matched actadd, rel=1)", "needs": [], "jobs": {
@@ -213,10 +214,32 @@ EXPERIMENTS = {
                      "trained loops: refusal (test, 250) + MATH-500 (500), AIME25 (30 x 8), MMLU-Pro (280)",
             "needs": ["E3", "E4"], "jobs": {
         **{f"{k}_ref": {"hours": h, "cmd": select(k, tag, ORTHO_CANDS[k], test=True)}
-           for k, tag, h in [("ouro", "grid_test", 2.0), ("nanbeige", "grid_test", 2.5), ("dory", "ortho_test", 1.0)]},
-        **{f"{k}_cap": {"hours": h, "cmd": " && ".join(cap_job(k, ds, ORTHO_CANDS[k], refs) for ds, refs in
-                                                       [("math500", False), ("aime25", False), ("mmlupro", True)])}
-           for k, h in [("ouro", 3.0), ("nanbeige", 3.5), ("dory", 3.0)]},
+           for k, tag, h in [("ouro", "grid_test", 2.0), ("nanbeige", "grid_test", 2.5), ("dory", "ortho_test", 1.0),
+                             ("qwen", "grid_test", 1.5)]},
+        **{f"{k}_cap": {"hours": h, "cmd": " && ".join(cap_job(k, ds, ORTHO_CANDS[k], refs or k == "qwen")
+                                                       for ds, refs in [("math500", False), ("aime25", False),
+                                                                        ("mmlupro", True)])}
+           for k, h in [("ouro", 3.0), ("nanbeige", 3.5), ("dory", 3.0), ("qwen", 4.0)]},  # Qwen: no earlier cap runs
+    }},
+    "E11": {"title": "Persona ablation (trait elicited by system prompts) in single loops / quarters and all, plus Dory "
+                     "at 4 loops (recovery after loops 1+2); random kicks in every loop / quarter at once",
+            "needs": ["E5"], "jobs": {
+        "persona_dory2": {"hours": 0.4, "cmd": persona("dory", "ablate", ["1=0", "2=1", "all=0,1"])},
+        "persona_dory4": {"hours": 0.6, "cmd": persona("dory", "ablate", ["1=0", "2=1", "3=2", "4=3", "12=0,1",
+                                                                          "all=0,1,2,3"], n_loops=4)},
+        "persona_ouro": {"hours": 0.6, "cmd": persona("ouro", "ablate", ["1=0", "2=1", "3=2", "4=3", "12=0,1",
+                                                                         "all=0,1,2,3"])},
+        "persona_qwen": {"hours": 0.7, "cmd": persona("qwen", "ablate", ["q1=0", "q2=1", "q3=2", "q4=3",
+                                                                         "all=0,1,2,3"])},
+        "kick_dory2": {"hours": 0.7, "cmd": kick_job("dory", "kickp", ["t0.l36"], apply=[0, 1], kl_tag="kickp_all",
+                                                     kl_sites="t0.l36+t1.l36")},
+        "kick_dory4": {"hours": 1.0, "cmd": kick_job("dory", "kickp_loops4", ["t0.l36"], 4, apply=[0, 1, 2, 3],
+                                                     kl_tag="kickp_loops4_all", kl_sites="+".join(
+                                                         f"t{t}.l36" for t in range(4)))},
+        "kick_ouro4": {"hours": 1.5, "cmd": kick_job("ouro", "kickp", ["t0.l12"], apply=[0, 1, 2, 3], kl_tag="kickp_all",
+                                                     kl_sites="+".join(f"t{t}.l12" for t in range(4)))},
+        "kick_qwen": {"hours": 0.7, "cmd": kick_job("qwen", "kickp", ["l4"], opts=":layers=4+13+22+31",
+                                                    kl_tag="kickp_all", kl_sites="l4+l13+l22+l31")},
     }},
 }
 
@@ -265,7 +288,21 @@ OUTPUTS = {  # paths under data/runs pushed after each job (directories or files
                                     for x in ("", "scored.")], f"generations/{tag}/invalid")
                for k, tag in [("ouro", "grid_test"), ("nanbeige", "grid_test"), ("dory", "ortho_test")]},
             **{f"{k}_cap": out(k, *[f"capability/{ds}/cap/{cand_name(c)}.parquet" for ds in ("math500", "aime25")
-                                    for c in ORTHO_CANDS[k]], "capability/mmlupro/cap") for k in ORTHO_CANDS}},
+                                    for c in ORTHO_CANDS[k]], "capability/mmlupro/cap") for k in ORTHO_CANDS},
+            "qwen_ref": out("qwen", *[f"generations/grid_test/{cand_name(c)}.{x}parquet" for c in ORTHO_CANDS["qwen"]
+                                      for x in ("", "scored.")], "generations/grid_test/invalid"),
+            "qwen_cap": out("qwen", *[f"capability/{ds}/cap" for ds in ("math500", "aime25", "mmlupro")])},
+    "E11": {**{f"persona_{k}": out(m, f"persona/steer_ablate{x}.parquet", f"persona/steer_ablate{x}.judged.parquet",
+                                   f"analysis/persona_ablate{x}.csv")
+               for k, m, x in [("dory2", "dory", ""), ("dory4", "dory", "_loops4"), ("ouro", "ouro", ""),
+                               ("qwen", "qwen", "")]},
+            **{f"kick_{k}": out(m, *[f"capability/math500/{tag}/kick_randp0_{site}_eps{e}{sfx}.parquet"
+                                     for e in NB_EPS], f"analysis/kick_kl/{kt}.parquet")
+               for k, m, tag, site, sfx, kt in [
+                   ("dory2", "dory", "kickp", "t0.l36", "_apply0-1", "kickp_all"),
+                   ("dory4", "dory", "kickp_loops4", "t0.l36", "_apply0-1-2-3", "kickp_loops4_all"),
+                   ("ouro4", "ouro", "kickp", "t0.l12", "_apply0-1-2-3", "kickp_all"),
+                   ("qwen", "qwen", "kickp", "l4", "_layers4-13-22-31", "kickp_all")]}},
 }
 # E2 depends on E1's norms only through files; E3's coefficients come from E2 (analysis/actadd_tune.json per model)
 NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],

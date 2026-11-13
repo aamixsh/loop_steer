@@ -9,7 +9,8 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
           kick   random-perturbation test: method rand<k> (the k-th random direction of perturb_response.py), added
                  as eps * |stream| per token at resid_pre of the site's layer, in the site's loop only (attention
                  sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10),
-                 apply=<t,t..> (kick the site's layer in each of these loops instead, e.g. apply=0,1).
+                 apply=<t,t..> (kick the site's layer in each of these loops instead, e.g. apply=0,1),
+                 layers=<a+b..> (standard models: kick each of these layers at once, e.g. layers=4+13+22+31).
                  E.g. kick:rand0:t0.l12:eps=1. Method randp<seed>: a different random direction per problem
                  (scripts/capability.py only; loop_steer.kicks.problem_directions), e.g. kick:randp0:t0.l12:eps=1
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
@@ -90,8 +91,8 @@ def parse_candidate(text):
         elif key == "layer":
             cand["layer"] = int(val)
         elif key == "layers":
-            if kind not in ("ablate", "actadd"):
-                raise ValueError(f"layers= is an ablate / actadd option: {text!r}")
+            if kind not in ("ablate", "actadd", "kick"):
+                raise ValueError(f"layers= is an ablate / actadd / kick option: {text!r}")
             ls = []
             for part in val.split("+"):
                 a, _, b = part.partition("-")
@@ -181,16 +182,18 @@ def intervention_specs(c, dirs, site_index, norms=None, n_loops=None, n_requests
         # ``apply=`` kicks the site's layer in each listed loop (same direction and size), instead of the site's loop
         loops = (c["apply"] or [c["site"][0]]) if looped and (1, layer) in site_index else None
         spec = {"kind": "kick", "layer": layer, "eps": c["eps"], "sink_ratio": c["sink"], "loops": loops}
+        kl = c["layers"] or [layer]  # layers=: one kick per layer, same direction and size
         if c["method"].startswith("randp"):
             from loop_steer.kicks import problem_directions
 
             if n_requests is None:
                 raise ValueError(f"{c['name']}: per-request kick directions need n_requests")
-            return [{**spec, "vecs": problem_directions(int(c["method"][5:]), n_requests, D)}]
+            vecs = problem_directions(int(c["method"][5:]), n_requests, D)
+            return [{**spec, "layer": l, "vecs": vecs} for l in kl]
         g = torch.Generator().manual_seed(0)  # same draws as perturb_response.py's random0, random1, ...
         for _ in range(int(c["method"][4:]) + 1):
             vec = torch.randn(D, generator=g)
-        return [{**spec, "vec": vec}]
+        return [{**spec, "layer": l, "vec": vec} for l in kl]
     if c["kind"] not in ("ablate", "actadd"):
         return []
     table = dirs[c["method"]]["dirs"]
