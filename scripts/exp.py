@@ -41,7 +41,7 @@ M = {  # key: (HF id, run dir, refusal direction method:site, persona / kick mid
 }
 QWEN_QUARTERS = {1: "0-8", 2: "9-17", 3: "18-26", 4: "27-35"}  # ablation layer ranges
 QWEN_AT = {1: 3, 2: 12, 3: 21, 4: 30}  # actadd: the site's offset (21 = 2 * 9 + 3) in each quarter
-TEST = "SPLIT=test OFFSET=0 NPROMPTS=250"
+TEST_B = 250  # E12: the test prompts after the first 250 (237 of 487)
 
 
 def apply_opt(loops):
@@ -68,26 +68,29 @@ def qwen_refusal_cands():
     return list(dict.fromkeys(out))
 
 
-def select(key, tag, cands, n_loops=None, test=True):
-    env = (TEST + " " if test else "") + (f"N_LOOPS={n_loops} " if n_loops else "")
+def select(key, tag, cands, n_loops=None, test=True, offset=0, n_prompts=250, kind=None):
+    """run_select.sh job; ``test``: the test split from prompt ``offset`` (``n_prompts`` of them); ``kind``: harmless."""
+    env = (f"SPLIT=test OFFSET={offset} NPROMPTS={n_prompts} " if test else "") + (f"KIND={kind} " if kind else "")
+    env += f"N_LOOPS={n_loops} " if n_loops else ""
     coef = f"COEF=$({PY} scripts/exp.py coef {key}) && " if any("$COEF" in c for c in cands) else ""
     return coef + f"GPU=$GPU {env}scripts/run_select.sh {key} {tag} " + " ".join(shlex.quote(c) if "$" not in c
                                                                                  else f'"{c}"' for c in cands)
 
 
 def kick_job(key, tag, sites, n_loops=None, eps="0.5,0.7,1,1.5", limit=100, kl_sites=None, kl_eps=None, apply=None,
-             kl_tag=None, opts=""):
+             kl_tag=None, opts="", indep=False):
     """``apply``: kick each site's layer in these loops at once; ``opts``: more candidate options (dense:
-    ``:layers=4+13``); ``kl_tag``: KL output name (responses from ``tag``)."""
+    ``:layers=4+13``); ``kl_tag``: KL output name (responses from ``tag``); ``indep``: a different random direction in
+    each kicked loop / layer (``indep=1``, ``kick_kl.py --indep``)."""
     hf = M[key][0]
     nl = f" --n-loops {n_loops}" if n_loops else ""
-    ap = apply_opt(apply) + opts
+    ap = apply_opt(apply) + opts + (":indep=1" if indep else "")
     cands = ["none"] + [f"kick:randp0:{s}:eps={e}{ap}" for s in sites for e in eps.split(",")]
     gen = (f"{PY} scripts/capability.py --gpu $GPU --model {hf} --dataset math500 --tag {tag} --limit {limit}{nl} "
            f"--skip-existing --candidates " + " ".join(cands))
     kt = f"{kl_tag} --resp-tag {tag}" if kl_tag else tag
     kl = (f"{PY} scripts/kick_kl.py --gpu $GPU --model {hf}{nl} --tag {kt} --limit {limit} --skip-existing "
-          f"--sites {kl_sites or ','.join(sites)} --eps {kl_eps or eps}")
+          f"--sites {kl_sites or ','.join(sites)} --eps {kl_eps or eps}" + (" --indep" if indep else ""))
     return gen + " && " + kl
 
 
@@ -142,6 +145,24 @@ NB_C = ["-1.5", "-2"]  # E9: stronger norm-matched actadd for Nanbeige (E2 picke
 NB_EPS = ["0.5", "0.7", "1", "1.5"]
 DORY_PILOT_SITES = (["t0.l4", "t0.l12"] + [f"t{t}.l{l}" for t in range(4) for l in range(16, 56, 4)]
                     + ["t0.l60", "t0.l68"])
+
+PLUS_C = {"ouro": ["2", "4"], "nanbeige": ["2", "4"], "dory": ["1", "2"], "qwen": ["2", "4"]}  # 2x, 4x E2's |c|
+E13_EPS = "0.5,0.7,1"
+
+
+def plus_cands(key, sets):
+    """E14: +u (induce refusal) on harmless prompts, norm-matched actadd at 2x and 4x the tuned |c|, in the first loop,
+    the last loop and every loop (Qwen: at the first / last quarter's offset, all four); random direction (4x, all).
+    (A smoke test at 2x in Ouro's last loop induced no refusal, hence no 1x.)"""
+    method, site = M[key][2].split(":")
+    c1, c2 = PLUS_C[key]
+    if key == "qwen":
+        units = [f":at={QWEN_AT[1]}", f":at={QWEN_AT[4]}", ":at=" + "+".join(str(QWEN_AT[i]) for i in range(1, 5))]
+    else:
+        units = [apply_opt(s) for s in sets]
+    return (["none", f"actadd:random:{site}:c={c2}:rel=1{units[-1]}"]
+            + [f"actadd:{method}:{site}:c={c}:rel=1{u}" for c in (c1, c2) for u in units])
+
 
 ORTHO_CANDS = {"ouro": ortho_cands("ouro"), "nanbeige": ortho_cands("nanbeige", norm_aware=False),
                "dory": ortho_cands("dory"), "qwen": ortho_cands("qwen", norm_aware=False)}  # Nanbeige is pre-norm: plain orthogonalization is exact, na=1 the same
@@ -241,6 +262,43 @@ EXPERIMENTS = {
         "kick_qwen": {"hours": 0.7, "cmd": kick_job("qwen", "kickp", ["l4"], opts=":layers=4+13+22+31",
                                                     kl_tag="kickp_all", kl_sites="l4+l13+l22+l31")},
     }},
+    "E12": {"title": "Refusal loop grids (E3, plus E9's Nanbeige actadd) on the other 237 test prompts (offset 250), "
+                     "tags grid_test_b / grid_test4_b; pool with E3 via grid_ci.py", "needs": ["E1", "E2"], "jobs": {
+        "ouro4": {"hours": 2.4, "cmd": select("ouro", "grid_test_b", refusal_cands("ouro", L4), offset=TEST_B)},
+        "nanbeige2": {"hours": 4.3, "cmd": select("nanbeige", "grid_test_b", refusal_cands("nanbeige", L2) + [
+            f"actadd:v4_baseline:t1.l15:c={c}:rel=1{apply_opt(s)}" for c in NB_C for s in L2], offset=TEST_B)},
+        "dory2": {"hours": 1.9, "cmd": select("dory", "grid_test_b", refusal_cands("dory", L2), offset=TEST_B)},
+        "dory4": {"hours": 4.8, "cmd": select("dory", "grid_test4_b", refusal_cands("dory", L4), 4, offset=TEST_B)},
+        "qwen": {"hours": 1.9, "cmd": select("qwen", "grid_test_b", qwen_refusal_cands(), offset=TEST_B)},
+    }},
+    "E13": {"title": "Random kicks in every loop / quarter at once with an independent direction per loop (indep=1), "
+                     "vs E11's shared direction: does the compounding come from one direction piling up?", "needs": [],
+            "jobs": {
+        "ouro4": {"hours": 2.0, "cmd": kick_job("ouro", "kickp", ["t0.l12"], eps=E13_EPS, apply=[0, 1, 2, 3],
+                                                kl_tag="kickp_all_indep", indep=True,
+                                                kl_sites="+".join(f"t{t}.l12" for t in range(4)))},
+        "dory4": {"hours": 1.5, "cmd": kick_job("dory", "kickp_loops4", ["t0.l36"], 4, eps=E13_EPS, apply=[0, 1, 2, 3],
+                                                kl_tag="kickp_loops4_all_indep", indep=True,
+                                                kl_sites="+".join(f"t{t}.l36" for t in range(4)))},
+        "nanbeige2": {"hours": 0.5, "cmd": kick_job("nanbeige", "kickp", ["t0.l11"], eps=E13_EPS, apply=[0, 1],
+                                                    kl_tag="kickp_both_indep", indep=True, kl_sites="t0.l11+t1.l11")},
+        "qwen": {"hours": 0.7, "cmd": kick_job("qwen", "kickp", ["l4"], eps=E13_EPS, opts=":layers=4+13+22+31",
+                                               kl_tag="kickp_all_indep", indep=True, kl_sites="l4+l13+l22+l31")},
+    }},
+    "E14": {"title": "The other sign: +u (norm-matched actadd, 2x / 4x tuned |c|) on 100 harmless test prompts in the "
+                     "first loop, the last loop and every loop (Qwen: first / last quarter, all); induced refusal",
+            "needs": ["E1"], "jobs": {
+        "ouro": {"hours": 0.7, "cmd": select("ouro", "plus_harmless", plus_cands("ouro", [[0], [3], None]),
+                                             n_prompts=100, kind="harmless")},
+        "nanbeige": {"hours": 0.8, "cmd": select("nanbeige", "plus_harmless", plus_cands("nanbeige", L2),
+                                                 n_prompts=100, kind="harmless")},
+        "dory2": {"hours": 0.6, "cmd": select("dory", "plus_harmless", plus_cands("dory", L2), n_prompts=100,
+                                              kind="harmless")},
+        "dory4": {"hours": 1.0, "cmd": select("dory", "plus_harmless4", plus_cands("dory", [[0], [3], None]), 4,
+                                              n_prompts=100, kind="harmless")},
+        "qwen": {"hours": 0.6, "cmd": select("qwen", "plus_harmless", plus_cands("qwen", None), n_prompts=100,
+                                             kind="harmless")},
+    }},
 }
 
 OUTPUTS = {  # paths under data/runs pushed after each job (directories or files; missing ones are skipped)
@@ -304,6 +362,19 @@ OUTPUTS = {  # paths under data/runs pushed after each job (directories or files
                    ("ouro4", "ouro", "kickp", "t0.l12", "_apply0-1-2-3", "kickp_all"),
                    ("qwen", "qwen", "kickp", "l4", "_layers4-13-22-31", "kickp_all")]}},
 }
+OUTPUTS["E12"] = {k: out(m, f"generations/{t}", f"analysis/{t}.csv") for k, m, t in [
+    ("ouro4", "ouro", "grid_test_b"), ("nanbeige2", "nanbeige", "grid_test_b"), ("dory2", "dory", "grid_test_b"),
+    ("dory4", "dory", "grid_test4_b"), ("qwen", "qwen", "grid_test_b")]}
+OUTPUTS["E13"] = {k: out(m, *[f"capability/math500/{tag}/kick_randp0_{site}_eps{e}{sfx}_indep1.parquet"
+                              for e in E13_EPS.split(",")], f"analysis/kick_kl/{kt}.parquet")
+                  for k, m, tag, site, sfx, kt in [
+                      ("ouro4", "ouro", "kickp", "t0.l12", "_apply0-1-2-3", "kickp_all_indep"),
+                      ("dory4", "dory", "kickp_loops4", "t0.l36", "_apply0-1-2-3", "kickp_loops4_all_indep"),
+                      ("nanbeige2", "nanbeige", "kickp", "t0.l11", "_apply0-1", "kickp_both_indep"),
+                      ("qwen", "qwen", "kickp", "l4", "_layers4-13-22-31", "kickp_all_indep")]}
+OUTPUTS["E14"] = {k: out(m, f"generations/{t}", f"analysis/{t}.csv") for k, m, t in [
+    ("ouro", "ouro", "plus_harmless"), ("nanbeige", "nanbeige", "plus_harmless"), ("dory2", "dory", "plus_harmless"),
+    ("dory4", "dory", "plus_harmless4"), ("qwen", "qwen", "plus_harmless")]}
 # E2 depends on E1's norms only through files; E3's coefficients come from E2 (analysis/actadd_tune.json per model)
 NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],
                "E3": [f"{M[k][1]}/analysis/actadd_tune.json" for k in M]
@@ -312,6 +383,10 @@ NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],
                "E6": [f"{M[k][1]}/analysis/persona_tune.json" for k in M],
                "E10": [f"{M[k][1]}/generations/grid_test/none.scored.parquet" for k in ("ouro", "nanbeige")]
                + [f"{M['dory'][1]}/generations/ortho_test/none.scored.parquet"]}
+NEEDS_FILES["E12"] = NEEDS_FILES["E3"]
+NEEDS_FILES["E13"] = [f"{M[k][1]}/capability/math500/{t}/none.parquet" for k, t in
+                      [("ouro", "kickp"), ("dory", "kickp_loops4"), ("nanbeige", "kickp"), ("qwen", "kickp")]]
+NEEDS_FILES["E14"] = NEEDS_FILES["E2"] + [f"{M['dory'][1]}/directions/stream_norms_loops4.pt"]
 
 
 def load_cloud_env(path=Path("/workspace/cloud-sync/env.sh")):

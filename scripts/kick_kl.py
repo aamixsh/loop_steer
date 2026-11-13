@@ -19,7 +19,9 @@ Writes ``analysis/kick_kl/<tag>.parquet``. Sites: ``t<loop>.l<layer>`` / ``l<lay
 (every site of the run) or ``mid`` (each loop's, or each of 4 dense blocks', middle layer). A site group joined by
 ``+`` (``t0.l11+t1.l11``) kicks every site of the group in one pass with the same direction and size, as
 ``kick:randp0:t0.l11:eps=1:apply=0,1`` (dense: ``l4+l13`` as ``layers=4+13``); its rows carry the first site's loop /
-layer and ``apply`` = its loops (``"0,1"``; dense: its layers, ``"l4,l13"``; empty for a single site). HF backend, one GPU.
+layer and ``apply`` = its loops (``"0,1"``; dense: its layers, ``"l4,l13"``; empty for a single site). ``--indep``: the
+j-th site of a group gets its own direction, that of seed + j (as ``kick:...:indep=1``); ``apply`` then ends in
+``/indep``. HF backend, one GPU.
 """
 
 import argparse
@@ -38,6 +40,8 @@ def main():
     ap.add_argument("--sites", default="mid")
     ap.add_argument("--eps", default="0.5,0.7,1,1.5")
     ap.add_argument("--seed", type=int, default=0, help="randp seed (as kick:randp<seed>)")
+    ap.add_argument("--indep", action="store_true",
+                    help="the j-th site of a '+' group gets the directions of seed + j (kick option indep=1)")
     ap.add_argument("--limit", type=int, default=100, help="the --limit of the generation run (fixes the directions)")
     ap.add_argument("--max-resp-tokens", type=int, default=512)
     ap.add_argument("--sink-ratio", type=float, default=10.0)
@@ -97,6 +101,8 @@ def main():
         if bad:
             raise ValueError(f"sites {bad} are not sites of this run (Dory input/output sublayers are loop 0)")
     eps_list = [float(e) for e in args.eps.split(",")]
+    Vs = ([problem_directions(args.seed + j, args.limit, D).to(dev) for j in range(max(map(len, groups)))]
+          if args.indep else [])
     pad = tok.pad_token_id if tok.pad_token_id is not None else 0
     print(f"{len(items)} responses, {len(groups)} sites x {len(eps_list)} eps", flush=True)
 
@@ -106,6 +112,7 @@ def main():
         ids, valid = pad_batch([c[1] for c in chunk], pad)
         ids, valid = ids.to(dev), valid.to(dev)
         v = V[[c[0] for c in chunk]][:, None, :]  # [B, 1, D]
+        vj = [Vj[[c[0] for c in chunk]][:, None, :] for Vj in Vs]  # --indep: the j-th site's directions
         sel = torch.zeros_like(valid)  # positions whose next-token prediction is a response token
         for j, (_, _, a0, n) in enumerate(chunk):
             sel[j, a0 - 1: a0 - 1 + n] = True
@@ -123,11 +130,12 @@ def main():
                 def inject(s, h, grp=grp, eps=eps):
                     if s not in grp:
                         return None
+                    v_s = vj[grp.index(s)] if args.indep else v
                     n = h.float().norm(dim=-1)  # [B, S]
                     med = torch.stack([n[k][valid[k]].median() for k in range(n.shape[0])])[:, None]
                     keep = (n <= args.sink_ratio * med) & valid
                     keep[:, 0] = False
-                    return h + (eps * n.unsqueeze(-1) * v * keep.unsqueeze(-1)).to(h.dtype)
+                    return h + (eps * n.unsqueeze(-1) * v_s * keep.unsqueeze(-1)).to(h.dtype)
 
                 lp = logprobs(inject)
                 kl = (p0 * (lp0 - lp)).sum(-1)  # [B, S]
@@ -135,8 +143,8 @@ def main():
                 for j, (i, _, a0, n) in enumerate(chunk):
                     m = sel[j]
                     rows.append({"problem_idx": i, "loop": site[0], "layer": site[1], "unit": st.unit[site],
-                                 "apply": ",".join(str(x[0]) if st.looped else f"l{x[1]}" for x in grp)
-                                 if len(grp) > 1 else "",
+                                 "apply": (",".join(str(x[0]) if st.looped else f"l{x[1]}" for x in grp)
+                                           + ("/indep" if args.indep else "")) if len(grp) > 1 else "",
                                  "order": st.order[site], "eps": eps, "kl": float(kl[j][m].mean()),
                                  "agree": float(agree[j][m].float().mean()), "kl_last": float(kl[j, a0 - 2 + n]),
                                  "n_tokens": n})

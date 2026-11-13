@@ -10,7 +10,9 @@ Candidate syntax: ``kind:method:site[:opt=val...]`` or ``none``.
                  as eps * |stream| per token at resid_pre of the site's layer, in the site's loop only (attention
                  sinks untouched; vLLM backend). Options eps=<e> (default 0.5), sink=<ratio> (default 10),
                  apply=<t,t..> (kick the site's layer in each of these loops instead, e.g. apply=0,1),
-                 layers=<a+b..> (standard models: kick each of these layers at once, e.g. layers=4+13+22+31).
+                 layers=<a+b..> (standard models: kick each of these layers at once, e.g. layers=4+13+22+31),
+                 indep=1 (with apply= / layers= and randp<seed>: the j-th kicked loop / layer gets its own directions,
+                 those of randp<seed + j>, instead of all sharing one).
                  E.g. kick:rand0:t0.l12:eps=1. Method randp<seed>: a different random direction per problem
                  (scripts/capability.py only; loop_steer.kicks.problem_directions), e.g. kick:randp0:t0.l12:eps=1
   method  key in directions/<file>.pt (v4_cot, v12_cot150, v4_baseline, paired_cot, ...)
@@ -78,7 +80,7 @@ def parse_candidate(text):
     cand = {"name": text.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-"), "kind": kind,
             "method": method, "site": (int(m.group(1) or 0), int(m.group(2))), "coeff": -1.0, "apply": None,
             "layer": None, "perloop": False, "norm_aware": False, "positions": None, "biases": True, "ace": None,
-            "decay": None, "eps": 0.5, "sink": 10.0, "layers": None}
+            "decay": None, "eps": 0.5, "sink": 10.0, "layers": None, "indep": False}
     cand["at"], cand["rel"] = None, False
     if kind == "kick" and not re.fullmatch(r"randp?\d+", method):
         raise ValueError(f"kick takes method rand<k> or randp<seed>: {text!r}")
@@ -112,6 +114,8 @@ def parse_candidate(text):
             cand["eps"] = float(val)
         elif key == "sink" and kind == "kick":
             cand["sink"] = float(val)
+        elif key == "indep" and kind == "kick":
+            cand["indep"] = bool(int(val))
         elif key == "na":
             cand["norm_aware"] = bool(int(val))
         elif key == "bias":
@@ -188,8 +192,15 @@ def intervention_specs(c, dirs, site_index, norms=None, n_loops=None, n_requests
 
             if n_requests is None:
                 raise ValueError(f"{c['name']}: per-request kick directions need n_requests")
-            vecs = problem_directions(int(c["method"][5:]), n_requests, D)
+            seed = int(c["method"][5:])
+            if c.get("indep"):  # one kick per (layer, loop), the j-th with randp<seed + j>'s directions
+                units = [(l, [t] if loops else loops) for l in kl for t in (loops or [None])]
+                return [{**spec, "layer": l, "loops": lp, "vecs": problem_directions(seed + j, n_requests, D)}
+                        for j, (l, lp) in enumerate(units)]
+            vecs = problem_directions(seed, n_requests, D)
             return [{**spec, "layer": l, "vecs": vecs} for l in kl]
+        if c.get("indep"):
+            raise ValueError(f"{c['name']}: indep=1 needs method randp<seed>")
         g = torch.Generator().manual_seed(0)  # same draws as perturb_response.py's random0, random1, ...
         for _ in range(int(c["method"][4:]) + 1):
             vec = torch.randn(D, generator=g)

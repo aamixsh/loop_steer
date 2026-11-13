@@ -2,7 +2,8 @@
 # Selection-set run (50 held-out train prompts, offset 500; 3 CoTs x 3 answers) of intervention candidates for one
 # model: generate, judge, summarize to analysis/TAG.csv. No CoT continuation (unclosed CoTs are reported as such).
 #   GPU=0 [N_LOOPS=2] scripts/run_select.sh ouro|nanbeige|qwen|gptoss|dory TAG CANDIDATE [CANDIDATE ...]
-# SPLIT / OFFSET / NPROMPTS override the prompt set (default train, 500, 50), e.g. SPLIT=test OFFSET=0 NPROMPTS=250.
+# SPLIT / OFFSET / NPROMPTS override the prompt set (default train, 500, 50), e.g. SPLIT=test OFFSET=0 NPROMPTS=250;
+# KIND=harmless uses the harmless prompts of the split instead of the harmful ones.
 # N_LOOPS runs a looped model with that many loops (intervene.py --n-loops; use its own TAG). Skip-existing, so it can be
 # re-run to resume or to add candidates to a TAG. Output of every step goes to its log in data/runs/logs AND to stdout
 # (so a queue watchdog sees progress). DRY=1 prints the commands.
@@ -26,7 +27,7 @@ exec 3>&1
 run() { echo "+ $*" >&3; [ -n "${DRY:-}" ] || "$@"; }
 log() { if [ -n "${DRY:-}" ]; then echo /dev/null; else echo "$L/$1"; fi; }
 
-run $PY scripts/intervene.py --gpu $G --model $MODEL --directions train --split ${SPLIT:-train} --offset ${OFFSET:-500} --n-prompts ${NPROMPTS:-50} $GEN \
+run $PY scripts/intervene.py --gpu $G --model $MODEL --directions train --split ${SPLIT:-train} --kind ${KIND:-harmful} --offset ${OFFSET:-500} --n-prompts ${NPROMPTS:-50} $GEN \
     --tag $TAG --skip-existing --candidates "$@" 2>&1 | tee "$(log ${KEY}_$TAG.log)" >&3 \
     || echo "generation step failed (see $L/${KEY}_$TAG.log)"
 dirs=(); for d in $D/$TAG $D/$TAG/invalid; do [ -d "$d" ] && dirs+=("$d"); done
