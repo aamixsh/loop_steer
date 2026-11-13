@@ -90,6 +90,24 @@ def kick_job(key, tag, sites, n_loops=None, eps="0.5,0.7,1,1.5", limit=100, kl_s
     return gen + " && " + kl
 
 
+def ortho_cands(key, norm_aware=True):
+    """Weight orthogonalization of the model's refusal direction (plain; norm-aware ``na=1`` where the model has gains
+    it changes: Ouro's sandwich norms, Dory's per-dimension update rate) and of a random direction at the same site."""
+    method, site = M[key][2].split(":")
+    return ([f"ortho:{method}:{site}"] + ([f"ortho:{method}:{site}:na=1"] if norm_aware else [])
+            + [f"ortho:random:{site}"])
+
+
+def cap_job(key, dataset, cands, refs=False):
+    """Capability (full set, tag ``cap``) for ``cands``; ``refs`` adds none and hook ablation (every loop), which the
+    earlier MATH-500 / AIME25 ``cap`` runs already have."""
+    method, site = M[key][2].split(":")
+    cands = (["none", f"ablate:{method}:{site}"] if refs else []) + cands
+    samples = 8 if dataset == "aime25" else 1
+    return (f"{PY} scripts/capability.py --gpu $GPU --model {M[key][0]} --dataset {dataset} --samples {samples} "
+            f"--tag cap --skip-existing --candidates " + " ".join(cands))
+
+
 def tune_job(key, coeffs):
     hf, run, ms, _ = M[key]
     method, site = ms.split(":")
@@ -107,6 +125,11 @@ def persona(key, mode, sets=None, n_loops=None):
     return f"{PY} scripts/persona_steer.py --gpu $GPU --model {M[key][0]} --mode {mode}{nl}{s}"
 
 
+def cand_name(c):
+    """File stem of a candidate, as intervene.py names it."""
+    return c.replace(":", "_").replace("=", "").replace(",", "-").replace("+", "-")
+
+
 def out(key, *paths):
     return [f"{M[key][1]}/{p}" for p in paths]
 
@@ -118,6 +141,9 @@ NB_C = ["-1.5", "-2"]  # E9: stronger norm-matched actadd for Nanbeige (E2 picke
 NB_EPS = ["0.5", "0.7", "1", "1.5"]
 DORY_PILOT_SITES = (["t0.l4", "t0.l12"] + [f"t{t}.l{l}" for t in range(4) for l in range(16, 56, 4)]
                     + ["t0.l60", "t0.l68"])
+
+ORTHO_CANDS = {"ouro": ortho_cands("ouro"), "nanbeige": ortho_cands("nanbeige", norm_aware=False),
+               "dory": ortho_cands("dory")}  # Nanbeige is pre-norm: plain orthogonalization is exact, na=1 the same
 
 EXPERIMENTS = {
     "E1": {"title": "Stream norms at every site (for norm-matched actadd, rel=1)", "needs": [], "jobs": {
@@ -183,6 +209,15 @@ EXPERIMENTS = {
                                                kl_tag="kickp_both", kl_sites="t0.l11+t1.l11")},
         "persona": {"hours": 1.5, "cmd": persona("nanbeige", "ablate", ["1=0", "2=1", "all=0,1"])},
     }},
+    "E10": {"title": "Weight orthogonalization (plain, norm-aware, random direction) on the looped models at their "
+                     "trained loops: refusal (test, 250) + MATH-500 (500), AIME25 (30 x 8), MMLU-Pro (280)",
+            "needs": ["E3", "E4"], "jobs": {
+        **{f"{k}_ref": {"hours": h, "cmd": select(k, tag, ORTHO_CANDS[k], test=True)}
+           for k, tag, h in [("ouro", "grid_test", 2.0), ("nanbeige", "grid_test", 2.5), ("dory", "ortho_test", 1.0)]},
+        **{f"{k}_cap": {"hours": h, "cmd": " && ".join(cap_job(k, ds, ORTHO_CANDS[k], refs) for ds, refs in
+                                                       [("math500", False), ("aime25", False), ("mmlupro", True)])}
+           for k, h in [("ouro", 3.0), ("nanbeige", 3.5), ("dory", 3.0)]},
+    }},
 }
 
 OUTPUTS = {  # paths under data/runs pushed after each job (directories or files; missing ones are skipped)
@@ -226,13 +261,20 @@ OUTPUTS = {  # paths under data/runs pushed after each job (directories or files
                                      for e in NB_EPS], "analysis/kick_kl/kickp_both.parquet"),
            "persona": out("nanbeige", "persona/steer_ablate.parquet", "persona/steer_ablate.judged.parquet",
                           "analysis/persona_ablate.csv")},
+    "E10": {**{f"{k}_ref": out(k, *[f"generations/{tag}/{cand_name(c)}.{x}parquet" for c in ORTHO_CANDS[k]
+                                    for x in ("", "scored.")], f"generations/{tag}/invalid")
+               for k, tag in [("ouro", "grid_test"), ("nanbeige", "grid_test"), ("dory", "ortho_test")]},
+            **{f"{k}_cap": out(k, *[f"capability/{ds}/cap/{cand_name(c)}.parquet" for ds in ("math500", "aime25")
+                                    for c in ORTHO_CANDS[k]], "capability/mmlupro/cap") for k in ORTHO_CANDS}},
 }
 # E2 depends on E1's norms only through files; E3's coefficients come from E2 (analysis/actadd_tune.json per model)
 NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],
                "E3": [f"{M[k][1]}/analysis/actadd_tune.json" for k in M]
                + [f"{M['ouro'][1]}/directions/stream_norms_loops6.pt", f"{M['nanbeige'][1]}/directions/stream_norms_loops4.pt",
                   f"{M['dory'][1]}/directions/stream_norms_loops4.pt"],
-               "E6": [f"{M[k][1]}/analysis/persona_tune.json" for k in M]}
+               "E6": [f"{M[k][1]}/analysis/persona_tune.json" for k in M],
+               "E10": [f"{M[k][1]}/generations/grid_test/none.scored.parquet" for k in ("ouro", "nanbeige")]
+               + [f"{M['dory'][1]}/generations/ortho_test/none.scored.parquet"]}
 
 
 def load_cloud_env(path=Path("/workspace/cloud-sync/env.sh")):

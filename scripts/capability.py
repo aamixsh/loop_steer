@@ -14,7 +14,9 @@ slightly pessimistic estimate and compare candidates with each other, not with p
 Writes data/runs/<model>/capability/<dataset>/<tag>/<candidate>.parquet (skip-existing with --skip-existing) and
 prints accuracy and the share of closed samples. Kick candidates with method ``randp<seed>`` give problem i (its index
 among the first ``--limit``) its own random direction (``loop_steer.kicks.problem_directions``; prefix caching off). Datasets come from the Hugging Face Hub (public):
-``HuggingFaceH4/MATH-500`` (500 problems) and ``opencompass/AIME2025`` (30 problems).
+``HuggingFaceH4/MATH-500`` (500 problems), ``opencompass/AIME2025`` (30 problems) and ``TIGER-Lab/MMLU-Pro``
+(``mmlupro``: a fixed subset of 20 test questions per category, 280 in all, drawn with seed 0; options A-J listed in the
+prompt, graded on the option letter in ``\\boxed{}``).
 """
 
 import argparse
@@ -24,6 +26,7 @@ import os
 import re
 
 SUFFIX = "\n\nPlease reason step by step, and put your final answer within \\boxed{}."
+MMLUPRO_PER_CATEGORY = 20
 
 
 def load_problems(dataset: str) -> list[dict]:
@@ -39,6 +42,19 @@ def load_problems(dataset: str) -> list[dict]:
         for name in ("aime2025-I.jsonl", "aime2025-II.jsonl"):
             rows += [json.loads(line) for line in open(hf_hub_download("opencompass/AIME2025", name, repo_type="dataset"))]
         return [{"id": f"aime25-{i}", "question": r["question"], "answer": str(r["answer"])} for i, r in enumerate(rows)]
+    if dataset == "mmlupro":  # fixed subset: 20 questions per category (14) drawn with seed 0, multiple choice A-J
+        import pandas as pd
+
+        d = pd.read_parquet(hf_hub_download("TIGER-Lab/MMLU-Pro", "data/test-00000-of-00001.parquet",
+                                            repo_type="dataset"))
+        d = (d.sort_values("question_id").groupby("category").sample(n=MMLUPRO_PER_CATEGORY, random_state=0)
+             .sort_values(["category", "question_id"]))
+        out = []
+        for r in d.itertuples():
+            opts = "\n".join(f"{chr(65 + k)}. {o}" for k, o in enumerate(r.options))
+            out.append({"id": f"mmlupro-{r.question_id}", "category": r.category, "answer": r.answer,
+                        "question": f"{r.question}\n\nOptions:\n{opts}\n\nAnswer with the letter of the correct option."})
+        return out
     raise ValueError(f"unknown dataset {dataset!r}")
 
 
@@ -87,6 +103,9 @@ def _number(s: str) -> float | None:
 def is_correct(pred: str | None, truth: str) -> bool:
     if pred is None:
         return False
+    if re.fullmatch(r"[A-J]", truth):  # multiple choice (MMLU-Pro): the option letter, alone or leading the answer
+        m = re.fullmatch(r"\(?([A-J])\)?(?:[.:)\s].*)?", re.sub(r"\\text(?:bf)?\{([^}]*)\}", r"\1", pred).strip(), re.S)
+        return m is not None and m.group(1) == truth
     a, b = normalize(pred), normalize(truth)
     if a == b:
         return True
@@ -98,7 +117,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gpu", default="0")
     ap.add_argument("--model", required=True)
-    ap.add_argument("--dataset", choices=["math500", "aime25"], required=True)
+    ap.add_argument("--dataset", choices=["math500", "aime25", "mmlupro"], required=True)
     ap.add_argument("--directions", default="train")
     ap.add_argument("--candidates", required=True, nargs="+")
     ap.add_argument("--tag", default="cap")
@@ -187,7 +206,8 @@ def main():
                 rows.append({"problem_id": prob["id"], "sample": k, "truth": prob["answer"], "pred": pred,
                              "correct": is_correct(pred, prob["answer"]), "closed": closed,
                              "n_tokens": len(o.token_ids), "hit_limit": o.finish_reason == "length",
-                             "response": response, "candidate": c["name"]})
+                             "response": response, "candidate": c["name"],
+                             **({"category": prob["category"]} if "category" in prob else {})})
         df = pd.DataFrame(rows)
         df.to_parquet(out)
         print(f"[{c['name']}] {args.dataset}: accuracy {df.correct.mean():.3f}, closed {df.closed.mean():.3f}, "

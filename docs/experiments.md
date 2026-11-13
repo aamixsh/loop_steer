@@ -37,7 +37,8 @@ One direction (or vector) per model and behaviour, extracted at one site and use
   gpt-oss-20b with the StrongREJECT rubric (refused yes / no, convincingness, specificity). `all_refusal` = mean over
   all CoTs of the share of refusing answers; CoTs that never close are judged whole. Test set: the first 250 test
   prompts. Intervals: `scripts/grid_ci.py` (prompt bootstrap).
-- **Capability**: MATH-500 accuracy (first 100 problems, one sample, CoT cap 8192 tokens, `scripts/capability.py`).
+- **Capability**: MATH-500 accuracy (first 100 problems, one sample, CoT cap 8192 tokens, `scripts/capability.py`); E10 also
+  full MATH-500, AIME25 (8 samples) and an MMLU-Pro subset (280 questions, option letter in `\boxed{}`).
 - **Kick KL**: the unkicked model's own MATH-500 responses teacher-forced with and without the kick; mean KL(clean ||
   kicked) of the next-token distribution over the first 512 response tokens, and top-1 agreement (`kick_kl.py`).
 - **Persona**: trait expression (0-100) and coherence (0-100) by gpt-oss-20b with the persona-vectors repo prompts,
@@ -56,6 +57,7 @@ One direction (or vector) per model and behaviour, extracted at one site and use
 | E7 | Random kicks on MATH-500 (100), per-problem directions, eps 0.5 / 0.7 / 1 / 1.5, each loop's mid-layer (Qwen quarters' mid-layers), plus Ouro at 6 loops (kick in loop 4 or 6), Nanbeige at 4 (loop 2 or 4), Dory at 4; accuracy + KL | - | 22 |
 | E8 | Pilot: Dory at 4 loops kicked at every 4th sublayer of every loop and in the input / output stacks (30 problems, eps 1), KL at every site (eps 0.5, 1) | - | 3.5 |
 | E9 | Nanbeige 2-loop completions: (a) kicks in both loops at once (`kick:...:apply=0,1`, same direction and size) at eps 0.5-1.5 + KL (`kick_kl.py --sites t0.l11+t1.l11`); (b) persona ablation: the trait elicited by the persona-vectors repo's system prompts, its vector projected out in loop 1, 2 or both (+ random-direction control; `persona_steer.py --mode ablate`); (c) refusal grid with norm-matched actadd at c = -1.5 and -2 in loop 1, 2, both (test set) | E2, E5 | 4.5 |
+| E10 | Weight orthogonalization on the looped models at their trained loops: plain, norm-aware (`na=1`; Ouro and Dory, where sandwich-norm gains / the per-dimension update rate change it; Nanbeige is pre-norm, so plain is exact for its writers) and a random direction. Refusal on the test set (250; added to E3 `grid_test` for Ouro and Nanbeige, E4 `ortho_test` for Dory) and capability under tag `cap`: MATH-500 (500), AIME25 (30 x 8), MMLU-Pro (280: 20 per category, seed 0; with none and hook ablation) | E3, E4 | 15 |
 
 Hours are for one 96 GB RTX PRO 6000; the judge (gpt-oss-20b) runs on the same GPU after each generation step.
 Biggest single jobs: E3 nanbeige4 (7 h), E7 ouro4 (6 h), E3 dory4 (5 h).
