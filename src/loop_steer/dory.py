@@ -192,6 +192,8 @@ class DoryBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.num_loops = config.n_recurrent_loops
+        # Optional ``fn(t, input_h, state) -> input_h'``: what is re-injected at the start of loop t (scripts/dory_reinject.py)
+        self.reinject_hook = None
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([DoryDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
@@ -218,7 +220,8 @@ class DoryBackbone(nn.Module):
             h = layer(h, positions=positions, masks=masks, loop_idx=0)
         input_h = state = h
         for t in range(self.num_loops):
-            h = justnorm(state + input_h)
+            x = input_h if self.reinject_hook is None else self.reinject_hook(t, input_h, state)
+            h = justnorm(state + x)
             for layer in self.layers[n_in: n_in + n_rec]:
                 h = layer(h, positions=positions, masks=masks, loop_idx=t)
             state = justnorm(h)

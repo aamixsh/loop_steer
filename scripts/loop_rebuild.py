@@ -56,8 +56,9 @@ def plot(res, path, model_name, direction, T, L, actadd=None):
     import matplotlib.pyplot as plt
 
     verb = "ablate" if actadd is None else f"actadd c={actadd:g} in"
-    show = ["clean"] + [str(t) for t in range(1, T + 1)] + [",".join(map(str, range(1, T + 1)))]
-    colors = dict(zip(show, ["k", "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"][: T + 1] + ["#999999"]))
+    show = [c for c in dict.fromkeys(res.condition) if c != "clean"]
+    show = ["clean"] + show
+    colors = {name: "k" if name == "clean" else plt.cm.tab10(i % 10) for i, name in enumerate(show)}
     fig, axes = plt.subplots(2, 2, figsize=(15, 7.5), sharex=True)
     for j, dname in enumerate(("own", "u")):
         for i, window in enumerate(("prompt_end", "cot")):
@@ -65,7 +66,7 @@ def plot(res, path, model_name, direction, T, L, actadd=None):
             for name in show:
                 d = res[(res.condition == name) & (res.window == window) & (res.dir == dname)].sort_values(["loop", "layer"])
                 ax.plot((d.loop - 1) * L + d.layer, d.sep, color=colors[name], lw=2.4 if name == "clean" else 1.4,
-                        ls=":" if name == show[-1] else "-",
+                        ls=":" if name == ",".join(map(str, range(1, T + 1))) else "-",
                         label="clean" if name == "clean" else f"{verb} loop{'s' * (',' in name)} {name}")
             for t in range(1, T):
                 ax.axvline(t * L - 0.5, color="#ccc", lw=0.8)
@@ -97,6 +98,8 @@ def main():
     ap.add_argument("--blocks", type=int, default=None, help="dense model: treat N equal blocks of layers as loops")
     ap.add_argument("--gen-path", default=None, help="clean traces, relative to generations/")
     ap.add_argument("--actadd", type=float, default=None, help="actadd with this coefficient instead of ablation")
+    ap.add_argument("--n-loops", type=int, default=None, help="run at this many loops (loops beyond the trained ones "
+                                                              "use the last trained loop's own directions)")
     ap.add_argument("--subsets", default=None, help="Semicolon-separated 1-based loop sets, e.g. '1;1,2;3,4' "
                                                     "(default: every subset)")
     args = ap.parse_args()
@@ -122,7 +125,8 @@ def main():
     u = own[sites.index(parse_site(site))]
 
     tagname = f"{method}_{site.replace('.', '')}" + (f"_blocks{args.blocks}" if args.blocks else "") + \
-        (f"_actadd{args.actadd:g}" if args.actadd is not None else "")
+        (f"_actadd{args.actadd:g}" if args.actadd is not None else "") + \
+        (f"_loops{args.n_loops}" if args.n_loops else "")
     if args.plot_only:
         from transformers import AutoConfig
 
@@ -158,9 +162,12 @@ def main():
     print(f"{args.model}: {int(labels.sum())} refusing, {int((1 - labels).sum())} complying CoTs; u = {args.direction}",
           flush=True)
 
-    model = load_model(args.model)
+    model = load_model(args.model, n_loops_override=args.n_loops)
     T, L = n_loops(model.config), len(decoder_layers(model))
     site_idx = {s: i for i, s in enumerate(sites)}
+    t_dirs = max(t for t, _ in sites)  # last loop with its own directions
+    for t in range(t_dirs + 1, T):  # extra loops: the last trained loop's own directions
+        site_idx.update({(t, l): site_idx[(t_dirs, l)] for (t0, l) in sites if t0 == t_dirs})
     if args.blocks:  # dense control: block b of size L // blocks plays loop b
         if T != 1:
             raise SystemExit("--blocks is for standard (non-looped) models")
