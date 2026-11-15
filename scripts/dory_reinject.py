@@ -23,6 +23,9 @@ hook ablation of ``u`` in some loops combined with a change to what is re-inject
   smean       as ``mean`` but for the span of the prelude's own refusal directions (``hh_eoi`` at sublayers 1-16,
               orthonormalized): every component in that subspace set to its mean
   rsmean      the same for a random subspace of the same dimension (control)
+  umean       as ``mean`` but along ``u`` itself (the ablated direction): ``x`` keeps a small refusing / complying
+              difference along ``u`` over the CoT tokens (AUC 0.87, none at ``prompt_end``)
+  uxmean      both: the components in span(``u``, ``d_x``) set to their means
   flat        re-inject the mean prelude output over every token of every trace (unit norm) at every position: keeps
               the stream's usual scale, removes everything token-specific in ``x``
 
@@ -54,7 +57,7 @@ def parse_condition(name):
     if name == "clean":
         return out
     for part in name.split("+"):
-        m = re.fullmatch(r"(abl|drop|proj|rand|smean|rsmean|mean|rmean|flat)(\d+)", part)
+        m = re.fullmatch(r"(abl|drop|proj|rand|smean|rsmean|umean|uxmean|mean|rmean|flat)(\d+)", part)
         if not m:
             raise ValueError(f"bad condition part {part!r}")
         out[m.group(1)] = [int(c) - 1 for c in m.group(2)]
@@ -153,7 +156,9 @@ def main():
     mu_dx, mu_rnd = tot["dx"] / tot["n"], tot["rnd"] / tot["n"]
     x_flat = tot["x"] / tot["x"].norm()
     mu_S, mu_RS = Sd @ (tot["x"] / tot["n"]), RSd @ (tot["x"] / tot["n"])  # mean components in each subspace
-    print(f"mean component of x: d_x {mu_dx:.4f}, random {mu_rnd:.4f}", flush=True)
+    UXd = torch.linalg.qr(torch.stack([Ud, dxd]).T.float())[0].T  # [2, D] orthonormal span(u, d_x)
+    mu_u, mu_UX = float(Ud @ (tot["x"] / tot["n"])), UXd @ (tot["x"] / tot["n"])
+    print(f"mean component of x: d_x {mu_dx:.4f}, u {mu_u:.4f}, random {mu_rnd:.4f}", flush=True)
 
     def set_comp(x, d, target):
         return x + ((target - x.float() @ d).unsqueeze(-1) * d).to(x)
@@ -177,6 +182,10 @@ def main():
                 xt = x - (x.float() @ rndd).unsqueeze(-1).to(x) * rndd.to(x)
             elif t in spec.get("mean", []):
                 xt = set_comp(x, dxd, mu_dx)
+            elif t in spec.get("umean", []):
+                xt = set_comp(x, Ud, mu_u)
+            elif t in spec.get("uxmean", []):
+                xt = set_span(x, UXd, mu_UX)
             elif t in spec.get("rmean", []):
                 xt = set_comp(x, rndd, mu_rnd)
             elif t in spec.get("smean", []):
