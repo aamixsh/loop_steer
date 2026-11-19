@@ -1,0 +1,621 @@
+<title>Later Loops Undo Steering</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,800;1,800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column with figures that break out wider. Light only, by request. Every steering figure is a 3D
+   glass tube with the residual stream as the liquid inside; colour is the only signal: blue = nothing along the
+   direction, red = refusal, black = a random kick, and each persona trait its own colour (violet: a persona averaged
+   over traits). Erasing is a filter in the tube, adding a vector is a drop. */
+:root {
+  --bg: #f4f6f9; --panel: #ffffff; --panel-2: #f6f8fb;
+  --ink: #131a27; --ink-2: #485267; --ink-3: #7d879b; --line: #d6dbe4;
+  --ouro: #2a78d6; --nanbeige: #1baf7a; --dory: #eb6834; --dense: #6b7488;
+  --refuse: #dc2626; --flow: #2563eb; --flow-ink: #2563eb; --kick: #16181d; --steer: #7a4cd9; --steer-soft: rgba(122,76,217,.14); --neutral: #9aa3b2;
+  --own-lane: #e3e7ee; --alt-a: #c9d1dc; --alt-b: #f9fafc; --lane-edge: #b2bac7; --road: #a3abb9;
+  --good: #1f8a4c; --led-off: rgba(19,26,39,.07); --led-bg: #f7f8fa;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --font-body: "Newsreader", Georgia, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --col: 41rem; --wide: 66rem;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 1.1875rem; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 4rem; -webkit-font-smoothing: antialiased }
+a { color: inherit; text-decoration-color: var(--steer); text-underline-offset: 3px }
+:focus-visible { outline: 3px solid var(--steer); outline-offset: 2px; border-radius: 4px }
+.col { max-width: var(--col); margin-inline: auto }
+.wide { max-width: var(--wide); margin-inline: auto }
+section { padding-block: 3.5rem 1rem; display: grid; gap: 1.1rem }
+p { margin: 0; text-wrap: pretty }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 800; line-height: .95; margin: 0; text-wrap: balance }
+h2 { font-size: clamp(2.2rem, 5vw, 3.2rem); font-style: italic; text-transform: uppercase; letter-spacing: .01em }
+h3 { font-size: 1.35rem; text-transform: uppercase; letter-spacing: .03em; font-style: normal; font-weight: 800 }
+.eyebrow { font-family: var(--font-mono); font-size: .74rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3) }
+.eyebrow b { color: var(--steer); font-weight: 600 }
+.lede { font-size: 1.3rem; line-height: 1.5; color: var(--ink-2) }
+.note { font-size: 1rem; color: var(--ink-2) }
+.src { font-family: var(--font-mono); font-size: .68rem; color: var(--ink-3); letter-spacing: .02em; overflow-wrap: anywhere }
+em.m { font-style: normal; font-weight: 600; padding: 0 .2em; border-radius: 3px; white-space: nowrap }
+.m-ouro { color: var(--ouro) } .m-nanbeige { color: var(--nanbeige) } .m-dory { color: var(--dory) } .m-qwen { color: var(--dense) }
+.num { font-family: var(--font-mono); font-size: .92em; font-variant-numeric: tabular-nums; white-space: nowrap }
+
+/* hero */
+.hero { padding-block: 2.5rem 1rem; display: grid; gap: 1.4rem }
+.hero h1 { font-size: clamp(3.2rem, 10.5vw, 7rem); font-style: italic; text-transform: uppercase; letter-spacing: -.01em; line-height: .82 }
+.hero h1 span { color: var(--steer) }
+.byline { font-family: var(--font-mono); font-size: .74rem; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: .4rem 1.2rem }
+.tldr { border-left: 4px solid var(--steer); padding: .2rem 0 .2rem 1.1rem; display: grid; gap: .6rem; font-size: 1.05rem }
+.tldr p::before { content: "▸ "; color: var(--steer); font-family: var(--font-mono) }
+
+/* figure panels */
+.fig { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: clamp(14px, 2.5vw, 26px);
+  display: grid; gap: 1rem; min-width: 0 }
+.fig-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(14px, 2.5vw, 28px); align-items: start }
+@media (max-width: 760px) { .fig-grid { grid-template-columns: minmax(0, 1fr) } }
+.fig-cap { font-size: .95rem; color: var(--ink-2); line-height: 1.45 }
+.stack { display: grid; gap: .8rem; min-width: 0 }
+.row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center }
+.label { font-family: var(--font-mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3) }
+
+/* controls */
+button { font: inherit; color: inherit }
+.chip { font-family: var(--font-mono); font-size: .78rem; padding: .42rem .7rem; border-radius: 999px; border: 1.5px solid var(--line);
+  background: var(--panel-2); cursor: pointer; transition: background .15s, border-color .15s, transform .1s; display: inline-flex;
+  align-items: center; gap: .4rem; min-height: 34px }
+.chip:hover { border-color: var(--ink-3) }
+.chip:active { transform: scale(.97) }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink) }
+.chip .sw { width: .7rem; height: .7rem; border-radius: 50% }
+.chip:disabled { opacity: .4; cursor: not-allowed }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 4px; background: var(--panel-2); padding: 4px;
+  border-radius: 12px; border: 1px solid var(--line) }
+.seg button { border: 0; border-radius: 9px; padding: .55rem .3rem; background: transparent; color: var(--ink-2);
+  font-family: var(--font-display); font-weight: 800; font-size: 1.05rem; text-transform: uppercase; letter-spacing: .03em; cursor: pointer;
+  display: grid; gap: 2px; line-height: 1.05; min-height: 52px; transition: background .15s }
+.seg button small { font-family: var(--font-mono); font-weight: 400; font-size: .62rem; letter-spacing: .04em; opacity: .75; text-transform: none }
+.seg button:hover { background: rgba(19,26,39,.05) }
+.seg button[aria-pressed="true"] { color: #fff; background: repeating-linear-gradient(135deg, var(--steer) 0 7px, color-mix(in srgb, var(--steer) 78%, #000) 7px 14px) }
+.go { font-family: var(--font-display); font-weight: 800; font-size: 1.15rem; text-transform: uppercase; letter-spacing: .04em;
+  background: var(--steer); color: #fff; border: 0; border-radius: 10px; padding: .55rem 1.2rem; cursor: pointer; min-height: 44px }
+.go:hover { filter: brightness(1.08) }
+.go.ghost { background: transparent; color: var(--ink); border: 1.5px solid var(--line) }
+input[type="range"] { width: 100%; accent-color: var(--steer) }
+
+/* scoreboard */
+.board { background: var(--led-bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 10px; display: grid; gap: 6px; color: var(--ink) }
+.board svg { width: 100%; height: auto; display: block }
+.board .bl { font-family: var(--font-mono); font-size: .66rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3);
+  display: flex; justify-content: space-between; gap: .6rem; flex-wrap: wrap }
+.board .bl b { color: var(--ink); font-weight: 600 }
+
+/* step tiles in the hero: always three in a row under the drawing, scaled to the width; each holds its own scoreboard */
+.steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(5px, 1.4vw, 10px) }
+.step { text-align: left; background: var(--panel-2); border: 1.5px solid var(--line); border-radius: 12px;
+  padding: clamp(.4rem, 1.6vw, .75rem) clamp(.45rem, 1.8vw, .85rem); cursor: pointer; display: grid; gap: clamp(.25rem, 1vw, .45rem);
+  align-content: start; min-width: 0; transition: border-color .15s, transform .1s }
+.step:hover { border-color: var(--ink-3) }
+.step[aria-pressed="true"] { border-color: var(--steer); box-shadow: 0 0 0 3px var(--steer-soft) }
+.step .k { font-family: var(--font-display); font-weight: 800; font-size: clamp(.68rem, 2.5vw, 1.08rem); line-height: 1.1; text-transform: uppercase; letter-spacing: .03em }
+.step .led svg { width: 100%; max-width: 190px; height: auto; display: block }
+.step .ci { font-family: var(--font-mono); font-size: clamp(.55rem, 1.7vw, .72rem); letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.step .k, .step .ci { color: var(--c, var(--ink)) } /* blue and red mixed by the tile's refusal rate */
+
+/* track svg */
+.trackbox { position: relative; min-width: 0; display: grid; gap: .5rem }
+.trackbox svg { width: 100%; height: auto; display: block; overflow: visible }
+.trk-loop { font-family: var(--font-display); font-weight: 800; font-style: italic; font-size: 15px; fill: var(--ink-3); letter-spacing: .02em; transition: fill .2s }
+.trk-loop.now { fill: var(--ink) }
+.trk-small { font-family: var(--font-mono); font-size: 10px; fill: var(--ink-3) }
+.trk-tag { font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: .08em }
+.trk-end { font-family: var(--font-mono); font-size: 11px; fill: var(--ink-2) }
+.trk-end.alt { fill: var(--ink-3) }
+.trk-extra { fill: var(--steer) }
+.track-legend { justify-content: center; row-gap: .35rem }
+.track-legend span { display: inline-flex; align-items: center; gap: .35rem }
+.track-legend i { display: inline-block; flex: none; margin: 0; vertical-align: middle; border: 0 }
+.track-legend i.sw-own { width: 1.6rem; height: .75rem; border-radius: 2px; background: var(--own-lane); box-shadow: inset 0 0 0 1px var(--lane-edge) }
+.track-legend i.sw-alt { width: 1.6rem; height: .75rem; border-radius: 2px; box-shadow: inset 0 0 0 1px var(--lane-edge);
+  background: repeating-conic-gradient(var(--alt-a) 0 25%, var(--alt-b) 0 50%) 0 0 / 6px 6px }
+.track-legend i.sw-dot { width: .75rem; height: .75rem; border-radius: 50% }
+.track-legend i.sw-zone { width: 1.6rem; height: .9rem; border-radius: 3px; border: 1.2px dashed var(--ink-3); background: rgba(255,255,255,.8) }
+.track-legend i.sw-pipe { width: 1.6rem; height: .55rem; border: 2px solid var(--ink-2); border-top: 0; border-radius: 0 0 3px 3px }
+.track-legend i.sw-halo { width: .95rem; height: .95rem; border-radius: 50%; border: 1px dashed var(--refuse); background: rgba(220,38,38,.16) }
+.trackbox.mini svg { max-height: 200px }
+/* 3D views: a canvas drawn by the shared WebGL renderer, with HTML labels placed over it */
+.s3 { position: relative; width: 100%; touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; overflow: hidden }
+.s3:active { cursor: grabbing }
+.s3 canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block }
+.s3-labs { position: absolute; inset: 0; pointer-events: none }
+.s3-lab { position: absolute; left: 0; top: 0; white-space: nowrap; line-height: 1; will-change: transform }
+.s3-loop { font-family: var(--font-display); font-weight: 800; font-style: italic; font-size: 15px; color: var(--ink-3); letter-spacing: .02em; text-transform: uppercase; transition: color .2s }
+.s3-loop.now { color: var(--ink) }
+.s3-loop small { display: block; text-align: center; margin-top: 3px; font-family: var(--font-mono); font-size: 9.5px; font-style: normal; font-weight: 600; text-transform: none; letter-spacing: .04em; color: var(--steer) }
+.s3-small { font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); background: rgba(255,255,255,.72); padding: 1px 3px; border-radius: 3px }
+.s3-extra { color: var(--steer) }
+.s3-tag { font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: .08em; background: var(--panel); border: 1.2px solid var(--steer);
+  color: var(--steer); border-radius: 4px; padding: 3px 6px; transition: opacity .2s }
+.s3-tag.erase { border-color: var(--ink-3); border-style: dashed; color: var(--ink-2) }
+.s3-hint { position: absolute; right: 4px; bottom: 2px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); transition: opacity .5s; pointer-events: none }
+.s3-hint.off { opacity: 0 }
+.s3.mini .s3-small { font-size: 9.5px }
+.track-legend i.sw-grad { width: 1.9rem; height: .7rem; border-radius: 999px }
+.track-legend i.sw-extra { width: 1.6rem; height: .7rem; border-radius: 999px; border: 2px solid var(--steer); background: rgba(122,76,217,.08) }
+.track-legend .sw-svg { width: 1rem; height: 1rem; flex: none }
+.track-legend .sw-svg.wide { width: 1.9rem }
+/* the model cards: one model per row; on a wide screen the drawing sits left of the text */
+.cards.models { grid-template-columns: minmax(0, 1fr) }
+@media (min-width: 900px) {
+  .cards.models .card { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); grid-template-rows: auto auto auto auto 1fr; column-gap: 1.6rem;
+    grid-template-areas: "draw head" "draw spec" "draw eqs" "draw desc" "draw ." }
+  .cards.models .card > h3 { grid-area: head } .cards.models .card > .spec { grid-area: spec } .cards.models .card > .eqs { grid-area: eqs }
+  .cards.models .card > p { grid-area: desc } .cards.models .card > .trackbox { grid-area: draw; align-self: center }
+}
+.note.miss { font-size: .86rem; margin-top: -.3rem }
+.note.miss:empty { display: none }
+.norm-key { display: flex; flex-wrap: wrap; gap: .45rem 1.2rem; justify-content: center; font-family: var(--font-mono); font-size: .68rem; color: var(--ink-2); margin-top: .6rem }
+.norm-key span { display: inline-flex; align-items: center; gap: .4rem }
+.norm-def { text-align: center; font-size: .9rem; color: var(--ink-2); margin-top: .5rem }
+.eqs { display: grid; gap: .3rem; font-size: .95rem; padding: .45rem .6rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto }
+.eqs div { display: grid; grid-template-columns: 6.6rem minmax(0, 1fr); align-items: baseline; gap: .4rem; white-space: nowrap }
+.eqs span { font-family: var(--font-mono); font-size: .64rem; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3) }
+.ex-prompt { display: grid; gap: .2rem; font-size: 1rem }
+.verdict { font-weight: 600; color: var(--c) }
+.formula { text-align: center; font-size: 1.1rem; overflow-x: auto }
+.gn-range { position: relative; padding-bottom: 1rem }
+.gn-mark { position: absolute; bottom: 0; transform: translateX(-50%); font-family: var(--font-mono); font-size: .62rem; color: var(--ink-2); white-space: nowrap }
+.gn-mark::before { content: ""; position: absolute; left: 50%; top: -.55rem; width: 1px; height: .45rem; background: var(--ink-2) }
+
+/* two columns of prompts */
+.dots svg { width: 100%; max-width: 340px; height: auto; display: block }
+.split circle { transition: transform .75s cubic-bezier(.3,.7,.2,1), fill-opacity .45s ease }
+.split-h { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; fill: var(--ink-2) }
+.legend { display: flex; flex-wrap: wrap; gap: .4rem 1rem; font-family: var(--font-mono); font-size: .68rem; color: var(--ink-3); align-items: center }
+.legend i { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; border: 1.5px solid var(--ink-2); vertical-align: -1px; margin-right: .3rem }
+
+/* charts */
+.chart svg { width: 100%; height: auto; display: block; overflow: visible }
+.chart text { font-family: var(--font-mono); fill: var(--ink-2); font-size: 11px }
+.chart .t-strong { fill: var(--ink); font-weight: 600 }
+.chart .t-title { font-family: var(--font-display); font-weight: 800; font-size: 15px; text-transform: uppercase; letter-spacing: .03em; fill: var(--ink) }
+.multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px }
+.tip { position: fixed; pointer-events: none; z-index: 20; background: var(--ink); color: var(--bg); font-family: var(--font-mono);
+  font-size: .72rem; line-height: 1.4; padding: .45rem .6rem; border-radius: 8px; max-width: 260px; opacity: 0; transition: opacity .12s }
+.tip.on { opacity: 1 }
+
+/* model cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; display: grid; gap: .5rem; align-content: start; min-width: 0 }
+.card h3 { display: flex; align-items: center; gap: .5rem }
+.card .spec { font-family: var(--font-mono); font-size: .72rem; color: var(--ink-3) }
+.card p { font-size: .95rem; line-height: 1.45; color: var(--ink-2) }
+.dotsw { width: .8rem; height: .8rem; border-radius: 50%; display: inline-block; flex: none }
+
+/* replies */
+.reply { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: .8rem .9rem; font-size: .98rem; line-height: 1.5;
+  display: grid; gap: .35rem; min-width: 0 }
+.reply .who { font-family: var(--font-mono); font-size: .66rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3);
+  display: flex; justify-content: space-between; gap: .5rem }
+.md { display: grid; gap: .45rem; overflow-wrap: anywhere }
+.md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0 }
+.md ul, .md ol { padding-left: 1.3rem; display: grid; gap: .2rem }
+.md .md-h { font-family: var(--font-body); font-size: 1em; font-weight: 600; margin: 0 }
+.md code { font-family: var(--font-mono); font-size: .86em; background: rgba(19,26,39,.05); padding: 0 .2em; border-radius: 3px }
+.md pre { background: rgba(19,26,39,.05); padding: .5rem; border-radius: 6px; overflow-x: auto }
+.md blockquote { border-left: 3px solid var(--line); padding-left: .6rem; color: var(--ink-2) }
+.md table { border-collapse: collapse; font-size: .9em } .md th, .md td { border: 1px solid var(--line); padding: .15rem .4rem }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 0; width: 100% }
+.md math { font-size: 1.05em }
+.reply .md { max-height: 21rem; overflow-y: auto; padding-right: .2rem }
+.terminal .md { gap: .35rem }
+.multiples .span2 { grid-column: span 2 }
+@media (max-width: 420px) { .multiples .span2 { grid-column: auto } }
+.replies { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px }
+@media (max-width: 640px) { .replies { grid-template-columns: minmax(0, 1fr) } }
+.terminal { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); font-family: var(--font-mono); font-size: .74rem;
+  line-height: 1.5; border-radius: 10px; padding: .7rem .8rem; min-height: 6.5em; overflow-wrap: anywhere }
+.terminal .dim { color: var(--ink-3) }
+
+/* gauges (horizontal) */
+.gauge { display: grid; gap: .25rem }
+.gauge .gl { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: .72rem; color: var(--ink-2); gap: .5rem }
+.gauge .gt { position: relative; height: 12px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line) }
+.gauge .gf { position: absolute; inset: 0 auto 0 0; border-radius: 6px; transition: width .7s cubic-bezier(.2,.8,.2,1) }
+.gauge .gm { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); border-radius: 1px }
+
+/* levers */
+.levers { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px }
+.lever { border-top: 6px solid var(--c); background: var(--panel); border-radius: 12px; padding: 14px; display: grid; gap: .5rem; align-content: start;
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line) }
+.lever .verdicts { display: grid; gap: .3rem; font-size: .92rem }
+.lever .verdicts div { display: flex; justify-content: space-between; gap: .6rem; border-bottom: 1px dashed var(--line); padding-bottom: .25rem }
+.lever .verdicts span:last-child { font-family: var(--font-mono); font-size: .78rem; text-align: right }
+
+ul.plain { margin: 0; padding-left: 1.1rem; display: grid; gap: .45rem; font-size: 1rem }
+.callout { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem; display: grid; gap: .5rem; font-size: 1rem }
+.callout h3 { font-size: 1.1rem }
+hr.lane { border: 0; height: 10px; margin: 2rem auto 0; max-width: var(--wide);
+  background: repeating-linear-gradient(90deg, var(--line) 0 28px, transparent 28px 40px); mask: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent) }
+table.mini { border-collapse: collapse; font-family: var(--font-mono); font-size: .74rem; font-variant-numeric: tabular-nums; width: 100% }
+table.mini th, table.mini td { padding: .3rem .4rem; text-align: right; border-bottom: 1px solid var(--line) }
+table.mini th:first-child, table.mini td:first-child { text-align: left }
+table.mini th { color: var(--ink-3); font-weight: 400 }
+.scroll-x { overflow-x: auto }
+details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78rem; color: var(--ink-2) }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important } }
+</style>
+
+<header class="hero wide">
+  <div class="eyebrow">Steering looped language models · <b>interactive draft</b></div>
+  <h1>Later loops <span>undo</span> steering</h1>
+  <p class="lede col" style="margin-inline:0">A looped language model runs every token through the same stack of layers several times. Steer it on an early loop and the loops that follow undo the edit. Steer the last loop, or bake the edit into the weights, and it sticks, except in one model, where the weight edit wrecks everything.</p>
+  <div class="byline"><span id="gen-stamp">Data: test-set runs</span><span>Models: Dory 1.0 4B · Nanbeige4.2-3B · Ouro-1.4B-Thinking · Qwen3-8B</span></div>
+
+  <div class="fig">
+    <div class="trackbox" id="hero-track"></div>
+    <div class="steps" id="hero-steps"></div>
+    <p class="fig-cap">Dory 1.0 4B, trained to run 2 loops, on harmful prompts. The liquid is the model's state on one prompt, and its colour is how far that state points along the refusal direction: blue is none, red is a lot. The refusal signal builds through the entry stack and loop 1. Erasing the refusal direction on both loops puts a filter in the stream at the layers of each loop, and the red drains out. The third run is the same model with the same filters; it only runs two more loops than it was trained for, with no steering, and those loops turn the stream red again. Each tile shows the measured refusal rate on <span id="hero-n"></span> harmful test prompts (StrongREJECT judge) and its 95% interval, in a colour that mixes blue and red by that rate. The colour at the end of the tube follows the same rate; the colour along the way is a sketch. Tap a tile to replay it; drag the model to turn it.</p>
+  </div>
+
+  <div class="tldr col" style="margin-inline:0">
+    <p>In all three looped models, erasing the refusal direction on the first loop barely matters, because the later loops bring refusal back. Erasing it on the last loop alone does most of the job.</p>
+    <p>A dense model behaves differently. Qwen3-8B ignores edits to its first and last quarter and collapses when a middle quarter is edited.</p>
+    <p>Persona vectors and random kicks show the same pattern. Weight edits act on every loop, so no later loop can undo them. They abliterate two looped models cleanly and break the third.</p>
+  </div>
+</header>
+
+<main>
+<section class="col" id="loops">
+  <div class="eyebrow">Setup</div>
+  <h2>Same layers, run again</h2>
+  <p>A standard transformer passes each token through its layers once. A looped model has a shorter stack and runs each token's state through it several times, with the same weights every time. A loop is not a new thought or a new token: it is the same token's state, processed again by the same layers.</p>
+  <p>In the drawings below, each loop of the tube is one loop of the model. The three looped models differ in how one loop hands over to the next and in where they normalise the stream. <em class="m m-dory">Dory</em> adds its input back before every loop and keeps the whole stream at unit length. <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-ouro">Ouro</em> pass the previous loop's output through a shared norm. Every model, Qwen included, normalises what each layer reads. Under each drawing: how one layer updates the stream <i>h</i>, and what happens between loops.</p>
+</section>
+<div class="wide">
+  <div class="cards models" id="model-cards"></div>
+  <div class="norm-key" id="norm-key"></div>
+</div>
+<section class="col">
+  <p>We use the standard steering tools. The refusal direction is the difference in mean activation between prompts the model refuses and prompts it answers. We either erase it from the residual stream at every layer (directional ablation) or add its opposite at one layer (activation addition). In a looped model we can apply either one on any subset of loops. In Qwen we apply it to a subset of quarters.</p>
+</section>
+
+<section class="col" id="switchboard">
+  <div class="eyebrow">Experiment 1 · <b>refusal</b></div>
+  <h2>Erase refusal, one loop at a time</h2>
+  <p>Choose which loops to steer. <b>Erase</b> puts a filter in the stream at every layer of that loop that takes the refusal direction out, so the red drains away there. <b>Add</b> is activation addition: a drop of the opposite direction falls into the stream at one layer. It is blue, the colour of a stream with no refusal, and it washes the red out downstream. The scoreboard shows how often the model still refuses. Under it, each dot is one test prompt, sorted into the column where most of its nine samples land, and coloured by how many of the nine refused (blue: none, red: all); steer and watch them cross over. The ringed dots are the example prompts under the figure.</p>
+</section>
+<div class="wide fig" id="sb-fig">
+  <div class="row" id="sb-models"></div>
+  <div class="trackbox" id="sb-track"></div>
+  <div class="fig-grid">
+    <div class="stack">
+      <div class="label" id="sb-units-label">Steer on these loops</div>
+      <div class="seg" id="sb-units"></div>
+      <div class="row"><span class="label">Tool</span><span id="sb-mode"></span><span class="label" style="margin-left:.6rem">Presets</span><span id="sb-presets"></span></div>
+      <p class="fig-cap" id="sb-cap"></p>
+    </div>
+    <div class="stack">
+      <div class="board" id="sb-board"></div>
+      <div class="dots" id="sb-dots"></div>
+      <div class="legend"><span><i style="background:var(--flow);border-color:var(--flow)"></i>0 of 9 samples refused</span><span><i style="background:rgb(128,68,136);border-color:rgb(128,68,136)"></i>about half</span><span><i style="background:var(--refuse);border-color:var(--refuse)"></i>9 of 9</span><span>first 100 test prompts</span></div>
+    </div>
+  </div>
+  <div class="stack">
+    <div class="row"><span class="label">Read a reply</span><span class="row" id="sb-ex-chips"></span></div>
+    <div class="stack" id="sb-ex" style="gap:.6rem"></div>
+    <p class="note" style="font-size:.9rem">The reply shown is one of the prompt's nine samples, picked to agree with the majority, for the model and loops chosen above. Replies are cut short; the prompts were picked to be mild.</p>
+  </div>
+</div>
+
+<section class="col" id="dense">
+  <div class="eyebrow">Experiment 1 · <b>looped vs dense</b></div>
+  <h2>Last loop, or middle layers</h2>
+  <p>Erase refusal on one stretch of the forward pass at a time and the looped models disagree with the dense one about where it matters. In Qwen the middle quarters do almost everything and its first and last quarters do little. In a looped model the first loop is the weakest place to erase, and the last loop alone does most of the job.</p>
+</section>
+<div class="wide fig">
+  <h3>Where one stretch of erasing matters</h3>
+  <div class="chart scroll-x" id="contrast-chart"></div>
+  <p class="fig-cap">Refusal rate after erasing the refusal direction on one stretch only, drawn over that stretch of the forward pass: red is the share of harmful prompts still refused, blue the share answered. Dory runs 4 loops here, two more than it was trained with; every model at its trained loops is in the panels below. Each of Qwen's quarters is drawn as wide as one of Dory's loops, so its 36 layers line up under Dory's looped stack. Dashed: no steering. Hover a column for its 95% interval.</p>
+</div>
+<section class="col">
+  <p>The two shapes have different causes. In Qwen every layer is different. The middle layers build the refusal signal and the later ones act on it, so an erase in the first quarter is rebuilt by the middle, and by the last quarter the answer no longer depends much on the direction. In a looped model the late loops are the same layers as the early ones. Erase refusal on loop 1 and loop 2 builds it again with the same weights; erase it on the last loop and nothing comes after to rebuild it.</p>
+  <p>Run Dory with four loops instead of the two it was trained with and the pattern sharpens. Erasing refusal on loops 1, 2 and 3 together leaves it at <span class="num" id="d4-123"></span>. Loop 4 alone takes it to <span class="num" id="d4-4"></span>.</p>
+</section>
+<div class="wide fig">
+  <h3>Every model, one stretch at a time</h3>
+  <div class="multiples chart" id="single-multiples"></div>
+  <p class="fig-cap">The same runs as refusal rates. Dashed line: no steering. Dotted line: every loop (every quarter). Hover for 95% prompt-bootstrap intervals.</p>
+</div>
+<section class="col">
+  <p>The same holds with the sign flipped. Adding the refusal direction to harmless prompts makes a looped model refuse them only if the addition reaches the last loop. <span id="plus-qwen"></span> <span id="plus-ouro"></span></p>
+</section>
+<div class="wide fig">
+  <h3>Flip the sign: add refusal to harmless prompts</h3>
+  <div class="chart" id="plus-chart"></div>
+  <p class="fig-cap">Share of 100 harmless prompts refused after adding the refusal direction, at 4 times the strength tuned for the opposite sign, on one loop or on all of them (Qwen: at the start of one quarter, or of all four). Faded bar: every loop at once. Grey bar: a random direction of the same size on every loop, as a control. Where the control scores high too (Ouro, Qwen), the addition has broken the model: its reasoning never closes, and the judge reads the unfinished text as a refusal. Hover a bar for the share of reasoning traces that never close.</p>
+</div>
+
+<section class="col" id="personas">
+  <div class="eyebrow">Experiment 2 · <b>personas</b></div>
+  <h2>Persona vectors wear off</h2>
+  <p>A persona vector shifts a character trait such as optimism or sycophancy (Chen et al., 2025). We add one on a single loop or on every loop, at a strength tuned to keep replies coherent, and a judge scores the trait from 0 to 100.</p>
+</section>
+<div class="wide fig">
+  <div class="row" id="pe-models"></div>
+  <div class="row" id="pe-traits"></div>
+  <p class="note miss" id="pe-missing"></p>
+  <div class="row"><span class="label">Steer on</span><span class="row" id="pe-units"></span></div>
+  <div class="trackbox" id="pe-track"></div>
+  <div class="fig-grid">
+    <div class="stack">
+      <div class="gauge" id="pe-gauge-trait"></div>
+      <div class="gauge" id="pe-gauge-coh"></div>
+      <p class="fig-cap" id="pe-cap"></p>
+    </div>
+    <div class="stack">
+      <div class="label" id="pe-q"></div>
+      <div class="replies" id="pe-replies"></div>
+    </div>
+  </div>
+</div>
+<div class="wide fig">
+  <h3>Mean trait gain by loop</h3>
+  <div class="multiples chart" id="pe-multiples"></div>
+  <p class="fig-cap">Gain in trait score over the unsteered model, averaged over traits, at each model's tuned strength. The last bar in each panel is every loop (every quarter) at once.</p>
+</div>
+<section class="col">
+  <h3>Erase a prompted persona</h3>
+  <p>The reverse test: give the model a system prompt that sets a trait, then erase that trait's vector on some loops. This time the trait builds up on its own, so the stream turns from blue to the trait's own colour without any steering, the way it turned red for refusal. Does a filter on one loop clear it for good?</p>
+</section>
+<div class="wide fig">
+  <div class="row" id="pa-models"></div>
+  <div class="row" id="pa-traits"></div>
+  <p class="note miss" id="pa-missing"></p>
+  <div class="row"><span class="label">Erase on</span><span class="row" id="pa-units"></span></div>
+  <div class="trackbox" id="pa-track"></div>
+  <div class="fig-grid">
+    <div class="stack">
+      <div class="chart" id="pa-chart"></div>
+      <p class="fig-cap" id="pa-cap"></p>
+    </div>
+    <div class="stack">
+      <div class="board" id="pa-board"></div>
+      <div class="gauge" id="pa-gauge-coh"></div>
+      <p class="note" style="font-size:.9rem">Coherence is judged on the same replies. Erasing a persona can break a model as well as change it, so check both.</p>
+    </div>
+  </div>
+</div>
+<div class="wide fig">
+  <h3>Share of the prompted trait erased, by loop</h3>
+  <div class="multiples chart" id="pa-multiples"></div>
+  <p class="fig-cap">How much of what the system prompt adds is gone after erasing the trait on one loop (or quarter): (prompted − erased) ÷ (prompted − no prompt), averaged over traits the prompt raises by at least 15 points (Ouro: 4 of its 7 traits; the others: all). The last bar in each panel is every loop at once. Hover for coherence.</p>
+</div>
+<section class="col">
+  <p>Early erasures wash out again. Run <em class="m m-dory">Dory</em> with four loops and erase the trait on loop 1, 2 or 3: <span class="num" id="pa-d4-1"></span>, <span class="num" id="pa-d4-2"></span> and <span class="num" id="pa-d4-3"></span> of the prompted trait is gone. Loop 4 alone takes away <span class="num" id="pa-d4-4"></span>, the same as every loop (<span class="num" id="pa-d4-all"></span>). With its trained two loops the split is <span class="num" id="pa-d-1"></span> for loop 1 against <span class="num" id="pa-d-2"></span> for loop 2, and <em class="m m-nanbeige">Nanbeige</em> shows <span class="num" id="pa-n-1"></span> against <span class="num" id="pa-n-2"></span>.</p>
+  <p><em class="m m-ouro">Ouro</em> also erases more on later loops (<span class="num" id="pa-o-1"></span> on loop 1, <span class="num" id="pa-o-4"></span> on loop 4), but less cleanly. Erasing optimism on loop 4 overshoots into gloom (<span class="num" id="pa-o-opt"></span>, below the <span class="num" id="pa-o-opt0"></span> it scores with no prompt), and erasing apathy wrecks its replies (coherence <span class="num" id="pa-o-apa"></span>), which the judge then scores as more apathetic. <em class="m m-qwen">Qwen</em> barely responds to the erasure anywhere: <span class="num" id="pa-q-all"></span> with all four quarters.</p>
+</section>
+
+<section class="col" id="kicks">
+  <div class="eyebrow">Experiment 3 · <b>random kicks</b></div>
+  <h2>Random kicks wear off</h2>
+  <p>A kick adds a random direction to every token's state at one layer, sized as a fraction of that state's length. It carries no meaning at all. We kick in the middle of one loop and grade 100 MATH-500 problems.</p>
+</section>
+<div class="wide fig">
+  <div class="row" id="ki-models"></div>
+  <div class="trackbox" id="ki-track"></div>
+  <div class="fig-grid">
+    <div class="stack">
+      <div class="label">Kick on</div>
+      <div class="seg" id="ki-units"></div>
+      <div class="stack" style="gap:.3rem">
+        <div class="row" style="justify-content:space-between"><span class="label">Kick size</span><span class="num" id="ki-eps-label"></span></div>
+        <input type="range" id="ki-eps" min="0" max="3" step="1" value="2" aria-label="Kick size">
+      </div>
+      <div class="row"><button class="go" id="ki-go">Kick</button><span class="note" id="ki-kl"></span></div>
+    </div>
+    <div class="stack">
+      <div class="board" id="ki-board"></div>
+      <div class="dots" id="ki-dots"></div>
+      <div class="legend"><span><i style="background:var(--kick);border-color:var(--kick)"></i>solved</span><span><i></i>wrong or unfinished</span><span>100 MATH-500 problems</span></div>
+    </div>
+  </div>
+</div>
+<section class="col">
+  <p>The cleanest comparison in the post is the same kick at the same site. <span id="ki-same"></span></p>
+  <p>Kick every loop at once and nothing recovers. <em class="m m-ouro">Ouro</em> falls to <span class="num" id="ki-all"></span> at size 0.5, where a single kick on any loop costs at most <span class="num" id="ki-allmax"></span> points.</p>
+</section>
+<div class="wide fig">
+  <h3>Where Dory feels a kick</h3>
+  <div class="chart scroll-x" id="strip-chart"></div>
+  <p class="fig-cap">Dory run with four loops, kicked at every fourth sublayer (size 1, 30 problems). Colour is the change in its next-token predictions (KL divergence from the unkicked run). The first two loops barely register. The entry stack is warmer than loops 1 and 2 because its output is fed into every loop.</p>
+</div>
+<div class="wide fig">
+  <h3>Every kick, every model</h3>
+  <div class="multiples chart" id="kick-multiples"></div>
+  <p class="fig-cap">MATH-500 accuracy after one kick, by loop (rows) and size (columns). Darker is more accurate. The top row of each grid is the first loop.</p>
+</div>
+
+<section class="col" id="extra">
+  <div class="eyebrow">Experiment 4 · <b>extra loops</b></div>
+  <h2>Run two more loops</h2>
+  <p>If later loops undo early steering, extra loops should undo more. Steer every loop a model was trained with, then let the same model run its shared layers two more times, with no steering, before it answers. Nothing about the model changes; it only runs longer. We repeat the three experiments this way: refusal, personas and random kicks.</p>
+</section>
+<div class="wide fig">
+  <div class="row" id="ex-models"></div>
+  <div class="row" id="ex-exps"></div>
+  <div class="trackbox" id="ex-track"></div>
+  <div class="fig-grid">
+    <div class="stack">
+      <div class="row" id="ex-toggle"></div>
+      <p class="fig-cap" id="ex-cap"></p>
+    </div>
+    <div class="stack">
+      <div class="board" id="ex-board"></div>
+      <div class="dots" id="ex-dots"></div>
+    </div>
+  </div>
+</div>
+<section class="col">
+  <p><em class="m m-dory">Dory</em> heals completely in every experiment. <em class="m m-ouro">Ouro</em> recovers from random kicks with two extra loops but not from refusal steering. Nanbeige cannot be tested this way, since beyond two loops it produces gibberish even without steering.</p>
+</section>
+
+<section class="col" id="verdict">
+  <div class="eyebrow">Synthesis</div>
+  <h2>So do looped models self-correct?</h2>
+  <p>Yes, in a specific sense: later loops restore behaviour that an intervention on an earlier loop removed. The scoreboard below puts all three experiments side by side. Each bar is how much of the full effect survives when only that loop is steered.</p>
+</section>
+<div class="wide fig">
+  <div class="row"><span class="label">Kick size in the bottom row</span><span id="vd-eps"></span></div>
+  <div class="chart scroll-x" id="vd-matrix"></div>
+  <p class="fig-cap">Share of the full effect kept when only one loop (or quarter) is steered. Refusal and kicks: drop from the unsteered model, divided by the drop when every loop is steered. Personas: trait gain divided by the gain when every loop is steered. Dashed line in each cell: 100%, the effect of steering every loop. Dory runs 4 loops here, two more than it was trained with, so each of its bars has up to three loops after it. Looped models rise towards the last loop; Qwen peaks in the middle.</p>
+</div>
+<section class="col">
+  <p>It is not a defence. Steer the last loop, or every loop, and all three models fall the way a dense model does. Dense models also recompute an erased direction in their later layers. What they lack is a second pass through the layers that read it.</p>
+</section>
+
+<section class="col" id="reinject">
+  <div class="eyebrow">Why · <b>the first suspect</b></div>
+  <h2>Is it the re-injected input?</h2>
+  <p>Why would a later loop rebuild what an earlier one lost? Start with the model that does it most. <em class="m m-dory">Dory</em> recovers most strongly, and it is the one model that adds its input back before every loop (the shortcut under its loops). That makes the copy a natural suspect: a later loop could rebuild refusal by re-reading the prompt as the entry stack saw it. <em class="m m-ouro">Ouro</em> and <em class="m m-nanbeige">Nanbeige</em> have no copy; each loop only gets the previous loop's output.</p>
+  <p>We tested this on Dory run with four loops. Erase the refusal direction on loops 1 and 2, change what is added back before loops 3 and 4, and measure the refusal signal the stream carries at every sublayer. The reasoning traces are fixed (teacher-forced), so this measures the stream rather than new behaviour. Here the stream's colour follows that measured signal.</p>
+</section>
+<div class="wide fig">
+  <div class="label">Added back before loops 3 and 4</div>
+  <div class="row" id="ri-opts"></div>
+  <div class="trackbox" id="ri-track"></div>
+  <div class="chart scroll-x" id="ri-chart"></div>
+  <div class="fig-grid">
+    <div class="stack"><p class="fig-cap" id="ri-cap"></p><p class="fig-cap">Line chart: refusal signal (how far apart refusing and complying traces sit along the refusal direction) at every sublayer, averaged over each attention + MLP pair, as a share of the unsteered level inside a loop. Dashed: no steering. Faint red: the usual copy.</p></div>
+    <div class="stack"><div class="board" id="ri-board"></div></div>
+  </div>
+</div>
+<section class="col">
+  <p>With the usual copy, loops 3 and 4 rebuild <span class="num" id="ri-usual"></span> of the unsteered signal within a few sublayers. The most direct test strips the erased direction from the copy itself, so nothing added back before loops 3 and 4 tells refusing traces from complying ones along it (the difference shrinks <span id="ri-shrink"></span>). The loops still rebuild <span class="num" id="ri-umean"></span>. The copy only sets where each loop starts: without it the first sublayer or two sit lower, and the loop catches up a few sublayers in. Stripping the entry stack's own refusal direction too gives <span class="num" id="ri-uxmean"></span>; that direction alone, <span class="num" id="ri-mean"></span>; all 17 of the entry stack's refusal directions, <span class="num" id="ri-smean"></span>; the random controls, <span class="num" id="ri-rand"></span>. Stripping the copy on all four loops, the erased ones included, gives <span class="num" id="ri-all"></span>. The model barely notices any of these edits (next-token loss <span class="num" id="ri-nll"></span>).</p>
+  <p>The copy's refusal information is small even when nothing is erased: stripping the erased direction from it in an unsteered run still leaves loops 3 and 4 at <span class="num" id="ri-umean-only"></span>. Only removing the copy altogether dents the rebuild, to <span class="num" id="ri-drop"></span>, and that breaks the model: loss jumps from <span class="num" id="ri-nll-clean"></span> to <span class="num" id="ri-nll-drop"></span>. A flat copy breaks it completely (<span class="num" id="ri-nll-flat"></span>).</p>
+  <p>The models without a copy point the same way: <em class="m m-ouro">Ouro</em> and <em class="m m-nanbeige">Nanbeige</em> still undo <span class="num" id="ri-ouro"></span> and <span class="num" id="ri-nan"></span> of a first-loop erase. So the comeback does not need re-injection, and it does not need refusal to be copied forward. The likelier source is the loops themselves: they work out again that the request should be refused, and write the refusal direction anew.</p>
+  <p class="note">What this does not rule out: the copy still carries what the prompt says, and a loop could work out refusal from that, just as it can from the carried state. Removing that content means removing the copy, which breaks the model, so this test cannot tell the two apart.</p>
+</section>
+
+<section class="col" id="settle">
+  <div class="eyebrow">Why · <b>our reading</b></div>
+  <h2>The answer settles in the first loop</h2>
+  <p>If the loops work refusal out again, why would they? Our reading starts from one measurement: read the model's guess out of the stream after each loop, using its own output head (a logit lens), and compare that guess with the next token it finally predicts. We do this over clean reasoning traces, with no steering.</p>
+</section>
+<div class="wide fig">
+  <div class="legend track-legend" id="st-legend"></div>
+  <div class="chart scroll-x" id="st-chart"></div>
+  <p class="fig-cap" id="st-cap"></p>
+</div>
+<section class="col">
+  <p>A looped model has a usable answer after its first loop; a dense model has none until its last layers. So the later loops of a looped model mostly take a state that is already close to its answer and run the same layers over it again. Whatever computed refusal on loop 1 sees almost the same input on loop 2, and computes it again. On this reading, self-correction needs no repair mechanism: it is the same function applied to a state that has nearly settled, and an erase on an early loop is a small push that the next pass undoes.</p>
+  <p>If that is right, the more settled a model is after loop 1, the more of a loop-1 erase it should undo. The three looped models line up that way (predictions final after loop 1, then share of a loop-1 erase undone): <em class="m m-nanbeige">Nanbeige</em> <span class="num" id="st-nan"></span>, <em class="m m-ouro">Ouro</em> <span class="num" id="st-ouro"></span>, <em class="m m-dory">Dory</em> <span class="num" id="st-dory"></span>.</p>
+</section>
+<div class="wide fig">
+  <div class="fig-grid">
+    <div class="chart" id="st-scatter"></div>
+    <div class="stack">
+      <h3>Settled early, repaired more</h3>
+      <p class="fig-cap">Horizontal: next-token predictions already final after loop 1. Vertical: how much of a loop-1 erase the later loops undo, 1 − (unsteered − loop-1 erase) ÷ (unsteered − every-loop erase). Dory appears twice: as trained (2 loops, hollow dot) and run with 4 loops.</p>
+      <p class="fig-cap">Qwen is left out. Its first quarter has almost no answer yet (1%), and erasing there does little for a different reason: refusal has not formed yet, and its middle layers build it from scratch.</p>
+      <p class="note" style="font-size:.9rem">Three models that differ in many ways, so this is an association, not a test. It fits the other results: Ouro, the least settled after loop 1 of the four-loop runs, is also the one whose extra loops do not bring refusal back.</p>
+    </div>
+  </div>
+</div>
+
+<section class="col" id="edits">
+  <div class="eyebrow">Part 2 · <b>weight edits</b></div>
+  <h2>Bake it into the weights</h2>
+  <p>Hooks need code that runs during inference. The usual attack on open weights bakes the edit into the model instead: project the refusal direction out of every matrix that writes to the residual stream (weight orthogonalization, or abliteration). In a looped model that edit is in place on every loop, like a kick that repeats each time round.</p>
+</section>
+<div class="wide cards" id="edit-cards"></div>
+<section class="col">
+  <p><em class="m m-qwen">Qwen</em>, <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-dory">Dory</em> stop refusing and keep their maths. <em class="m m-ouro">Ouro</em>'s standard edit wipes out its maths, and the same happens with a random direction, so the damage has nothing to do with refusal. A norm-aware edit brings refusal down to <span class="num" id="ed-na-r"></span> but costs nearly half of MATH-500 and most of MMLU-Pro. Hooks still remove Ouro's refusal at no cost, so it resists a recipe, not an attacker who can run code.</p>
+</section>
+
+<section class="col" id="leak">
+  <div class="eyebrow">Part 2 · <b>mechanism</b></div>
+  <h2>Why Ouro breaks</h2>
+  <p>A weight edit projects the refusal direction <i>u</i> out of every matrix that writes to the stream, so no write has anything along <i>u</i>. In a pre-norm model like Qwen or Nanbeige that settles it: each write is added to the stream as it is. Ouro normalises every write before adding it (the second ring of each pair on its card), and a norm multiplies every dimension by its own learned gain. Gains that differ from one dimension to the next turn vectors, so a write with nothing along <i>u</i> comes out of the norm with something along it.</p>
+</section>
+<div class="wide fig">
+  <h3>How a norm puts an erased direction back</h3>
+  <div class="fig-grid">
+    <div class="chart" id="gn-chart"></div>
+    <div class="stack">
+      <div class="formula" id="gn-formula"></div>
+      <p class="fig-cap">Two dimensions instead of 2048. The write <i>x</i> (blue) has nothing along <i>u</i>. The norm rescales each dimension by its gain, which stretches the dashed circle into the ellipse and turns <i>x</i> towards <i>u</i>; the red stretch is what the output now carries along <i>u</i>. With equal gains, <i>g</i> ⊙ <i>u</i> points along <i>u</i> and nothing leaks. A hook removes <i>u</i> after the norm instead, so nothing is left to turn.</p>
+      <div class="stack gn-range" style="gap:.3rem">
+        <div class="row" style="justify-content:space-between"><span class="label">Gains of the two dimensions</span><span class="num" id="gn-g-label"></span></div>
+        <input type="range" id="gn-g" min="0" max="60" step="1" value="30" aria-label="How uneven the gains are">
+        <span class="gn-mark" id="gn-mark">as much as Ouro's norms turn u</span>
+      </div>
+      <div class="row"><span class="label">Remove u with</span><span class="row" id="gn-where"></span></div>
+    </div>
+  </div>
+</div>
+<section class="col">
+  <p>Ouro's write norms turn <i>u</i> by about 18° on average (the cosine between <i>u</i> and <i>g</i> ⊙ <i>u</i> is 0.95; 37° for the worst one). Each write leaks only a little back, but a four-loop pass makes 192 writes. The writers cannot cancel what leaked, because the edit stopped them writing along <i>u</i> at all, and the unedited model does write along <i>u</i> to keep it in check. Then the shared norm between loops turns and rescales the stream again, so the leak compounds from loop to loop.</p>
+</section>
+<div class="wide fig">
+  <h3>The leak, loop by loop</h3>
+  <div class="row"><span class="label">Ouro</span><span class="row" id="lk-kind"></span></div>
+  <div class="trackbox" id="lk-track"></div>
+  <div class="fig-grid">
+    <div class="stack" style="gap:.3rem">
+      <div class="row" style="justify-content:space-between"><span class="label">Loops completed</span><span class="num" id="lk-loop-label"></span></div>
+      <input type="range" id="lk-loop" min="1" max="4" step="1" value="4" aria-label="Loops completed">
+    </div>
+    <p class="fig-cap" id="lk-cap"></p>
+  </div>
+  <div class="chart scroll-x" id="lk-chart"></div>
+  <p class="fig-cap">How much the stream carries along <i>u</i> after each loop (its RMS over tokens), divided by the unedited model's, over 8 reasoning traces. Dashed: the unedited model. Hover a point for its value.</p>
+</div>
+<section class="col">
+  <ul class="plain">
+    <li><b>Leak 1, the write norms.</b> The edited matrices write almost nothing along <i>u</i> (0.001), but the norm after each one rotates some back: 0.09 to 0.17 per write. This alone breaks Ouro, even when the edited direction is random: its replies fall apart with fewer loops too.</li>
+    <li><b>Leak 2, the shared norm between loops.</b> It multiplies whatever leaked by 2 to 3 every loop. A norm-aware edit removes <i>g</i> ⊙ <i>u</i> from each writer instead of <i>u</i>, which closes leak 1 exactly, yet the stream still ends loop 4 at 4.0× the unedited model, and the model loses nearly half its MATH-500 score.</li>
+    <li><b>The other two models.</b> Nanbeige has no norm on its writes and its shared norm shrinks the stream, so neither leak applies (0.16× after loop 2). Dory has no gains, but its per-dimension update rate α plays the same role; its standard edit is weaker than its hooks (26% refusal against 13%), and correcting for α makes it weaker still (62%). Its leftover leak is not explained yet.</li>
+  </ul>
+</section>
+
+<section class="col" id="levers">
+  <div class="eyebrow">Takeaways</div>
+  <h2>Design levers</h2>
+  <p>Each looped model bundles several design choices, so most of this is association across three models. Two choices were tested directly: Ouro's norms explain why its weight edit fails, and Dory's re-injected input does not explain its comeback.</p>
+</section>
+<div class="wide levers" id="lever-cards"></div>
+<section class="col">
+  <div class="callout">
+    <h3>What to do with this</h3>
+    <ul class="plain">
+      <li>For interpretability: probe, patch and steer the last loop first. A null result on an early loop says little about the model.</li>
+      <li>For safety evaluations: none of this stops an attacker who hooks the last loop. A model that resists one weight-editing recipe is not tamper resistant. Fine-tuning attacks are untested here.</li>
+      <li>For architecture: self-correction appears with and without re-injecting the input, and stripping the refusal information from Dory's copy does not stop it. Norm placement decides whether naive weight edits survive.</li>
+    </ul>
+  </div>
+</section>
+
+<hr class="lane">
+<section class="col" id="methods">
+  <div class="eyebrow">Fine print</div>
+  <h2>Methods and limits</h2>
+  <ul class="plain">
+    <li><b>Refusal.</b> 487 harmful test prompts (250 for some loop subsets), 3 reasoning traces per prompt and 3 answers per trace at temperature 0.6, each answer judged by gpt-oss-20b with the StrongREJECT rubric. Unfinished traces are judged whole. Intervals resample prompts.</li>
+    <li><b>Directions.</b> One direction per model, extracted at one site and reused everywhere: Ouro loop 4 layer 16, Nanbeige loop 2 layer 15, Dory loop 1 sublayer 26 (harmful minus harmless prompts), Qwen layer 21.</li>
+    <li><b>Kicks.</b> A random unit direction per problem, times a fraction of the state's norm, added at each loop's middle layer. 100 MATH-500 problems, one sample each, reasoning up to 8192 tokens.</li>
+    <li><b>Personas.</b> Persona-vector method of Chen et al. (2025), 20 questions × 5 samples per setting, trait and coherence judged by gpt-oss-20b. Strengths tuned per model so coherence stays within 10 points of clean.</li>
+    <li><b>Limits.</b> Single runs. One judge with no human calibration. Extra-loop tests run models past their trained loop count. Three looped models, each with several design differences. Leak mechanism on 8 traces.</li>
+    <li><b>Concurrent work.</b> A LessWrong post on Ouro (24 Sep 2026, "A recurrent LLM is quite easy to interpret but complex to steer") also finds steering works best on the last loop. <a href="https://arxiv.org/abs/2610.15218">arXiv 2610.15218</a> and <a href="https://arxiv.org/abs/2610.10625">arXiv 2610.10625</a> link refusal and jailbreaks to the number of loops.</li>
+  </ul>
+  <details><summary>Data sources for every figure</summary><div class="src" id="all-src" style="margin-top:.6rem"></div></details>
+</section>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
