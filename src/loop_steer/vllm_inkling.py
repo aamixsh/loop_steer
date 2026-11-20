@@ -1,4 +1,5 @@
-"""Interventions and activation capture inside vLLM's Inkling 2 Mini (``Inkling2LoopModel``, vLLM PR 69028).
+"""Interventions and activation capture inside vLLM's Inkling 2 Mini (``Inkling2LoopModel``, vLLM PR 69028), compatible
+with vLLM's (breakable) CUDA graphs.
 
 Inkling has no single residual stream. Its 24 layers are tied together by block attention residuals: the outputs of
 each block of 6 layers are summed into a block representation (``stack[b]``; ``stack[0]`` is the embedding), and every
@@ -26,44 +27,90 @@ Spec dicts (tensors may be on CPU), installed with ``LLM.apply_model(functools.p
       final mix before the last norm.
   {"kind": "actadd", "vec": [D], "layer": l, "coeff": c, "loops": None | [t, ...], "positions": None | [cls, ...]}
       resid_pre(l) += coeff * vec in the selected passes (prelude / coda layers: any selection containing -1 or 0).
-  {"kind": "kick", "vec": [D], "layer": l, "eps": e, "loops": ..., "sink_ratio": r}
-      resid_pre(l) += eps * |resid_pre| * unit(vec) per token except attention sinks (position 0 and tokens with
-      |resid_pre| > r * the median of the first forward pass with >= 64 tokens at that site), as ``vllm_hooks``.
-  {"kind": "capture", "n_req": R, "n_windows": W}
+  {"kind": "kick", "vec": [D] | "vecs": [K, D], "layer": l, "eps": e, "loops": ..., "sink_ratio": r}
+      resid_pre(l) += eps * |resid_pre| * unit(vec) per token except attention sinks: position 0, and tokens with
+      |resid_pre| > r * the site's median stream norm (``directions/stream_norms.pt``; the eager hooks of
+      ``vllm_hooks`` use the median of the first forward pass instead). With ``vecs``, a request with
+      ``extra_args["ls_vec"] = k`` gets row k; requests without an index are not kicked (run without prefix caching).
+  {"kind": "capture", "n_req": R, "n_windows": W}   (eager engines only: ``enforce_eager=True``)
       accumulate, per request with ``extra_args["ls_cap"] = (k, [(lo, hi)] * W)`` (k < R), the sum of resid_pre over
       the tokens at positions ``lo <= pos < hi`` of each window at every site, and the token counts. Run without prefix
       caching (cached tokens are not computed) and fetch with ``fetch_capture``.
+  {"kind": "norms"}   (eager engines only)
+      keep the per-token norm of resid_pre at every site (every token but position 0); ``fetch_norms`` returns the
+      median per site (``scripts/stream_norms.py``, for norm-matched activation addition).
 
 Position classes (``positions``): as ``loop_steer.vllm_hooks`` (``extra_args["ls_bounds"]``).
 
-A layer visit no spec touches runs vLLM's fused path unchanged; touched visits run the same ops unfused (short conv,
-then the AttnRes mix), which differs from the fused kernels only in rounding. Needs ``enforce_eager=True``.
+**CUDA graphs.** vLLM captures the forward pass once per batch size and replays it, so nothing an intervention does may
+depend on Python at replay time. Every layer visit therefore runs the same instrumented code whatever is installed: the
+edits are tensor ops on persistent buffers (directions, per-visit on/off weights and coefficients, per-token class and
+kick-slot indices), which ``install`` overwrites in place; an edit that is off multiplies by 0, which leaves the stream
+bit-identical. Inputs are normalized by vLLM's fused mix-and-norm kernel unless an ablation is on at the visit (then the
+fp32 mix is edited before an unfused RMSNorm, ~0.13 nat/token of rounding noise through the NVFP4 experts); the
+selection between the two is a ``torch.where`` on the visit's ablation weight. The per-token buffers are filled from the
+scheduled batch before each forward (``GPUModelRunner.prepare_inputs``). ``register()`` must run in the engine's
+process before the engine is built (``loop_steer.models.prepare_vllm`` does it, with V1 multiprocessing off).
 """
 
 import torch
 
 from loop_steer.vllm_hooks import CLASSES
 
+N_ABL, N_ADD, N_KICK = 2, 4, 4  # spec slots per kind
+MAX_KICK_ROWS = 1024  # per-request kick directions (MATH-500: 500); one more zero row for requests without an index
+
 
 # ---------------------------------------------------------------------- vLLM model runner (v2, ``v1/worker/gpu``)
 def _model_runner():
-    """The worker's GPU model runner, found up the call stack of ``Worker.apply_model`` (as ``vllm_hooks``)."""
+    """The worker's GPU model runner, found up the call stack of ``Worker.apply_model``."""
     import sys
 
     frame = sys._getframe(1)
     while frame is not None:
         runner = getattr(frame.f_locals.get("self"), "model_runner", None)
         if runner is not None and hasattr(runner, "req_states") and hasattr(runner, "prepare_inputs"):
-            _patch_runner(runner)
             return runner
         frame = frame.f_back
     raise RuntimeError("no vLLM model runner up the call stack: call install() through LLM.apply_model")
 
 
-def _patch_runner(runner):
-    """Keep each request's ``SamplingParams.extra_args`` (``runner._ls_extra``) and the batch being run
-    (``runner._ls_batch``): the v2 runner keeps neither in a form the forward pass can read."""
-    cls = type(runner)
+def _token_info(runner, positions, n_tokens):
+    """(request index per token, valid mask, extra_args per request) of the batch being prepared."""
+    b = runner._ls_batch
+    n_reqs = b.num_reqs
+    qsl = b.query_start_loc[: n_reqs + 1]
+    extras = [runner._ls_extra.get(r, {}) for r in b.req_ids[:n_reqs]]
+    tok = torch.arange(n_tokens, device=positions.device)
+    req = torch.searchsorted(qsl[1:].long(), tok, right=True)
+    valid = req < n_reqs
+    return req.clamp(max=max(n_reqs - 1, 0)), valid, extras
+
+
+def _fill_token_buffers(runner):
+    """Per-token class (cls + 1; 0 = none) and kick slot of the batch just prepared, into the model's buffers."""
+    lm = runner._ls_lm
+    g = getattr(lm, "_lsg", None)
+    if g is None or not g.need_tokens:
+        return
+    b = runner._ls_batch
+    n = b.num_tokens_after_padding if hasattr(b, "num_tokens_after_padding") else b.num_tokens
+    positions = b.positions[:n]
+    req, valid, extras = _token_info(runner, positions, n)
+    dev = positions.device
+    bounds = torch.tensor([e.get("ls_bounds", (-1, -1)) for e in extras] or [(-1, -1)], dtype=torch.long, device=dev)
+    P, C = bounds[req, 0], bounds[req, 1]
+    pos = positions.long()
+    c = torch.where(pos < P, 0, torch.where((C < 0) | (pos < C), 1, 2))
+    g.cls[:n] = torch.where(valid & (P >= 0), c + 1, 0)
+    slots = torch.tensor([int(e["ls_vec"]) if "ls_vec" in e else MAX_KICK_ROWS for e in extras] or [MAX_KICK_ROWS],
+                         dtype=torch.long, device=dev).clamp(max=MAX_KICK_ROWS)
+    g.slot[:n] = torch.where(valid, slots[req], MAX_KICK_ROWS)
+
+
+def _patch_runner(cls):
+    """Keep each request's ``extra_args`` and the batch being run (the v2 runner keeps neither in reach of the
+    forward pass), and fill the per-token buffers before every forward."""
     if hasattr(cls, "_ls_orig_add_requests"):
         return
     cls._ls_orig_add_requests, cls._ls_orig_prepare_inputs = cls.add_requests, cls.prepare_inputs
@@ -78,95 +125,43 @@ def _patch_runner(runner):
     def prepare_inputs(self, *args, **kwargs):
         batch = cls._ls_orig_prepare_inputs(self, *args, **kwargs)
         self._ls_batch = batch
+        if getattr(self, "_ls_lm", None) is not None:
+            _fill_token_buffers(self)
         return batch
 
     cls.add_requests, cls.prepare_inputs = add_requests, prepare_inputs
 
 
-def _batch(runner, positions):
-    """(req_ids, extra_args per request, request index per token, valid mask) of the current forward pass."""
-    b = getattr(runner, "_ls_batch", None)
-    if b is None:
-        return None
-    n_reqs = b.num_reqs
-    qsl = b.query_start_loc[: n_reqs + 1]
-    req_ids = list(b.req_ids[:n_reqs])
-    extras = [getattr(runner, "_ls_extra", {}).get(r, {}) for r in req_ids]
-    tok = torch.arange(positions.shape[0], device=positions.device)
-    req = torch.searchsorted(qsl[1:].to(positions.device).long(), tok, right=True)
-    valid = req < n_reqs
-    return req_ids, extras, req.clamp(max=max(n_reqs - 1, 0)), valid
+# ---------------------------------------------------------------------- buffers
+class _Buffers:
+    """Persistent intervention state (fixed addresses: CUDA graphs read these)."""
 
-
-def _token_classes(runner, positions):
-    """Per-token position class (-1: none) and position relative to the end of the prompt (as ``vllm_hooks``)."""
-    n = positions.shape[0]
-    cls = torch.full((n,), -1, dtype=torch.int8, device=positions.device)
-    rel = torch.zeros(n, dtype=torch.long, device=positions.device)
-    info = _batch(runner, positions)
-    if info is None or not info[0]:
-        return cls, rel, info
-    _, extras, req, valid = info
-    b = torch.tensor([e.get("ls_bounds", (-1, -1)) for e in extras], dtype=torch.long, device=positions.device)
-    P, C = b[req, 0], b[req, 1]
-    pos = positions.long()
-    c = torch.where(pos < P, 0, torch.where((C < 0) | (pos < C), 1, 2))
-    cls = torch.where(valid & (P >= 0), c, -1).to(torch.int8)
-    return cls, pos - P, info
-
-
-def is_inkling(model) -> bool:
-    return type(model.model).__name__ == "Inkling2LoopModel"
-
-
-def _unit(v):
-    v = torch.as_tensor(v, dtype=torch.float32)
-    return v / v.norm()
-
-
-class _State:
-    def __init__(self, lm, runner, specs):
-        self.lm, self.runner = lm, runner
-        dev = lm.embed_tokens.weight.device
+    def __init__(self, lm, max_tokens):
         cfg = lm.config
-        self.core = lm.loop_core
+        dev = lm.embed_tokens.weight.device
+        D = cfg.hidden_size
+        core = lm.loop_core
         self.passes = cfg.num_loop_passes
+        self.core = core
         self.n_layers = len(lm.layers)
-        self.ablate, self.actadd, self.kick, self.capture = [], [], [], None
-        for s in specs:
-            k = s["kind"]
-            if k == "ablate":
-                self.ablate.append({**s, "dir": _unit(s["dir"]).to(dev)})
-            elif k == "actadd":
-                self.actadd.append({**s, "vec": torch.as_tensor(s["vec"], dtype=torch.float32).to(dev)})
-            elif k == "kick":
-                self.kick.append({**s, "vec": _unit(s["vec"]).to(dev), "median": None})
-            elif k == "capture":
-                n_sites = self.n_layers + (self.passes - 1) * len(self.core)
-                self.capture = {"sum": torch.zeros(s["n_req"], s["n_windows"], n_sites, cfg.hidden_size,
-                                                   dtype=torch.float32, device=dev),
-                                "count": torch.zeros(s["n_req"], s["n_windows"], dtype=torch.float64, device=dev),
-                                "n_windows": s["n_windows"]}
-            else:
-                raise ValueError(f"unsupported spec kind {k!r} for Inkling")
-        self.fwd = None  # per-forward token info
-
-    # ------------------------------------------------------------------ selection
-    def unit_selected(self, loops, i, pass_idx):
-        if loops is None:
-            return True
-        if i < self.core.start:
-            return -1 in loops or -2 in loops
-        if i >= self.core.stop:
-            return -1 in loops or -3 in loops
-        return pass_idx in loops
-
-    def site_selected(self, loops, i, pass_idx):  # actadd / kick at a layer
-        if loops is None:
-            return True
-        if i in self.core:
-            return pass_idx in loops
-        return -1 in loops or 0 in loops
+        V = self.n_layers + (self.passes - 1) * len(core)
+        f32 = dict(dtype=torch.float32, device=dev)
+        self.abl_dir = torch.zeros(N_ABL, D, **f32)
+        self.abl_on = torch.zeros(N_ABL, V, **f32)  # 1 where the spec ablates at this visit
+        self.abl_any = torch.zeros(V, dtype=torch.bool, device=dev)  # some ablation on at this visit
+        self.abl_cls = torch.ones(N_ABL, 4, **f32)  # token weight by class + 1 (0: no class)
+        self.add_vec = torch.zeros(N_ADD, D, **f32)
+        self.add_coef = torch.zeros(N_ADD, V, **f32)
+        self.add_cls = torch.ones(N_ADD, 4, **f32)
+        self.kick_tab = torch.zeros(N_KICK, MAX_KICK_ROWS + 1, D, **f32)  # unit rows; last row 0
+        self.kick_eps = torch.zeros(N_KICK, V, **f32)
+        self.kick_cls = torch.ones(N_KICK, 4, **f32)
+        self.kick_thr = torch.full((V,), float("inf"), **f32)  # sink threshold on |resid_pre|
+        self.cls = torch.zeros(max_tokens, dtype=torch.long, device=dev)
+        self.slot = torch.zeros(max_tokens, dtype=torch.long, device=dev)
+        self.need_tokens = False
+        self.capture = None  # eager-only analysis state
+        self.norms = None
 
     def visit_index(self, i, pass_idx):
         c = self.core
@@ -176,230 +171,334 @@ class _State:
             return c.start + pass_idx * len(c) + (i - c.start)
         return i + (self.passes - 1) * len(c)
 
-    def touched(self, i, pass_idx):
-        if self.capture is not None:
-            return True
-        if any(self.unit_selected(s.get("loops"), i, pass_idx) for s in self.ablate):
-            return True
-        return any(s["layer"] == i and self.site_selected(s.get("loops"), i, pass_idx)
-                   for s in self.actadd + self.kick)
+    def unit_of(self, i, pass_idx):
+        """Selection test of a visit for ``loops`` (see module doc)."""
+        def sel(loops):
+            if loops is None:
+                return True
+            if i < self.core.start:
+                return -1 in loops or -2 in loops
+            if i >= self.core.stop:
+                return -1 in loops or -3 in loops
+            return pass_idx in loops
+        return sel
 
-    # ------------------------------------------------------------------ token info
-    def tokens(self, positions):
-        """Position classes (per token) of the current forward, computed once per forward pass."""
-        if self.fwd is not None and self.fwd[0] is positions:
-            return self.fwd[1]
-        cls, rel, reqinfo = _token_classes(self.runner, positions)
-        info = {"cls": cls, "rel": rel, "reqinfo": reqinfo}
-        self.fwd = (positions, info)
-        return info
+    def visits(self):
+        c = self.core
+        out = [(i, 0) for i in range(c.start)] + [(i, p) for p in range(self.passes) for i in c]
+        return out + [(i, 0) for i in range(c.stop, self.n_layers)]
 
-    def mask(self, positions, spec):
-        info = self.tokens(positions)
-        cls = info["cls"]
-        pos = spec.get("positions")
-        if pos is None:
-            m = cls >= 0
-        else:
-            m = torch.zeros_like(cls, dtype=torch.bool)
-            for c in pos:
-                m |= cls == CLASSES[c]
-        return m
+    def reset(self):
+        for t in (self.abl_dir, self.abl_on, self.add_vec, self.add_coef, self.kick_tab, self.kick_eps):
+            t.zero_()
+        self.abl_any.zero_()
+        for t in (self.abl_cls, self.add_cls, self.kick_cls):
+            t.fill_(1.0)
+        self.kick_thr.fill_(float("inf"))
+        self.cls.zero_()
+        self.slot.fill_(0)
+        self.need_tokens = False
+        self.capture = self.norms = None
 
-    # ------------------------------------------------------------------ edits
-    def project(self, x, positions, i, pass_idx):
-        """Ablate every selected direction from ``x`` [..., T, D] in place (masked tokens only); returns x."""
-        for s in self.ablate:
-            if not self.unit_selected(s.get("loops"), i, pass_idx):
-                continue
-            m = self.mask(positions, s).to(torch.float32)  # [T]
-            u = s["dir"]
-            coef = (x.float() @ u) * m  # [..., T]
+    # ------------------------------------------------------------------ token weights (graph-safe)
+    def w(self, table, k, T):
+        """[T] per-token weight of spec slot k (class gating)."""
+        return table[k][self.cls[:T]]
+
+    def project(self, x, T, v):
+        """Ablate every slot's direction from ``x`` [..., T, D] in place, weighted by its on-weight at visit v and
+        the tokens' class weights (exactly 0 where off)."""
+        for k in range(N_ABL):
+            u = self.abl_dir[k]
+            wt = self.abl_on[k, v] * self.w(self.abl_cls, k, T)  # [T]
+            coef = (x.float() @ u) * wt
             x.sub_((coef.unsqueeze(-1) * u).to(x.dtype))
         return x
 
-    def add_site(self, partial, positions, i, pass_idx):
-        for s in self.actadd:
-            if s["layer"] == i and self.site_selected(s.get("loops"), i, pass_idx):
-                m = self.mask(positions, s).to(torch.float32).unsqueeze(-1)
-                partial.add_((m * (s["coeff"] * s["vec"])).to(partial.dtype))
-        for s in self.kick:
-            if s["layer"] == i and self.site_selected(s.get("loops"), i, pass_idx):
-                norms = partial.float().norm(dim=-1)
-                if s["median"] is None and partial.shape[0] >= 64:
-                    s["median"] = float(norms.median())
-                m = self.mask(positions, s) & (positions != 0)
-                if s["median"] is not None:
-                    m &= norms <= s.get("sink_ratio", 10.0) * s["median"]
-                delta = (s["eps"] * norms * m.float()).unsqueeze(-1) * s["vec"]
-                partial.add_(delta.to(partial.dtype))
+    def add_site(self, partial, positions, v):
+        T = partial.shape[0]
+        for k in range(N_ADD):
+            wt = (self.add_coef[k, v] * self.w(self.add_cls, k, T)).unsqueeze(-1)
+            partial.add_((wt * self.add_vec[k]).to(partial.dtype))
+        norms = partial.float().norm(dim=-1)
+        ok = (positions != 0) & (norms <= self.kick_thr[v])
+        for k in range(N_KICK):
+            wt = (self.kick_eps[k, v] * self.w(self.kick_cls, k, T) * ok * norms).unsqueeze(-1)
+            partial.add_((wt * self.kick_tab[k][self.slot[:T]]).to(partial.dtype))
 
-    def record(self, partial, positions, i, pass_idx):
+    def record(self, partial, positions, v, runner):  # eager only
+        if self.norms is not None:
+            self.norms.setdefault(v, []).append(partial[positions != 0].float().norm(dim=-1).cpu())
         cap = self.capture
         if cap is None:
             return
-        info = self.tokens(positions)
-        if "cap" not in info:
-            info["cap"] = self._capture_index(positions, info)
-        idx = info["cap"]
-        if idx is None:
-            return
-        k, w_mask = idx  # [T] request slot (-1: none), [W, T] window membership
-        v = self.visit_index(i, pass_idx)
+        T = partial.shape[0]
+        if cap.get("fwd") is not positions:
+            req, valid, extras = _token_info(runner, positions, T)
+            W = cap["n_windows"]
+            slots = [int(e["ls_cap"][0]) if "ls_cap" in e else -1 for e in extras]
+            bounds = [[tuple(b) for b in e["ls_cap"][1]] if "ls_cap" in e else [(0, 0)] * W for e in extras]
+            dev = positions.device
+            slot = torch.tensor(slots or [-1], dtype=torch.long, device=dev)[req]
+            b = torch.tensor(bounds or [[(0, 0)] * W], dtype=torch.long, device=dev)[req]  # [T, W, 2]
+            pos = positions.long().unsqueeze(-1)
+            cap["idx"] = (torch.where(valid, slot, -1), ((pos >= b[..., 0]) & (pos < b[..., 1])).T)
+            cap["fwd"] = positions
+        k, w_mask = cap["idx"]
         h = partial.float()
-        valid = k >= 0
         for w in range(cap["n_windows"]):
-            sel = valid & w_mask[w]
+            sel = (k >= 0) & w_mask[w]
             if sel.any():
                 cap["sum"][:, w, v].index_add_(0, k[sel], h[sel])
                 if v == 0:
                     cap["count"][:, w].index_add_(0, k[sel], torch.ones_like(k[sel], dtype=torch.float64))
 
-    def _capture_index(self, positions, info):
-        reqinfo = info["reqinfo"]
-        if reqinfo is None:
-            return None
-        _, extras, req, valid = reqinfo
-        W = self.capture["n_windows"]
-        slots, bounds = [], []
-        for extra in extras:
-            cap = extra.get("ls_cap")
-            if cap is None:
-                slots.append(-1)
-                bounds.append([(0, 0)] * W)
-            else:
-                slots.append(int(cap[0]))
-                bounds.append([tuple(b) for b in cap[1]])
-        dev = positions.device
-        slot = torch.tensor(slots, dtype=torch.long, device=dev)[req]
-        b = torch.tensor(bounds, dtype=torch.long, device=dev)[req]  # [T, W, 2]
-        pos = positions.long().unsqueeze(-1)
-        w_mask = ((pos >= b[..., 0]) & (pos < b[..., 1])).T  # [W, T]
-        k = torch.where(valid, slot, torch.full_like(slot, -1))
-        return k, w_mask
+
+def _buffers(lm):
+    g = getattr(lm, "_lsg", None)
+    if g is None:
+        from vllm.config import get_current_vllm_config
+
+        max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        g = lm._lsg = _Buffers(lm, max_tokens + 64)
+    return g
 
 
-def _visit(self, st, i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm, positions, tau):
-    """Unfused ``Inkling2LoopModel._run_layer`` (TP 1) with the interventions of ``st``."""
+# ---------------------------------------------------------------------- the layer visit
+def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, positions, tau):
+    """``Inkling2LoopModel._run_layer`` (TP 1) with the interventions of ``self._lsg``: short conv and AttnRes mix
+    unfused (the mix-and-norm fused, as vLLM's ``conv_mix``, unless an ablation is on). Returns the number of
+    completed blocks and, at the last visit only, the final normalized output (the other visits' outputs would be
+    the next visit's inputs, which every visit recomputes from the stack)."""
     from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
     from vllm.models.inkling2.nvidia.ops.norm import rms_norm
 
+    g = _buffers(self)
     layer = self.layers[i]
     owner = layer.conv_states[pass_idx]
     core = self.loop_core
     partial = stack[num_blocks]
-    restart = i == core.start and pass_idx > 0
+    T = partial.shape[0]
+    v = g.visit_index(i, pass_idx)
+    on = g.abl_any[v]  # 0-dim bool: some ablation at this visit
 
     if num_blocks == 0 and i == 0:
-        st.project(stack[0], positions, i, pass_idx)  # the embedding (prelude selected)
-    st.add_site(partial, positions, i, pass_idx)
-    st.record(partial, positions, i, pass_idx)
+        g.project(stack[0], T, v)  # the embedding (prelude selected)
+    g.add_site(partial, positions, v)
+    g.record(partial, positions, v, getattr(self, "_ls_runner", None))
 
-    # Attention inputs. Without ablation here, the mixes are normalized in the same fused kernel as vLLM's path
-    # (bit-identical inputs: the NVFP4 activation quantization of the experts turns any rounding difference into a
-    # visible one); with ablation, the fp32 mixes are edited before their norm.
-    ablate_here = any(st.unit_selected(s.get("loops"), i, pass_idx) for s in st.ablate)
-    n_in = layer.num_attn_inputs
     norm = layer.attn_norm
+    n_in = layer.num_attn_inputs
     messages = None
     if bank is not None:
         messages = attn_res(bank[:1], bank[1], None, self.message_queries[i - core.start], None, 0.0, True)
-        st.project(messages, positions, i, pass_idx)
+        g.project(messages, T, v)
     if num_blocks == 0:
-        if ablate_here:
-            dests = partial.float().unsqueeze(0).expand(n_in, -1, -1).contiguous()
-            st.project(dests, positions, i, pass_idx)
-            attn_inputs = [rms_norm(dests[j], norm.weight[j], norm.eps, torch.bfloat16) for j in range(n_in)]
-        else:
-            attn_inputs = [norm(partial, j) for j in range(n_in)]
+        fused = [norm(partial, j) for j in range(n_in)]
+        dests = partial.float().unsqueeze(0).expand(n_in, -1, -1).contiguous()
+        g.project(dests, T, v)
+        attn_inputs = [torch.where(on, rms_norm(dests[j], norm.weight[j], norm.eps, torch.bfloat16), fused[j])
+                       for j in range(n_in)]
     else:
         query = self.attn_res.attn_queries[i - 1]
-        if messages is not None or ablate_here:
-            dests = attn_res(stack[:num_blocks], partial, None, query, None, 0.0, True)
-            st.project(dests, positions, i, pass_idx)
-            if messages is not None:
-                d3, w3 = dests, norm.weight
-                if layer.is_local:
-                    d3, w3 = dests[:1].expand(3, -1, -1), norm.weight.expand(3, -1)
-                attn_inputs = layer.blend(slice(0, 3), d3, messages[:3].contiguous(), w3, norm.eps)
-            else:
-                attn_inputs = [rms_norm(dests[j], norm.weight[j], norm.eps, torch.bfloat16)
-                               for j in range(dests.shape[0])]
+        dests = attn_res(stack[:num_blocks], partial, None, query, None, 0.0, True)
+        g.project(dests, T, v)
+        if messages is not None:
+            d3, w3 = dests, norm.weight
+            if layer.is_local:
+                d3, w3 = dests[:1].expand(3, -1, -1), norm.weight.expand(3, -1)
+            attn_inputs = layer.blend(slice(0, 3), d3, messages[:3].contiguous(), w3, norm.eps)
         else:
-            attn_inputs = attn_res(stack[:num_blocks], partial, None, query, norm.weight, norm.eps, True)
+            fused = attn_res(stack[:num_blocks], partial, None, query, norm.weight, norm.eps, True)
+            unfused = torch.stack([rms_norm(dests[j], norm.weight[j], norm.eps, torch.bfloat16)
+                                   for j in range(dests.shape[0])])
+            attn_inputs = torch.where(on, unfused, fused)
     attn_partial = layer.attention(positions, attn_inputs, tau, pass_idx=pass_idx)
     attn_out = layer.attn_sconv(attn_partial, positions, owner=owner).contiguous()
-    st.project(attn_out, positions, i, pass_idx)
+    g.project(attn_out, T, v)
 
-    # MLP input: the blocks with (partial +) attn_out
     first = i % self.block_size == 0
     mq = self.attn_res.mlp_queries[i]
     mnorm = layer.mlp_norm
     src = (stack[: num_blocks + 1], attn_out, None) if first else (stack[:num_blocks], partial, attn_out)
-    if messages is not None or ablate_here:
-        mlp_dests = attn_res(*src, mq, None, 0.0, True)
-        st.project(mlp_dests, positions, i, pass_idx)
-        if messages is not None:
-            mlp_in = layer.blend(slice(3, 4), mlp_dests, messages[3:].contiguous(), mnorm.weight, mnorm.eps)
-        else:
-            mlp_in = [rms_norm(mlp_dests[0], mnorm.weight[0], mnorm.eps, torch.bfloat16)]
+    mlp_dests = attn_res(*src, mq, None, 0.0, True)
+    g.project(mlp_dests, T, v)
+    if messages is not None:
+        mlp_in = layer.blend(slice(3, 4), mlp_dests, messages[3:].contiguous(), mnorm.weight, mnorm.eps)
     else:
-        mlp_in = attn_res(*src, mq, mnorm.weight, mnorm.eps, True)
+        fused = attn_res(*src, mq, mnorm.weight, mnorm.eps, True)
+        mlp_in = torch.where(on, rms_norm(mlp_dests[0], mnorm.weight[0], mnorm.eps, torch.bfloat16)[None], fused)
 
     residual = None if first else partial
     if residual is None:
         num_blocks += 1
     layer.mlp_sconv(layer.mlp(mlp_in[0], pass_idx=pass_idx), positions, addend=attn_out, residual=residual,
                     out=stack[num_blocks], owner=owner)
-    st.project(stack[num_blocks], positions, i, pass_idx)
+    g.project(stack[num_blocks], T, v)
 
-    last = i == self.config.num_hidden_layers - 1
-    if last and st.ablate:
-        mix = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, None, 0.0, True)
-        st.project(mix, positions, i, pass_idx)
-        outputs = rms_norm(mix, next_norm.weight[0], next_norm.eps, torch.bfloat16) if next_norm is not None else mix
-        return num_blocks, outputs
-    outputs = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query,
-                       None if next_norm is None else next_norm.weight, 0.0 if next_norm is None else next_norm.eps,
-                       True)
-    return num_blocks, outputs
+    if i != self.config.num_hidden_layers - 1:
+        return num_blocks, None
+    mix = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, None, 0.0, True)
+    g.project(mix, T, v)
+    fused = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, next_norm.weight, next_norm.eps, True)
+    return num_blocks, torch.where(on, rms_norm(mix, next_norm.weight[0], next_norm.eps, torch.bfloat16), fused)
 
 
-def _patched_run_layer(self, i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm, positions, tau,
-                       plan):
-    st = getattr(self, "_ls_state", None)
-    if st is None or not st.touched(i, pass_idx):
-        return self._ls_orig_run_layer(i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm,
-                                       positions, tau, plan)
-    return _visit(self, st, i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm, positions, tau)
+def _run_layer(self, i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm, positions, tau, plan):
+    return _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, positions, tau)
 
 
-def _patch(lm):
-    cls = type(lm)
-    if not hasattr(cls, "_ls_orig_run_layer"):
-        cls._ls_orig_run_layer = cls._run_layer
-        cls._run_layer = _patched_run_layer
+def register():
+    """Patch vLLM's Inkling loop model and GPU model runner (in the engine's process, before the engine is built)."""
+    from vllm.models.inkling2.nvidia.loop import Inkling2LoopModel
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    if not getattr(Inkling2LoopModel, "_ls_patched", False):
+        Inkling2LoopModel._ls_orig_run_layer = Inkling2LoopModel._run_layer
+        Inkling2LoopModel._run_layer = _run_layer
+        Inkling2LoopModel._ls_patched = True
+    _patch_runner(GPUModelRunner)
+
+
+# ---------------------------------------------------------------------- install
+def is_inkling(model) -> bool:
+    return type(model.model).__name__ == "Inkling2LoopModel"
+
+
+def _cls_row(positions):
+    row = torch.ones(4)
+    if positions is not None:
+        row.zero_()
+        for c in positions:
+            row[CLASSES[c] + 1] = 1.0
+    return row
+
+
+def _sink_thresholds(g, ratio):
+    """ratio * the median stream norm of every site (directions/stream_norms.pt), as [V]."""
+    from loop_steer.models import INKLING_ID
+    from loop_steer.paths import run_dir
+
+    path = run_dir(INKLING_ID) / "directions" / "stream_norms.pt"
+    if not path.exists():
+        return None
+    d = torch.load(path, weights_only=False)
+    med = {tuple(s): float(x) for s, x in zip(d["sites"], d["norms"])}
+    out = torch.full((len(g.visits()),), float("inf"))
+    for v, (i, p) in enumerate(g.visits()):
+        site = (p, i) if i in g.core else (0, i)
+        if site in med:
+            out[v] = ratio * med[site]
+    return out
 
 
 def clear(model):
-    model.model._ls_state = None
+    g = getattr(model.model, "_lsg", None)
+    if g is not None:
+        with torch.inference_mode():  # the buffers were made during vLLM's (inference-mode) profile run
+            g.reset()
     return True
 
 
 def install(model, specs):
-    """Remove previously installed specs, then install ``specs`` (call through ``LLM.apply_model``)."""
+    """Overwrite the intervention buffers with ``specs`` (call through ``LLM.apply_model``)."""
+    with torch.inference_mode():  # the buffers were made during vLLM's (inference-mode) profile run
+        return _install(model, specs)
+
+
+def _install(model, specs):
     lm = model.model
-    _patch(lm)
-    lm._ls_state = None
-    if specs:
-        lm._ls_state = _State(lm, _model_runner(), specs)
+    if not getattr(type(lm), "_ls_patched", False):
+        raise RuntimeError("vllm_inkling.register() was not called before the engine was built")
+    runner = _model_runner()
+    runner._ls_lm = lm
+    lm._ls_runner = runner
+    g = _buffers(lm)
+    g.reset()
+    visits = g.visits()
+    n = {"ablate": 0, "actadd": 0, "kick": 0}
+    sink = None
+    for s in specs or []:
+        k = s["kind"]
+        for opt in ("ref", "decay", "layers"):
+            if s.get(opt) is not None:
+                raise ValueError(f"{k} spec option {opt!r} is not implemented for Inkling")
+        if k == "capture":
+            g.capture = {"sum": torch.zeros(s["n_req"], s["n_windows"], len(visits), g.abl_dir.shape[1],
+                                            dtype=torch.float32, device=g.abl_dir.device),
+                         "count": torch.zeros(s["n_req"], s["n_windows"], dtype=torch.float64, device=g.abl_dir.device),
+                         "n_windows": s["n_windows"]}
+            continue
+        if k == "norms":
+            g.norms = {}
+            continue
+        if k not in n:
+            raise ValueError(f"unsupported spec kind {k!r} for Inkling")
+        j = n[k]
+        n[k] += 1
+        if j >= {"ablate": N_ABL, "actadd": N_ADD, "kick": N_KICK}[k]:
+            raise ValueError(f"too many {k} specs")
+        sel = s.get("loops")
+        if s.get("positions") is not None:
+            g.need_tokens = True
+        row = _cls_row(s.get("positions"))
+        if k == "ablate":
+            u = torch.as_tensor(s["dir"], dtype=torch.float32)
+            g.abl_dir[j] = (u / u.norm()).to(g.abl_dir.device)
+            on = torch.tensor([1.0 if g.unit_of(i, p)(sel) else 0.0 for i, p in visits])
+            g.abl_on[j] = on.to(g.abl_on.device)
+            g.abl_cls[j] = row.to(g.abl_cls.device)
+        else:
+            def at_site(i, p):
+                if i != s["layer"]:
+                    return False
+                if sel is None:
+                    return True
+                return p in sel if i in g.core else (-1 in sel or 0 in sel)
+            if k == "actadd":
+                g.add_vec[j] = torch.as_tensor(s["vec"], dtype=torch.float32).to(g.add_vec.device)
+                g.add_coef[j] = torch.tensor([float(s["coeff"]) if at_site(i, p) else 0.0 for i, p in visits]
+                                             ).to(g.add_coef.device)
+                g.add_cls[j] = row.to(g.add_cls.device)
+            else:
+                if "vecs" in s and s["vecs"] is not None:
+                    vecs = torch.as_tensor(s["vecs"], dtype=torch.float32)
+                    if len(vecs) > MAX_KICK_ROWS:
+                        raise ValueError(f"at most {MAX_KICK_ROWS} per-request kick directions")
+                    g.kick_tab[j, : len(vecs)] = (vecs / vecs.norm(dim=-1, keepdim=True)).to(g.kick_tab.device)
+                    g.need_tokens = True
+                else:
+                    u = torch.as_tensor(s["vec"], dtype=torch.float32)
+                    g.kick_tab[j, :MAX_KICK_ROWS] = (u / u.norm()).to(g.kick_tab.device)
+                g.kick_eps[j] = torch.tensor([float(s["eps"]) if at_site(i, p) else 0.0 for i, p in visits]
+                                             ).to(g.kick_eps.device)
+                g.kick_cls[j] = row.to(g.kick_cls.device)
+                ratio = s.get("sink_ratio", 10.0)
+                if sink is not None and sink != ratio:
+                    raise ValueError("kick specs with different sink ratios")
+                sink = ratio
+    if (g.capture is not None or g.norms is not None) and not runner.model_config.enforce_eager:
+        raise RuntimeError("capture / norms run Python at every forward: build the engine with enforce_eager=True")
+    g.abl_any.copy_((g.abl_on > 0).any(0))
+    if sink is not None:
+        thr = _sink_thresholds(g, sink)
+        if thr is not None:
+            g.kick_thr.copy_(thr.to(g.kick_thr.device))
+    if not g.need_tokens:  # every token in every class slot weighs 1, and fixed kick rows are all equal
+        g.cls.zero_()
+        g.slot.zero_()
     return True
+
+
+def fetch_norms(model):
+    """{visit index: median resid_pre norm} over every token seen since ``install``."""
+    g = model.model._lsg
+    return {v: float(torch.cat(x).median()) for v, x in g.norms.items()}
 
 
 def fetch_capture(model, reset=True):
     """(sums [R, W, S, D] fp32, counts [R, W]) on CPU; with ``reset``, zero them."""
-    st = model.model._ls_state
-    cap = st.capture
+    cap = model.model._lsg.capture
     out = (cap["sum"].cpu(), cap["count"].cpu())
     if reset:
         cap["sum"].zero_()

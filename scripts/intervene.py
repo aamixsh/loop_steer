@@ -313,11 +313,11 @@ def main():
         from vllm import LLM, SamplingParams
 
         from loop_steer import vllm_hooks
-        from loop_steer.models import loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
+        from loop_steer.models import is_inkling, loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
 
         as_ids = prepare_vllm(args.model)
         llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
-                  max_model_len=args.max_model_len, enforce_eager=uses_hooks,
+                  max_model_len=args.max_model_len, enforce_eager=uses_hooks and not is_inkling(args.model),
                   hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
 
         def make_generate(n_tokens):

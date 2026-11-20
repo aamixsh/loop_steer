@@ -139,7 +139,7 @@ def _token_classes(runner, positions):
 
 def install(model, specs):
     """Remove previously installed hooks, then install ``specs``."""
-    if _is_inkling(model):  # no per-layer residual stream: its own instrumentation (loop_steer.vllm_inkling)
+    if _is_inkling(model):  # no per-layer residual stream: its own instrumentation (CUDA-graph safe)
         from loop_steer import vllm_inkling
 
         return vllm_inkling.install(model, specs)

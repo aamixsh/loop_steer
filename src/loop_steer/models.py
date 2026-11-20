@@ -224,5 +224,10 @@ def prepare_vllm(model_name: str) -> bool:
         register()
         return True
     if is_inkling(model_name):  # token ids from the HF template (= vLLM's Inkling renderer; no generation prefix)
+        # graph-safe instrumentation (loop_steer.vllm_inkling), patched into vLLM in this process before the engine
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        from loop_steer.vllm_inkling import register
+
+        register()
         return True
     return False

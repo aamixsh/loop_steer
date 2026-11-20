@@ -48,6 +48,10 @@ def main():
         raise FileNotFoundError(f"no clean traces under {rd / 'generations'} (looked for {TRACES})")
     df = pd.read_parquet(path).drop_duplicates(["prompt_idx", "cot_rep"]).head(args.n_seqs)
     tok = load_tokenizer(args.model)
+    from loop_steer.models import is_inkling
+
+    if is_inkling(args.model):  # vLLM as served (loop_steer.vllm_inkling: resid_pre = the running partial block)
+        return vllm_norms(args, df, tok, path, out)
     model = load_model(args.model, n_loops_override=args.n_loops)
     st = structure(model)
     acc = {}
@@ -64,6 +68,35 @@ def main():
     norms = torch.tensor([float(torch.cat(acc[s]).median()) for s in sites])
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"sites": sites, "norms": norms, "n_loops": st.T if st.looped else 1}, out)
+    print(f"{len(df)} traces from {path.name}; {len(sites)} sites; norms {norms.min():.1f}-{norms.max():.1f} -> {out}")
+
+
+def vllm_norms(args, df, tok, path, out):
+    import functools
+
+    import torch
+    from vllm import LLM, SamplingParams
+
+    from loop_steer import vllm_inkling
+    from loop_steer.cot import format_prompt
+    from loop_steer.models import loop_overrides, model_sites, prepare_vllm, vllm_kwargs, vllm_model
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    prepare_vllm(args.model)
+    seqs = []
+    for r in df.itertuples():
+        ids = tok(format_prompt(tok, r.prompt), add_special_tokens=False).input_ids
+        seqs.append(ids + tok.encode(r.cot, add_special_tokens=False)[: args.max_cot_tokens])
+    llm = LLM(model=vllm_model(args.model), enforce_eager=True, enable_prefix_caching=False, seed=0,
+              max_model_len=max(map(len, seqs)) + 8, gpu_memory_utilization=0.6,
+              hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
+    sites = model_sites(llm.llm_engine.model_config.hf_config)
+    llm.apply_model(functools.partial(vllm_inkling.install, specs=[{"kind": "norms"}]))
+    llm.generate([{"prompt_token_ids": s} for s in seqs], SamplingParams(max_tokens=1, temperature=0.0), use_tqdm=False)
+    med = llm.apply_model(vllm_inkling.fetch_norms)[0]
+    norms = torch.tensor([med[v] for v in range(len(sites))])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"sites": sites, "norms": norms, "n_loops": max(t for t, _ in sites) + 1}, out)
     print(f"{len(df)} traces from {path.name}; {len(sites)} sites; norms {norms.min():.1f}-{norms.max():.1f} -> {out}")
 
 
