@@ -68,7 +68,15 @@ def _is_looped(model) -> bool:
     return _is_ouro(model) or hasattr(model.model, "num_loops")
 
 
+def _is_inkling(model) -> bool:
+    return type(model.model).__name__ == "Inkling2LoopModel"
+
+
 def clear(model):
+    if _is_inkling(model):
+        from loop_steer import vllm_inkling
+
+        return vllm_inkling.clear(model)
     for h in getattr(model, "_ls_handles", []):
         h.remove()
     model._ls_handles = []
@@ -131,6 +139,10 @@ def _token_classes(runner, positions):
 
 def install(model, specs):
     """Remove previously installed hooks, then install ``specs``."""
+    if _is_inkling(model):  # no per-layer residual stream: its own instrumentation (loop_steer.vllm_inkling)
+        from loop_steer import vllm_inkling
+
+        return vllm_inkling.install(model, specs)
     clear(model)
     layers = model.model.layers
     ouro = _is_ouro(model)

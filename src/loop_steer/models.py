@@ -13,6 +13,13 @@ GPT_OSS_ID = "openai/gpt-oss-20b"  # MoE (32 experts, top-4), MXFP4 experts; sam
 GPT_OSS_REVISION = "6cee5e81ee83917806bbde320786a8fb61efebee"
 DORY_ID = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16"  # looped nGPT; our implementation (loop_steer.dory)
 DORY_REVISION = "b366b87f762ea334ba3eb55912031baba1515810"
+# Inkling 2 Mini: looped MoE (prelude 0-5, core 6-17 x 3 passes, coda 18-23), NVFP4 / MXFP8 experts. Needs the separate
+# environment ``.venv-inkling`` (vLLM PR 69028; see ``envs/inkling``) and runs through vLLM only (``vllm_inkling``).
+INKLING_ID = "thinkingmachines/Inkling-2-Mini"
+INKLING_REVISION = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
+INKLING_VARLOOP_ID = "thinkingmachines/TML-d24-varloop-research"  # trained for 1-3 passes (text_config.loop_num_passes)
+INKLING_VARLOOP_REVISION = "767c9d0250aa2938e289e50ca6db5f1b39ebae74"
+INKLING = {INKLING_ID: INKLING_REVISION, INKLING_VARLOOP_ID: INKLING_VARLOOP_REVISION}
 
 # Looped models: pinned (revision, loop-count config attribute). Custom code => trust_remote_code.
 LOOPED = {
@@ -28,6 +35,10 @@ def is_ouro(model_name: str) -> bool:
 
 def is_dory(model_name: str) -> bool:
     return "dory" in model_name.lower()
+
+
+def is_inkling(model_name: str) -> bool:
+    return model_name in INKLING
 
 
 def is_gpt_oss(model_name: str) -> bool:
@@ -56,11 +67,14 @@ def vllm_model(model_name: str) -> str:
 
 
 def is_looped(model_name: str) -> bool:
-    return model_name in LOOPED or is_ouro(model_name)
+    return model_name in LOOPED or is_ouro(model_name) or is_inkling(model_name)
 
 
 def n_loops(config) -> int:
-    """Number of times the layer stack is applied (1 for ordinary models)."""
+    """Number of times the layer stack is applied (1 for ordinary models; Inkling: core passes)."""
+    loop = getattr(getattr(config, "text_config", None), "loop_config", None)
+    if loop is not None:
+        return getattr(config.text_config, "loop_num_passes", None) or loop["num_passes"]
     return (getattr(config, "total_ut_steps", None) or getattr(config, "num_loops", None)
             or getattr(config, "n_recurrent_loops", None) or 1)
 
@@ -69,9 +83,16 @@ def model_sites(config) -> list[tuple[int, int]]:
     """The (loop, layer) sites a forward pass visits, in execution order.
 
     Ouro and Nanbeige run every layer in every loop. Dory runs its input and output sublayers once (reported as loop 0)
-    and its recurrent sublayers once per loop.
+    and its recurrent sublayers once per loop; Inkling likewise its prelude and coda layers (core: one loop per pass).
     """
-    T, L = n_loops(config), config.num_hidden_layers
+    T = n_loops(config)
+    text = getattr(config, "text_config", None)
+    if text is not None and getattr(text, "loop_config", None) is not None:
+        lc, L = text.loop_config, text.num_hidden_layers
+        core = range(lc["core_start"], lc["core_end"])
+        return ([(0, l) for l in range(core.start)] + [(t, l) for t in range(T) for l in core]
+                + [(0, l) for l in range(core.stop, L)])
+    L = config.num_hidden_layers
     if getattr(config, "model_type", None) == "dory":
         n_in, n_rec = config.n_input_layers, config.n_recurrent_layers
         return ([(0, l) for l in range(n_in)] + [(t, l) for t in range(T) for l in range(n_in, n_in + n_rec)]
@@ -88,6 +109,8 @@ def _remote_kwargs(model_name: str) -> dict:
         return {"revision": QWEN_REVISION}
     if model_name == GPT_OSS_ID:
         return {"revision": GPT_OSS_REVISION}
+    if is_inkling(model_name):
+        return {"revision": INKLING[model_name]}
     return {"trust_remote_code": True} if is_ouro(model_name) else {}
 
 
@@ -141,6 +164,8 @@ def loop_overrides(model_name: str, n_loops_override=None) -> dict | None:
         return None
     if not is_looped(model_name):
         raise ValueError(f"{model_name} is not a looped model")
+    if is_inkling(model_name):  # the varloop checkpoint only (vLLM rejects it on the fixed-loop one)
+        return {"text_config": {"loop_num_passes": n_loops_override, "loop_share_cache": True}}
     attr = LOOPED[model_name][1] if model_name in LOOPED else "total_ut_steps"
     return {attr: n_loops_override}
 
@@ -170,6 +195,9 @@ def vllm_kwargs(model_name: str) -> dict:
         return {"revision": DORY_REVISION, "tokenizer_revision": DORY_REVISION}
     if model_name == GPT_OSS_ID:  # weights from the local bf16 copy (vllm_model), tokenizer from the hub snapshot
         return {"tokenizer": GPT_OSS_ID, "tokenizer_revision": GPT_OSS_REVISION}
+    if is_inkling(model_name):  # text only (no vision encoder); no DSpark speculative decoding
+        return {"revision": INKLING[model_name], "tokenizer_revision": INKLING[model_name],
+                "limit_mm_per_prompt": {"image": 0}}
     return {}
 
 
@@ -194,5 +222,7 @@ def prepare_vllm(model_name: str) -> bool:
         from loop_steer.vllm_dory import register
 
         register()
+        return True
+    if is_inkling(model_name):  # token ids from the HF template (= vLLM's Inkling renderer; no generation prefix)
         return True
     return False
