@@ -25,3 +25,4 @@ checkpoints/
 
 # Machine-specific provisioning files (not part of the project)
 /lab_envs/
+/.venv-inkling
