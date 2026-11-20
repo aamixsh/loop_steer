@@ -9,9 +9,9 @@
 # (so a queue watchdog sees progress). DRY=1 prints the commands.
 set -u -o pipefail
 cd "$(dirname "$0")/.."
-KEY=${1:?model key: ouro|nanbeige|qwen|gptoss|dory}; TAG=${2:?tag}; shift 2
+KEY=${1:?model key: ouro|nanbeige|qwen|gptoss|dory|inkling}; TAG=${2:?tag}; shift 2
 [ $# -gt 0 ] || { echo "no candidates" >&2; exit 2; }
-PY=.venv/bin/python; G=${GPU:-0}; L=data/runs/logs
+PY=.venv/bin/python; GENPY=$PY; G=${GPU:-0}; L=data/runs/logs
 case $KEY in
   ouro)     MODEL=ByteDance/Ouro-1.4B-Thinking; RUN=Ouro-1.4B-Thinking; CAP=2048; GEN="" ;;
   nanbeige) MODEL=Nanbeige/Nanbeige4.2-3B; RUN=Nanbeige4.2-3B; CAP=4096; GEN="--max-tokens 4096 --max-model-len 12288" ;;
@@ -19,6 +19,9 @@ case $KEY in
   gptoss)   MODEL=openai/gpt-oss-20b; RUN=gpt-oss-20b; CAP=4096; GEN="--max-tokens 4096 --max-model-len 12288" ;;
   dory)     MODEL=nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16; RUN=NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16; CAP=4096
             GEN="--max-tokens 4096 --max-model-len 12288" ;;
+  inkling)  MODEL=thinkingmachines/Inkling-2-Mini; RUN=Inkling-2-Mini; CAP=4096  # as released: temperature 1.0
+            GEN="--max-tokens 4096 --max-model-len 12288 --temperature 1.0"
+            source envs/inkling/env.sh; GENPY=$PY_INKLING ;;  # generation in .venv-inkling, judging in .venv
   *) echo "unknown model key $KEY" >&2; exit 2 ;;
 esac
 [ -n "${N_LOOPS:-}" ] && GEN="$GEN --n-loops $N_LOOPS"
@@ -27,7 +30,7 @@ exec 3>&1
 run() { echo "+ $*" >&3; [ -n "${DRY:-}" ] || "$@"; }
 log() { if [ -n "${DRY:-}" ]; then echo /dev/null; else echo "$L/$1"; fi; }
 
-run $PY scripts/intervene.py --gpu $G --model $MODEL --directions train --split ${SPLIT:-train} --kind ${KIND:-harmful} --offset ${OFFSET:-500} --n-prompts ${NPROMPTS:-50} $GEN \
+run $GENPY scripts/intervene.py --gpu $G --model $MODEL --directions train --split ${SPLIT:-train} --kind ${KIND:-harmful} --offset ${OFFSET:-500} --n-prompts ${NPROMPTS:-50} $GEN \
     --tag $TAG --skip-existing --candidates "$@" 2>&1 | tee "$(log ${KEY}_$TAG.log)" >&3 \
     || echo "generation step failed (see $L/${KEY}_$TAG.log)"
 dirs=(); for d in $D/$TAG $D/$TAG/invalid; do [ -d "$d" ] && dirs+=("$d"); done

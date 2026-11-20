@@ -158,7 +158,7 @@ def main():
 
     from loop_steer import vllm_hooks
     from loop_steer.cot import format_prompt, split_cot, strip_end
-    from loop_steer.models import load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
+    from loop_steer.models import is_inkling, load_tokenizer, loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
     from loop_steer.ortho import orthogonalize_
 
     cands = [parse_candidate(c) for c in args.candidates]
@@ -179,7 +179,7 @@ def main():
 
     as_ids = prepare_vllm(args.model)
     llm = LLM(model=vllm_model(args.model), seed=args.seed, gpu_memory_utilization=args.gpu_memory_utilization,
-              max_model_len=args.max_model_len, enforce_eager=uses_hooks,
+              max_model_len=args.max_model_len, enforce_eager=uses_hooks and not is_inkling(args.model),
               # per-problem kick directions: a cached prefix computed under another problem's kick must not be reused
               enable_prefix_caching=not per_request,
               hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
