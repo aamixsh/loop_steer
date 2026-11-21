@@ -12,6 +12,24 @@ prelude's state and reads the previous pass through gated cross-pass messages. V
 - Fixed-loop model first: steer single passes, passes 1+2, all passes (and everything incl. prelude / coda).
 - Priority: refusal steering and kicks, then persona, then weight edits (on hold).
 
+## Dataflow (from vLLM `models/inkling2/nvidia/loop.py`)
+
+- Block attention residuals, blocks of 6 layers: every sublayer input is a learned softmax mix over the finished blocks
+  (embedding, prelude, ...) and the running block, then RMSNorm. Global layers have separate q / k / v inputs (3 mixes),
+  local layers one.
+- Prelude (0-5) once. Every core pass restarts from the prelude's state: loop k's layer-6 input is the same mix of
+  [embedding, prelude block] as loop 1's. Each pass has its own KV and conv caches (it attends to earlier tokens' states
+  in the same pass).
+- Messages, from pass 2 on: at every core layer, each of its 4 inputs (attn q, k, v; MLP) blends in
+  `m = softmax-mix of the previous pass's two finished blocks (layers 6-11, 12-17)` with its own learned query, through
+  a gate `(1 - tanh f) * x + tanh g * m` (f, g from a rank-64 projection of the normed pair). So 48 taps per pass, all
+  reading the same source (the previous pass's end state); no layer-l-to-layer-l link, and only one pass back.
+  Blocks are sums of the layers' attention + MLP outputs. The mix weights are per token: `softmax_j(q . x_j / rms(x_j))`
+  over the two blocks, values RMS-normalized (no gain); the gate is per dimension and also per token. The queries and
+  controllers are indexed by layer, not pass, so passes 2 and 3 share them. The blended input only feeds the sublayer;
+  the message itself is never written into the stream.
+- Coda (18-23) continues from the last pass's blocks only; earlier passes reach it only through the message chain.
+
 ## Code
 
 - `src/loop_steer/vllm_inkling.py`: interventions inside vLLM's `Inkling2LoopModel`, CUDA-graph safe (read its

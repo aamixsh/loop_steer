@@ -25,6 +25,14 @@ Spec dicts (tensors may be on CPU), installed with ``LLM.apply_model(functools.p
       before their RMSNorm, and the cross-pass messages), every write (the attention output after its short conv, and
       the block after the layer's update), and, with the prelude selected, the embedding; with the coda selected, the
       final mix before the last norm.
+      With ``"mean": [V, N_HOOK, MAX_ROWS]`` (``fetch_calib`` of a reference run): **mean ablation**, the component
+      along ``dir`` is set to its reference mean at that visit and hook point instead of 0 (x <- x - (x.u - mean) u),
+      and position 0 (the same state in every request) is left alone.
+  {"kind": "calib", "dirs": [K, D]}   (eager engines only)
+      accumulate, at every visit and ablation hook point (``HOOKS``; each row of a multi-row input separately), the
+      sum of the projection on each unit ``dirs[k]`` over every valid token but position 0, with nothing edited;
+      ``fetch_calib`` returns the means [K, V, N_HOOK, MAX_ROWS] (0 where a hook never ran): the ``mean`` of an
+      ablate spec.
   {"kind": "actadd", "vec": [D], "layer": l, "coeff": c, "loops": None | [t, ...], "positions": None | [cls, ...]}
       resid_pre(l) += coeff * vec in the selected passes (prelude / coda layers: any selection containing -1 or 0).
   {"kind": "kick", "vec": [D] | "vecs": [K, D], "layer": l, "eps": e, "loops": ..., "sink_ratio": r}
@@ -49,6 +57,15 @@ Spec dicts (tensors may be on CPU), installed with ``LLM.apply_model(functools.p
       change the cross-pass messages read by the core layers of the given passes (0-based; messages exist from
       pass 1 on): ``ablate`` projects ``dir`` out of them, ``zero`` replaces them by 0 (the pass then gets nothing
       from the previous one beyond what its gate makes of a zero message) (``scripts/inkling_rebuild.py``).
+  {"kind": "reinject", "from_pass": p, "mode": "proj" | "mean" | "drop" | "flat", "dirs": [K, D], "means": [2, K],
+   "flat": [2, D], "coda": bool}   (eager engines only)
+      change the prelude state that core passes p, p+1, ... restart from (the embedding ``stack[0]`` and the prelude
+      block ``stack[1]``, which every pass and the coda read through the block attention residuals; vLLM copies the
+      prelude block back from a clone at every pass start, so the edit is re-applied at each of those passes):
+      ``proj`` projects the orthonormal rows of ``dirs`` out, ``mean`` sets their components to ``means`` (row 0:
+      embedding, row 1: prelude block), ``drop`` zeroes both blocks, ``flat`` replaces them with ``flat`` (the mean
+      vectors over every token). Position 0 is left alone. With ``coda`` False the original state is restored before
+      the coda (only passes >= p see the edit). ``scripts/inkling_rebuild.py``, as ``scripts/dory_reinject.py``.
   {"kind": "norms"}   (eager engines only)
       keep the per-token norm of resid_pre at every site (every token but position 0); ``fetch_norms`` returns the
       median per site (``scripts/stream_norms.py``, for norm-matched activation addition).
@@ -71,6 +88,9 @@ import torch
 from loop_steer.vllm_hooks import CLASSES
 
 N_ABL, N_ADD, N_KICK = 2, 4, 4  # spec slots per kind
+HOOKS = ("embed", "messages", "attn_in", "attn_out", "mlp_in", "block", "final_mix")  # where ablation edits
+H = {h: j for j, h in enumerate(HOOKS)}
+N_HOOK, MAX_ROWS = len(HOOKS), 4  # rows: a hook point's input can stack several sublayer inputs (messages: 4)
 MAX_KICK_ROWS = 1024  # per-request kick directions (MATH-500: 500); one more zero row for requests without an index
 
 
@@ -163,6 +183,8 @@ class _Buffers:
         self.abl_on = torch.zeros(N_ABL, V, **f32)  # 1 where the spec ablates at this visit
         self.abl_any = torch.zeros(V, dtype=torch.bool, device=dev)  # some ablation on at this visit
         self.abl_cls = torch.ones(N_ABL, 4, **f32)  # token weight by class + 1 (0: no class)
+        self.abl_mean = torch.zeros(N_ABL, V, N_HOOK, MAX_ROWS, **f32)  # mean ablation: target projection (0: zero abl.)
+        self.abl_skip0 = torch.zeros(N_ABL, **f32)  # 1: leave position 0 alone (mean ablation)
         self.add_vec = torch.zeros(N_ADD, D, **f32)
         self.add_coef = torch.zeros(N_ADD, V, **f32)
         self.add_cls = torch.ones(N_ADD, 4, **f32)
@@ -174,10 +196,12 @@ class _Buffers:
         self.slot = torch.zeros(max_tokens, dtype=torch.long, device=dev)
         self.need_tokens = False
         self.capture = None  # eager-only analysis state
+        self.calib = None
         self.norms = None
         self.final = None
         self.coda_from, self.saved_blocks = None, None
         self.msg = []
+        self.reinject = None
 
     def visit_index(self, i, pass_idx):
         c = self.core
@@ -205,7 +229,8 @@ class _Buffers:
         return out + [(i, 0) for i in range(c.stop, self.n_layers)]
 
     def reset(self):
-        for t in (self.abl_dir, self.abl_on, self.add_vec, self.add_coef, self.kick_tab, self.kick_eps):
+        for t in (self.abl_dir, self.abl_on, self.abl_mean, self.abl_skip0, self.add_vec, self.add_coef, self.kick_tab,
+                  self.kick_eps):
             t.zero_()
         self.abl_any.zero_()
         for t in (self.abl_cls, self.add_cls, self.kick_cls):
@@ -214,24 +239,44 @@ class _Buffers:
         self.cls.zero_()
         self.slot.fill_(0)
         self.need_tokens = False
-        self.capture = self.norms = self.final = None
+        self.capture = self.norms = self.final = self.calib = None
         self.coda_from, self.saved_blocks = None, None
         self.msg = []
+        self.reinject = None
 
     # ------------------------------------------------------------------ token weights (graph-safe)
     def w(self, table, k, T):
         """[T] per-token weight of spec slot k (class gating)."""
         return table[k][self.cls[:T]]
 
-    def project(self, x, T, v):
-        """Ablate every slot's direction from ``x`` [..., T, D] in place, weighted by its on-weight at visit v and
-        the tokens' class weights (exactly 0 where off)."""
+    def project(self, x, T, v, h, positions):
+        """Ablate every slot's direction from ``x`` ([T, D] or [R, T, D]) at visit v, hook point ``h``, in place:
+        the projection is moved to the slot's mean there (0 for zero ablation), weighted by its on-weight at the
+        visit, the tokens' class weights and (mean ablation) 0 at position 0; exactly 0 where off."""
+        if self.calib is not None:  # eager only (Python branch)
+            self.calibrate(x, T, v, h, positions)
+        R = x.shape[0] if x.dim() == 3 else 1
+        at0 = (positions[:T] == 0).float()
         for k in range(N_ABL):
             u = self.abl_dir[k]
-            wt = self.abl_on[k, v] * self.w(self.abl_cls, k, T)  # [T]
-            coef = (x.float() @ u) * wt
+            wt = self.abl_on[k, v] * self.w(self.abl_cls, k, T) * (1.0 - self.abl_skip0[k] * at0)  # [T]
+            mu = self.abl_mean[k, v, h, :R]
+            mu = mu[:, None] if x.dim() == 3 else mu[0]
+            coef = (x.float() @ u - mu) * wt
             x.sub_((coef.unsqueeze(-1) * u).to(x.dtype))
         return x
+
+    def calibrate(self, x, T, v, h, positions):  # eager only
+        c = self.calib
+        if c.get("fwd") is not positions:
+            _, valid, _ = _token_info(c["runner"], positions, T)
+            c["mask"], c["fwd"] = valid & (positions[:T] != 0), positions
+        m = c["mask"]
+        x3 = x.float() if x.dim() == 3 else x.float()[None]
+        p = x3[:, m] @ c["dirs"].T  # [R, n, K]
+        R = x3.shape[0]
+        c["sum"][:, v, h, :R] += p.sum(1).T.double()
+        c["count"][v, h, :R] += float(m.sum())
 
     def add_site(self, partial, positions, v):
         T = partial.shape[0]
@@ -302,11 +347,13 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     v = g.visit_index(i, pass_idx)
     on = g.abl_any[v]  # 0-dim bool: some ablation at this visit
 
+    if g.reinject is not None:  # eager only (Python branch)
+        _reinject(g.reinject, i, pass_idx, core, stack, positions)
     if g.coda_from is not None and i == core.stop and g.saved_blocks is not None:  # eager only (Python branch)
         nb_core = g.saved_blocks.shape[0]
         stack[num_blocks - nb_core + 1: num_blocks + 1].copy_(g.saved_blocks)
     if num_blocks == 0 and i == 0:
-        g.project(stack[0], T, v)  # the embedding (prelude selected)
+        g.project(stack[0], T, v, H["embed"], positions)  # the embedding (prelude selected)
     g.add_site(partial, positions, v)
     g.record(partial, positions, v, getattr(self, "_ls_runner", None))
 
@@ -315,7 +362,7 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     messages = None
     if bank is not None:
         messages = attn_res(bank[:1], bank[1], None, self.message_queries[i - core.start], None, 0.0, True)
-        g.project(messages, T, v)
+        g.project(messages, T, v, H["messages"], positions)
         for m in g.msg:  # eager only (Python branch)
             if pass_idx in m["passes"]:
                 if m["mode"] == "zero":
@@ -326,13 +373,13 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     if num_blocks == 0:
         fused = [norm(partial, j) for j in range(n_in)]
         dests = partial.float().unsqueeze(0).expand(n_in, -1, -1).contiguous()
-        g.project(dests, T, v)
+        g.project(dests, T, v, H["attn_in"], positions)
         attn_inputs = [torch.where(on, rms_norm(dests[j], norm.weight[j], norm.eps, torch.bfloat16), fused[j])
                        for j in range(n_in)]
     else:
         query = self.attn_res.attn_queries[i - 1]
         dests = attn_res(stack[:num_blocks], partial, None, query, None, 0.0, True)
-        g.project(dests, T, v)
+        g.project(dests, T, v, H["attn_in"], positions)
         if messages is not None:
             d3, w3 = dests, norm.weight
             if layer.is_local:
@@ -345,14 +392,14 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
             attn_inputs = torch.where(on, unfused, fused)
     attn_partial = layer.attention(positions, attn_inputs, tau, pass_idx=pass_idx)
     attn_out = layer.attn_sconv(attn_partial, positions, owner=owner).contiguous()
-    g.project(attn_out, T, v)
+    g.project(attn_out, T, v, H["attn_out"], positions)
 
     first = i % self.block_size == 0
     mq = self.attn_res.mlp_queries[i]
     mnorm = layer.mlp_norm
     src = (stack[: num_blocks + 1], attn_out, None) if first else (stack[:num_blocks], partial, attn_out)
     mlp_dests = attn_res(*src, mq, None, 0.0, True)
-    g.project(mlp_dests, T, v)
+    g.project(mlp_dests, T, v, H["mlp_in"], positions)
     if messages is not None:
         mlp_in = layer.blend(slice(3, 4), mlp_dests, messages[3:].contiguous(), mnorm.weight, mnorm.eps)
     else:
@@ -364,7 +411,7 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
         num_blocks += 1
     layer.mlp_sconv(layer.mlp(mlp_in[0], pass_idx=pass_idx), positions, addend=attn_out, residual=residual,
                     out=stack[num_blocks], owner=owner)
-    g.project(stack[num_blocks], T, v)
+    g.project(stack[num_blocks], T, v, H["block"], positions)
     if g.coda_from is not None and i == core.stop - 1 and pass_idx == g.coda_from:  # this pass's blocks for the coda
         nb_core = -(-len(core) // self.block_size)
         g.saved_blocks = stack[num_blocks - nb_core + 1: num_blocks + 1].clone()
@@ -372,12 +419,37 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     if i != self.config.num_hidden_layers - 1:
         return num_blocks, None
     mix = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, None, 0.0, True)
-    g.project(mix, T, v)
+    g.project(mix, T, v, H["final_mix"], positions)
     fused = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, next_norm.weight, next_norm.eps, True)
     out = torch.where(on, rms_norm(mix, next_norm.weight[0], next_norm.eps, torch.bfloat16), fused)
     if g.final is not None:  # eager only
         _record_final(g, out[0], positions, getattr(self, "_ls_runner", None))
     return num_blocks, out
+
+
+def _reinject(r, i, pass_idx, core, stack, positions):
+    """Edit the prelude state (stack[0], stack[1]) at the start of passes >= r["from_pass"]; restore it before the coda
+    unless r["coda"]. Per forward: the original state is saved at the first edit."""
+    if r.get("fwd") is not positions:
+        r["fwd"], r["saved"] = positions, None
+    if i == core.start and pass_idx >= r["from_pass"]:
+        if r["saved"] is None:
+            r["saved"] = stack[:2].clone()
+        keep = (positions[: stack.shape[1]] != 0).unsqueeze(-1)
+        for b in range(2):
+            x = stack[b].float()
+            if r["mode"] == "drop":
+                y = torch.zeros_like(x)
+            elif r["mode"] == "flat":
+                y = r["flat"][b].expand_as(x)
+            else:
+                d = r["dirs"]
+                c = x @ d.T  # [T, K]
+                target = r["means"][b] if r["mode"] == "mean" else torch.zeros_like(c[0])
+                y = x + (target - c) @ d
+            stack[b].copy_(torch.where(keep, y, x).to(stack.dtype))
+    elif i == core.stop and not r["coda"] and r["saved"] is not None:
+        stack[:2].copy_(r["saved"])
 
 
 def _record_final(g, h, positions, runner):
@@ -518,6 +590,20 @@ def _install(model, specs):
         if k == "final":
             g.final = {}
             continue
+        if k == "calib":
+            d = torch.as_tensor(s["dirs"], dtype=torch.float32)
+            d = (d / d.norm(dim=-1, keepdim=True)).to(g.abl_dir.device)
+            g.calib = {"dirs": d, "runner": runner,
+                       "sum": torch.zeros(len(d), len(visits), N_HOOK, MAX_ROWS, dtype=torch.float64, device=d.device),
+                       "count": torch.zeros(len(visits), N_HOOK, MAX_ROWS, dtype=torch.float64, device=d.device)}
+            continue
+        if k == "reinject":
+            dev = g.abl_dir.device
+            g.reinject = {"from_pass": int(s["from_pass"]), "mode": s["mode"], "coda": bool(s.get("coda", False)),
+                          "dirs": None if s.get("dirs") is None else torch.as_tensor(s["dirs"], dtype=torch.float32).to(dev),
+                          "means": None if s.get("means") is None else torch.as_tensor(s["means"], dtype=torch.float32).to(dev),
+                          "flat": None if s.get("flat") is None else torch.as_tensor(s["flat"], dtype=torch.float32).to(dev)}
+            continue
         if k == "coda_from":
             g.coda_from = int(s["pass"])
             continue
@@ -544,6 +630,13 @@ def _install(model, specs):
             on = torch.tensor([1.0 if g.unit_of(i, p)(sel) else 0.0 for i, p in visits])
             g.abl_on[j] = on.to(g.abl_on.device)
             g.abl_cls[j] = row.to(g.abl_cls.device)
+            if s.get("mean") is not None:
+                mean = torch.as_tensor(s["mean"], dtype=torch.float32)
+                if tuple(mean.shape) != (len(visits), N_HOOK, MAX_ROWS):
+                    raise ValueError(f"ablate mean of shape {tuple(mean.shape)}; this engine needs "
+                                     f"{(len(visits), N_HOOK, MAX_ROWS)} (calibrate at the same pass count)")
+                g.abl_mean[j] = mean.to(g.abl_mean.device)
+                g.abl_skip0[j] = 1.0
         else:
             def at_site(i, p):
                 if i != s["layer"]:
@@ -572,9 +665,10 @@ def _install(model, specs):
                 if sink is not None and sink != ratio:
                     raise ValueError("kick specs with different sink ratios")
                 sink = ratio
-    eager_only = (g.capture, g.norms, g.final, g.coda_from, g.msg or None)
+    eager_only = (g.capture, g.norms, g.final, g.coda_from, g.msg or None, g.calib, g.reinject)
     if any(x is not None for x in eager_only) and not runner.model_config.enforce_eager:
-        raise RuntimeError("capture, norms, final and coda_from run Python at every forward: build the engine with enforce_eager=True")
+        raise RuntimeError("capture, norms, final, coda_from, msg and calib run Python at every forward: build the "
+                           "engine with enforce_eager=True")
     g.abl_any.copy_((g.abl_on > 0).any(0))
     if sink is not None:
         thr = _sink_thresholds(g, sink, runner.model_config.model)
@@ -608,6 +702,17 @@ def fetch_capture_norms(model):
     """{visit index: median norm of the window-0 tokens} of a capture with ``"norms": True``."""
     nl = model.model._lsg.capture["norm_list"]
     return {v: float(torch.cat(x).median()) for v, x in nl.items()}
+
+
+def fetch_calib(model, reset=True):
+    """Mean projection [K, V, N_HOOK, MAX_ROWS] (CPU, fp32) of a ``calib`` spec, 0 where a hook never ran."""
+    c = model.model._lsg.calib
+    out = (c["sum"] / c["count"].clamp(min=1)).float().cpu()
+    if reset:
+        with torch.inference_mode():  # the buffers are inference tensors (made in install)
+            c["sum"].zero_()
+            c["count"].zero_()
+    return out
 
 
 def fetch_capture(model, reset=True):
