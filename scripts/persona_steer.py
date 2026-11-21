@@ -34,6 +34,9 @@ ablate the trait elicited by the persona-vectors repo's trait-eliciting system p
        a set of every loop also covers Dory's input / output sublayers) and ``random_all`` (a seeded random unit
        direction ablated in every loop: control). Summary: ``removed`` = (prompted - cond) / (prompted - noprompt)
        trait score, ``coh_drop`` against prompted.
+       ``--ablate-ref noprompt``: **mean ablation** instead, the component set to the model's unprompted mean (Inkling:
+       at every visit and hook point; the others: at every layer input) (``directions/persona_ablation_means[_loops<N>].pt`` from
+       ``scripts/persona_ablation_means.py``) rather than to 0; name ``ablate_mean``.
 Every mode generates (vLLM, thinking off as persona_vectors.py), judges trait and coherence with gpt-oss-20b (the
 repo's prompts), and summarises: ``persona/steer_<name>.judged.parquet``, ``analysis/persona_<name>.csv``; name =
 ``tune``, ``loops`` or ``ablate`` (+ ``_loops<N>`` with ``--n-loops``). Skip-existing per stage.
@@ -63,6 +66,8 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=768)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     ap.add_argument("--stages", default="steer,judge,summary")
+    ap.add_argument("--ablate-ref", choices=["zero", "noprompt"], default="zero",
+                    help="ablate: set the component to 0, or to its unprompted mean (persona_ablation_means.py)")
     ap.add_argument("--tag", default=None, help="suffix of every output name (and of the tuning file loops reads)")
     args = ap.parse_args()
     if "," in args.stages:  # one process per stage: the generation engine must release the GPU before the judge loads
@@ -93,7 +98,8 @@ def main():
     rd = run_dir(args.model)
     wd = rd / "persona"
     sfx = f"_{args.tag}" if args.tag else ""
-    name = args.mode + (f"_loops{args.n_loops}" if args.n_loops else "") + sfx
+    mean_abl = args.mode == "ablate" and args.ablate_ref != "zero"
+    name = args.mode + ("_mean" if mean_abl else "") + (f"_loops{args.n_loops}" if args.n_loops else "") + sfx
     gen_path, judged_path = wd / f"steer_{name}.parquet", wd / f"steer_{name}.judged.parquet"
     src = DATA_ROOT / "external" / "pv_repo" / "data_generation"
     vecs = torch.load(rd / "directions" / "persona.pt", weights_only=False)
@@ -125,6 +131,14 @@ def main():
         sites = vecs["sites"]
         norm = {tuple(s): float(x) for s, x in zip(sites, vecs["norms"])}
         unit = loop_unit_layers(cfg)  # the layers that run once per loop (Dory: recurrent; Inkling: core)
+        abl_means = abl_finals = None
+        if mean_abl:
+            mp = rd / "directions" / f"persona_ablation_means{f'_loops{args.n_loops}' if args.n_loops else ''}.pt"
+            mf = torch.load(mp, weights_only=False)
+            want = "vllm_inkling" if is_inkling(args.model) else "vllm_hooks"
+            if mf.get("backend", "vllm_inkling") != want:
+                raise SystemExit(f"{mp} was calibrated for {mf.get('backend')}, not {want}")
+            abl_means, abl_finals = mf["means"], mf.get("finals", {})
 
         def specs_for(trait, layer, c, units):
             """Hook specs: trait vector from the site at ``layer`` added in loops / quarters ``units``."""
@@ -141,14 +155,21 @@ def main():
                 out.append({"kind": "actadd", "vec": v * m, "coeff": c, "loops": loops, "layer": l, "positions": None})
             return out
 
-        def ablate_specs(trait, layer, units):
+        def ablate_specs(trait, layer, units, of=None):
             """Hook specs: the trait's vector (``trait="random"``: a seeded random direction) projected out in
-            ``units`` (loops; dense: quarters); every loop -> loops=None, which adds Dory's input / output sublayers."""
+            ``units`` (loops; dense: quarters); every loop -> loops=None, which adds Dory's input / output sublayers. Mean
+            ablation: the means of ``trait`` (the random control: those of trait ``of``'s questions)."""
             v = vecs[next(iter(traits))]["dirs"][0] if trait == "random" else \
                 vecs[trait]["dirs"][sites.index((T - 1, layer) if looped else (0, layer))]
             if trait == "random":
                 v = torch.randn(v.shape[-1], generator=torch.Generator().manual_seed(0))
             spec = {"kind": "ablate", "dir": v.float(), "positions": None, "loops": None}
+            if abl_means is not None:  # mean ablation: this trait's (or its random control's) unprompted means
+                key = f"random:{of}" if trait == "random" else trait
+                if is_inkling(args.model):  # [V, N_HOOK, MAX_ROWS] at every visit and hook point
+                    spec["mean"] = abl_means[key]
+                else:  # [n_loops, n_layers] layer-input references (vllm_hooks affine ablation), Dory's final stream
+                    spec.update({"ref": abl_means[key], "mean": True, "ref_final": abl_finals.get(key)})
             if looped:
                 if sorted(units) != list(range(T_run)):
                     spec["loops"] = list(units)
@@ -218,7 +239,7 @@ def main():
                                                     add_special_tokens=False).input_ids} for q, sy in zip(qs, sys_of)]
             for cname, layer, c, units in tconds:
                 if ablate:
-                    specs = (ablate_specs("random" if cname.startswith("random") else t, layer, units)
+                    specs = (ablate_specs("random" if cname.startswith("random") else t, layer, units, of=t)
                              if units else [])
                 else:
                     specs = specs_for(t, layer, c, units) if units else []

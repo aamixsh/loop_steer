@@ -16,6 +16,15 @@ Spec dicts (tensors may be on CPU):
       the final stream before the unembedding). Optional ``"layers": [l, ...]``: only those layers' inputs and writes
       (not Dory's final stream; not Ouro). With ``ref`` (affine ablation, as ACE): the input of layer l in loop t
       gets component ``ref[t, l]`` along dir instead of 0 (the final stream gets ``ref[0, -1]``); writes still get 0.
+      With ``"mean": True`` (``ref`` from a ``calib`` run in this engine, ``fetch_calib``): **mean ablation**, as
+      ``loop_steer.vllm_inkling``: position 0 (the same state in every request) is left alone, Dory's final stream
+      gets ``"ref_final"``, and Ouro is allowed (its stream is h + residual at every layer input, as the others').
+      In a single residual stream, setting every layer input's component to the reference and zeroing the writes'
+      keeps the stream on the reference trajectory (the last layer's writes add 0 instead of their mean).
+  {"kind": "calib", "dirs": [K, D]}
+      record, at every layer input (the stream h + residual, per loop), the sum and count of the projection on each
+      unit ``dirs[k]`` over every valid token but position 0, and Dory's final stream (the last layer's output);
+      nothing is edited. ``fetch_calib`` -> means.
   ``loops`` selects recurrent loops. Dory's input and output sublayers (and its final stream) run once; ``loops`` counts
   them as loop -1, so ``loops=[0]`` is the first recurrent loop only and ``loops=[-1, 0]`` adds them; -2 selects the
   input sublayers alone (whose output is reinjected into every loop), -3 the output sublayers and final stream alone.
@@ -254,14 +263,18 @@ def install(model, specs):
 
     def track(module, args, i=None):
         state["loop"] = args[2] if looped else 0
+        state["pos"] = args[pos_arg]
         state["gate"] = state["loop"] if not dory or stack[i] == 0 else stack[i]
 
     def selects(loops, gate):
         return gate in loops or (gate in (-2, -3) and -1 in loops)
 
     handles += [layer.register_forward_pre_hook(functools.partial(track, i=i)) for i, layer in enumerate(layers)]
+    calib = next((s for s in specs if s["kind"] == "calib"), None)
+    if calib is not None:
+        handles += _install_calib(model, layers, calib, looped, dory, pos_arg, unpack)
     for spec in specs:
-        if spec["kind"] == "record":
+        if spec["kind"] in ("record", "calib"):
             continue
         loops = spec.get("loops")
         pos_cls = spec.get("positions")
@@ -284,13 +297,17 @@ def install(model, specs):
             u = spec["dir"].float()
             u = (u / u.norm()).to(device=device, dtype=dtype)
             ref = spec.get("ref")
-            if ref is not None and ouro:
+            mean_abl = bool(spec.get("mean"))
+            if ref is not None and ouro and not mean_abl:
                 raise NotImplementedError("affine ablation (ref) is not implemented for Ouro's sandwich norms")
             ref = None if ref is None else ref.float().tolist()
 
-            def proj(x, target=0.0, u=u, pos_cls=pos_cls, decay=decay):
+            def proj(x, target=0.0, u=u, pos_cls=pos_cls, decay=decay, mean_abl=mean_abl):
                 coef = (x @ u).unsqueeze(-1) - target
                 m = fit(mask(pos_cls, decay), x)
+                if mean_abl:  # leave position 0 alone
+                    nz = fit((state["pos"].reshape(-1) != 0).to(x.dtype).unsqueeze(-1), x)
+                    m = nz if m is None else m * nz
                 return x - (coef if m is None else m * coef) * u
 
             def pre(module, args, i=None, proj=proj, active=active, ref=ref):
@@ -313,7 +330,9 @@ def install(model, specs):
                 raise NotImplementedError("layers= is not implemented for Ouro")
             if dory and pos_cls is None and not decay and only is None:  # final stream before the unembedding (logits_processor(lm_head, hidden));
                 # it sees only the sampled rows, so position-gated and decaying specs skip it
-                def final(module, args, proj=proj, loops=loops, target=0.0 if ref is None else ref[0][-1]):
+                tf = 0.0 if ref is None else float(spec["ref_final"]) if spec.get("ref_final") is not None else ref[0][-1]
+
+                def final(module, args, proj=proj, loops=loops, target=tf):
                     return (args[0], proj(args[1], target), *args[2:]) if loops is None or selects(loops, -3) else None
 
                 handles.append(model.logits_processor.register_forward_pre_hook(final))
@@ -396,6 +415,68 @@ def install(model, specs):
             raise ValueError(f"unknown intervention kind {spec['kind']!r}")
     model._ls_handles = handles
     return True
+
+
+def _install_calib(model, layers, spec, looped, dory, pos_arg, unpack):
+    """Hooks of a ``calib`` spec (see the module doc); state in ``model._ls_calib``."""
+    from vllm.forward_context import get_forward_context, is_forward_context_available
+
+    dev = next(model.parameters()).device
+    d = spec["dirs"].float()
+    d = (d / d.norm(dim=-1, keepdim=True)).to(dev)
+    c = model._ls_calib = {"dirs": d, "sum": {}, "count": {}}
+
+    def keep_of(positions):  # per forward: valid tokens (not padding) but position 0
+        if c.get("fwd") is positions:
+            return c["keep"]
+        n = positions.shape[0]
+        keep = torch.zeros(n, dtype=torch.bool, device=positions.device)
+        md = get_forward_context().attn_metadata if is_forward_context_available() else None
+        if isinstance(md, list):
+            md = md[0] if md else None
+        if md:
+            n_valid = int(next(iter(md.values())).query_start_loc[-1])
+            keep[:n_valid] = True
+        keep &= positions.reshape(-1) != 0
+        c["fwd"], c["keep"] = positions, keep
+        return keep
+
+    def add(key, x, positions):
+        keep = keep_of(positions)
+        k = min(x.shape[0], keep.shape[0])
+        p = x[:k][keep[:k]].float() @ d.T  # [n, K]
+        c["sum"][key] = c["sum"].get(key, 0) + p.sum(0).double()
+        c["count"][key] = c["count"].get(key, 0) + int(keep[:k].sum())
+
+    def pre(module, args, i=None):
+        h, loop, res, _ = unpack(args)
+        add((int(loop), i), h if res is None else h + res, args[pos_arg])
+
+    hs = [layer.register_forward_pre_hook(functools.partial(pre, i=i)) for i, layer in enumerate(layers)]
+    if dory:  # the final stream: the last layer's output (Dory has no fused residual)
+        def post(module, args, output):
+            out = output[0] if isinstance(output, tuple) else output
+            add(("final", -1), out, args[pos_arg])
+
+        hs.append(layers[-1].register_forward_hook(post))
+    return hs
+
+
+def fetch_calib(model, reset=True):
+    """Means of a ``calib`` spec: {"ref": [K, n_loops, n_layers], "ref_final": [K] (Dory) or None}."""
+    c = model._ls_calib
+    keys = [k for k in c["sum"] if k[0] != "final"]
+    T, L, K = max(k[0] for k in keys) + 1, max(k[1] for k in keys) + 1, len(c["dirs"])
+    ref = torch.zeros(K, T, L)
+    for (t, i) in keys:
+        ref[:, t, i] = (c["sum"][(t, i)] / max(c["count"][(t, i)], 1)).float().cpu()
+    fk = ("final", -1)
+    out = {"ref": ref, "ref_final": None}
+    if fk in c["sum"]:
+        out["ref_final"] = (c["sum"][fk] / max(c["count"][fk], 1)).float().cpu()
+    if reset:
+        model._ls_calib.update({"sum": {}, "count": {}})
+    return out
 
 
 def fetch_records(model, reset=True):

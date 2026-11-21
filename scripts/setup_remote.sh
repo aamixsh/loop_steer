@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Set up a fresh GPU machine (vast.ai, RunPod, any Linux box) for loop-steer. Run from the repo root after cloning;
 # docs/handoff.md is the step-by-step guide.
-#   scripts/setup_remote.sh [--install-uv] [--cache-dir DIR] [--skip-models] [--no-sync] [--no-verify]
+#   scripts/setup_remote.sh [--install-uv] [--cache-dir DIR] [--skip-models] [--no-sync] [--no-verify] [--no-gcloud]
 # 1. checks the GPU driver, disk space and uv, 2. optionally points the big caches at DIR (see below),
-# 3. `uv sync --locked`, 4. fetches the prompt CSVs at the pinned upstream commit if data/prompts is missing,
-# 5. downloads the models at the pinned revisions, 6. runs scripts/verify_setup.sh --no-gpu.
+# 3. installs the Google Cloud SDK (gcloud, for the GCS bundles and result pushes) into $LOOP_STEER_TOOLS (default
+# /workspace/tools) if gcloud is missing, 4. `uv sync --locked`, 5. fetches the prompt CSVs at the pinned upstream
+# commit if data/prompts is missing, 6. downloads the models at the pinned revisions, 7. runs
+# scripts/verify_setup.sh --no-gpu. Logging in (gcloud, Hugging Face) stays manual: the script prints the commands.
 # --cache-dir DIR  keep the Hugging Face cache (models, about 40 GB), the uv cache and the uv-managed Python under DIR
 #                  (DIR/hf, DIR/uv, DIR/uv-python), e.g. a persistent volume (/workspace on vast.ai and RunPod) that
 #                  several projects share. data/.cache/{huggingface,uv,uv-python} become symlinks to them, so jobs
@@ -13,10 +15,11 @@
 # Do NOT run it while jobs use .venv: `uv sync` can change the environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MODELS=1; SYNC=1; INSTALL_UV=0; VERIFY=1; CACHE_DIR=""
+MODELS=1; SYNC=1; INSTALL_UV=0; VERIFY=1; CACHE_DIR=""; GCLOUD=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-models) MODELS=0 ;; --no-sync) SYNC=0 ;; --install-uv) INSTALL_UV=1 ;; --no-verify) VERIFY=0 ;;
+    --no-gcloud) GCLOUD=0 ;;
     --cache-dir) CACHE_DIR=${2:?--cache-dir needs a directory}; shift ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -47,6 +50,21 @@ for d in . "${CACHE_DIR:-.}"; do
   echo "free on $(df --output=target "$d" | tail -1): ${avail} GB"
   [ "$avail" -ge 120 ] || echo "WARNING: less than 120 GB free there"
 done
+
+echo "== gcloud"
+source envs/cloud.sh
+if command -v gcloud >/dev/null; then
+  gcloud --version | head -1
+elif [ "$GCLOUD" = 1 ]; then  # the SDK tarball into $LOOP_STEER_TOOLS; touches no shell profile
+  tools=${LOOP_STEER_TOOLS:-/workspace/tools}; mkdir -p "$tools" "$CLOUDSDK_CONFIG"
+  curl -fsSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz \
+    | tar -xz -C "$tools"
+  "$tools/google-cloud-sdk/install.sh" --quiet --usage-reporting=false --path-update=false --command-completion=false \
+    >/dev/null
+  gcloud --version | head -1
+else
+  echo "skipped (--no-gcloud)"
+fi
 
 echo "== uv"
 if ! command -v uv >/dev/null; then
@@ -79,6 +97,10 @@ if [ "$MODELS" = 1 ]; then .venv/bin/python scripts/prefetch_models.py; else ech
 
 if [ "$VERIFY" = 1 ]; then echo "== verify"; scripts/verify_setup.sh --no-gpu || true; fi
 cat <<EOF
+
+Log in by hand (once per machine; credentials stay under /workspace):
+  source envs/cloud.sh && gcloud auth login --no-launch-browser && gcloud storage ls \$GCS_BUCKET
+  HF_HOME=\$HF_HOME .venv/bin/hf auth login && .venv/bin/hf auth whoami
 
 Done. Next:
   source scripts/env.sh                       # in every new shell (or rely on the symlinks / exported variables)
