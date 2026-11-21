@@ -20,7 +20,8 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = {"ouro": "Ouro-1.4B-Thinking", "nanbeige": "Nanbeige4.2-3B", "dory": "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16",
-        "qwen": "Qwen3-8B", "inkling": "Inkling-2-Mini"}
+        "qwen": "Qwen3-8B", "inkling": "Inkling-2-Mini",
+        "inkvar": "TML-d24-varloop-research"}
 
 
 def main():

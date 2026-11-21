@@ -18,7 +18,7 @@ DORY_REVISION = "b366b87f762ea334ba3eb55912031baba1515810"
 INKLING_ID = "thinkingmachines/Inkling-2-Mini"
 INKLING_REVISION = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
 INKLING_VARLOOP_ID = "thinkingmachines/TML-d24-varloop-research"  # trained for 1-3 passes (text_config.loop_num_passes)
-INKLING_VARLOOP_REVISION = "767c9d0250aa2938e289e50ca6db5f1b39ebae74"
+INKLING_VARLOOP_REVISION = "657b53ba5da7baefe9ff15dca5cd25f5bd3dbaa2"  # Nov 20 22:02Z (767c9d0 was rewritten; same weights)
 INKLING = {INKLING_ID: INKLING_REVISION, INKLING_VARLOOP_ID: INKLING_VARLOOP_REVISION}
 
 # Looped models: pinned (revision, loop-count config attribute). Custom code => trust_remote_code.
@@ -164,8 +164,8 @@ def loop_overrides(model_name: str, n_loops_override=None) -> dict | None:
         return None
     if not is_looped(model_name):
         raise ValueError(f"{model_name} is not a looped model")
-    if is_inkling(model_name):  # the varloop checkpoint only (vLLM rejects it on the fixed-loop one)
-        return {"text_config": {"loop_num_passes": n_loops_override, "loop_share_cache": True}}
+    if is_inkling(model_name):  # the varloop checkpoint only (vLLM rejects it on the fixed-loop one); one KV cache
+        return {"text_config": {"loop_num_passes": n_loops_override}}  # per pass, as the HF reference (no share)
     attr = LOOPED[model_name][1] if model_name in LOOPED else "total_ut_steps"
     return {attr: n_loops_override}
 

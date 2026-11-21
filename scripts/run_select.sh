@@ -9,7 +9,7 @@
 # (so a queue watchdog sees progress). DRY=1 prints the commands.
 set -u -o pipefail
 cd "$(dirname "$0")/.."
-KEY=${1:?model key: ouro|nanbeige|qwen|gptoss|dory|inkling}; TAG=${2:?tag}; shift 2
+KEY=${1:?model key: ouro|nanbeige|qwen|gptoss|dory|inkling|inkvar}; TAG=${2:?tag}; shift 2
 [ $# -gt 0 ] || { echo "no candidates" >&2; exit 2; }
 PY=.venv/bin/python; GENPY=$PY; G=${GPU:-0}; L=data/runs/logs
 case $KEY in
@@ -22,6 +22,9 @@ case $KEY in
   inkling)  MODEL=thinkingmachines/Inkling-2-Mini; RUN=Inkling-2-Mini; CAP=4096  # as released: temperature 1.0
             GEN="--max-tokens 4096 --max-model-len 12288 --temperature 1.0"
             source envs/inkling/env.sh; GENPY=$PY_INKLING ;;  # generation in .venv-inkling, judging in .venv
+  inkvar)   MODEL=thinkingmachines/TML-d24-varloop-research; RUN=TML-d24-varloop-research; CAP=4096  # 1-5 passes
+            GEN="--max-tokens 4096 --max-model-len 12288 --temperature 1.0"
+            source envs/inkling/env.sh; GENPY=$PY_INKLING ;;
   *) echo "unknown model key $KEY" >&2; exit 2 ;;
 esac
 [ -n "${N_LOOPS:-}" ] && GEN="$GEN --n-loops $N_LOOPS"
