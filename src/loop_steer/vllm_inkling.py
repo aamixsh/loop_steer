@@ -41,6 +41,14 @@ Spec dicts (tensors may be on CPU), installed with ``LLM.apply_model(functools.p
       keep the final normalized hidden state (the LM head's input) of every request with
       ``extra_args["ls_final"] = (k, lo, hi)`` at positions ``lo <= pos < hi``; ``fetch_final`` returns
       ``{k: [hi - lo, D]}`` (``scripts/kick_kl.py``: logits through the model's own ``compute_logits``).
+  {"kind": "coda_from", "pass": p}   (eager engines only)
+      run the coda on the blocks of pass ``p`` (0-based) instead of the last pass: the readout "after pass p + 1"
+      (later passes still run, but nothing reads them). Running passes 1..p+1 and then the coda is the same
+      computation as a (p+1)-pass run (``scripts/loop_readout.py``).
+  {"kind": "msg", "mode": "ablate" | "zero", "passes": [p, ...], "dir": [D]}   (eager engines only)
+      change the cross-pass messages read by the core layers of the given passes (0-based; messages exist from
+      pass 1 on): ``ablate`` projects ``dir`` out of them, ``zero`` replaces them by 0 (the pass then gets nothing
+      from the previous one beyond what its gate makes of a zero message) (``scripts/inkling_rebuild.py``).
   {"kind": "norms"}   (eager engines only)
       keep the per-token norm of resid_pre at every site (every token but position 0); ``fetch_norms`` returns the
       median per site (``scripts/stream_norms.py``, for norm-matched activation addition).
@@ -168,6 +176,8 @@ class _Buffers:
         self.capture = None  # eager-only analysis state
         self.norms = None
         self.final = None
+        self.coda_from, self.saved_blocks = None, None
+        self.msg = []
 
     def visit_index(self, i, pass_idx):
         c = self.core
@@ -205,6 +215,8 @@ class _Buffers:
         self.slot.fill_(0)
         self.need_tokens = False
         self.capture = self.norms = self.final = None
+        self.coda_from, self.saved_blocks = None, None
+        self.msg = []
 
     # ------------------------------------------------------------------ token weights (graph-safe)
     def w(self, table, k, T):
@@ -290,6 +302,9 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     v = g.visit_index(i, pass_idx)
     on = g.abl_any[v]  # 0-dim bool: some ablation at this visit
 
+    if g.coda_from is not None and i == core.stop and g.saved_blocks is not None:  # eager only (Python branch)
+        nb_core = g.saved_blocks.shape[0]
+        stack[num_blocks - nb_core + 1: num_blocks + 1].copy_(g.saved_blocks)
     if num_blocks == 0 and i == 0:
         g.project(stack[0], T, v)  # the embedding (prelude selected)
     g.add_site(partial, positions, v)
@@ -301,6 +316,13 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     if bank is not None:
         messages = attn_res(bank[:1], bank[1], None, self.message_queries[i - core.start], None, 0.0, True)
         g.project(messages, T, v)
+        for m in g.msg:  # eager only (Python branch)
+            if pass_idx in m["passes"]:
+                if m["mode"] == "zero":
+                    messages.zero_()
+                else:
+                    u = m["dir"]
+                    messages.sub_((messages @ u).unsqueeze(-1) * u)
     if num_blocks == 0:
         fused = [norm(partial, j) for j in range(n_in)]
         dests = partial.float().unsqueeze(0).expand(n_in, -1, -1).contiguous()
@@ -343,6 +365,9 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     layer.mlp_sconv(layer.mlp(mlp_in[0], pass_idx=pass_idx), positions, addend=attn_out, residual=residual,
                     out=stack[num_blocks], owner=owner)
     g.project(stack[num_blocks], T, v)
+    if g.coda_from is not None and i == core.stop - 1 and pass_idx == g.coda_from:  # this pass's blocks for the coda
+        nb_core = -(-len(core) // self.block_size)
+        g.saved_blocks = stack[num_blocks - nb_core + 1: num_blocks + 1].clone()
 
     if i != self.config.num_hidden_layers - 1:
         return num_blocks, None
@@ -396,12 +421,16 @@ def _cls_row(positions):
     return row
 
 
-def _sink_thresholds(g, ratio):
-    """ratio * the median stream norm of every site (directions/stream_norms.pt), as [V]."""
-    from loop_steer.models import INKLING_ID
+def _sink_thresholds(g, ratio, model_name):
+    """ratio * the median stream norm of every site (directions/stream_norms[_loops<N>].pt of the served model at
+    the engine's pass count), as [V]; None without that file."""
+    from loop_steer.models import INKLING, INKLING_ID
     from loop_steer.paths import run_dir
 
-    path = run_dir(INKLING_ID) / "directions" / "stream_norms.pt"
+    name = next((m for m in INKLING if m == model_name or str(model_name).endswith(m.split("/")[-1])), INKLING_ID)
+    rd = run_dir(name) / "directions"
+    trained = 3
+    path = rd / ("stream_norms.pt" if g.passes == trained else f"stream_norms_loops{g.passes}.pt")
     if not path.exists():
         return None
     d = torch.load(path, weights_only=False)
@@ -457,6 +486,14 @@ def _install(model, specs):
         if k == "final":
             g.final = {}
             continue
+        if k == "coda_from":
+            g.coda_from = int(s["pass"])
+            continue
+        if k == "msg":
+            u = torch.as_tensor(s.get("dir", torch.ones(1)), dtype=torch.float32)
+            g.msg.append({"mode": s["mode"], "passes": list(s["passes"]),
+                          "dir": (u / u.norm()).to(g.abl_dir.device) if s["mode"] == "ablate" else None})
+            continue
         if k not in n:
             raise ValueError(f"unsupported spec kind {k!r} for Inkling")
         j = n[k]
@@ -502,11 +539,12 @@ def _install(model, specs):
                 if sink is not None and sink != ratio:
                     raise ValueError("kick specs with different sink ratios")
                 sink = ratio
-    if (g.capture is not None or g.norms is not None or g.final is not None) and not runner.model_config.enforce_eager:
-        raise RuntimeError("capture / norms / final run Python at every forward: build the engine with enforce_eager=True")
+    eager_only = (g.capture, g.norms, g.final, g.coda_from, g.msg or None)
+    if any(x is not None for x in eager_only) and not runner.model_config.enforce_eager:
+        raise RuntimeError("capture, norms, final and coda_from run Python at every forward: build the engine with enforce_eager=True")
     g.abl_any.copy_((g.abl_on > 0).any(0))
     if sink is not None:
-        thr = _sink_thresholds(g, sink)
+        thr = _sink_thresholds(g, sink, runner.model_config.model)
         if thr is not None:
             g.kick_thr.copy_(thr.to(g.kick_thr.device))
     if not g.need_tokens:  # every token in every class slot weighs 1, and fixed kick rows are all equal
