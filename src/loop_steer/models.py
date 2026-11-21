@@ -100,6 +100,34 @@ def model_sites(config) -> list[tuple[int, int]]:
     return [(t, l) for t in range(T) for l in range(L)]
 
 
+def hf_config(model_name: str):
+    """The model's HF config. Inkling (no config class in this transformers): its config.json at the pinned revision
+    as nested namespaces, enough for ``n_loops``, ``model_sites`` and ``loop_unit_layers``."""
+    if is_inkling(model_name):
+        import json
+        from types import SimpleNamespace
+
+        from huggingface_hub import hf_hub_download
+
+        d = json.load(open(hf_hub_download(model_name, "config.json", revision=INKLING[model_name])))
+        text = SimpleNamespace(**d["text_config"])
+        return SimpleNamespace(**{k: v for k, v in d.items() if k != "text_config"}, text_config=text,
+                               model_type=d["model_type"])
+    from transformers import AutoConfig
+
+    return AutoConfig.from_pretrained(model_name, **_remote_kwargs(model_name))
+
+
+def loop_unit_layers(cfg) -> list[int]:
+    """The layers that run once per loop: Dory's recurrent sublayers, Inkling's core, every layer otherwise."""
+    text = getattr(cfg, "text_config", None)
+    if text is not None and getattr(text, "loop_config", None) is not None:
+        return list(range(text.loop_config["core_start"], text.loop_config["core_end"]))
+    if getattr(cfg, "model_type", None) == "dory":
+        return list(range(cfg.n_input_layers, cfg.n_input_layers + cfg.n_recurrent_layers))
+    return list(range(cfg.num_hidden_layers))
+
+
 def _remote_kwargs(model_name: str) -> dict:
     if model_name == DORY_ID:  # no remote code: loop_steer.dory registers the classes
         return {"revision": DORY_REVISION}

@@ -32,10 +32,15 @@ Spec dicts (tensors may be on CPU), installed with ``LLM.apply_model(functools.p
       |resid_pre| > r * the site's median stream norm (``directions/stream_norms.pt``; the eager hooks of
       ``vllm_hooks`` use the median of the first forward pass instead). With ``vecs``, a request with
       ``extra_args["ls_vec"] = k`` gets row k; requests without an index are not kicked (run without prefix caching).
-  {"kind": "capture", "n_req": R, "n_windows": W}   (eager engines only: ``enforce_eager=True``)
+  {"kind": "capture", "n_req": R, "n_windows": W[, "norms": True]}   (eager engines only: ``enforce_eager=True``)
       accumulate, per request with ``extra_args["ls_cap"] = (k, [(lo, hi)] * W)`` (k < R), the sum of resid_pre over
       the tokens at positions ``lo <= pos < hi`` of each window at every site, and the token counts. Run without prefix
-      caching (cached tokens are not computed) and fetch with ``fetch_capture``.
+      caching (cached tokens are not computed) and fetch with ``fetch_capture``. With ``"norms": True`` it also keeps
+      the per-token norms of the window-0 tokens at every site (``fetch_capture_norms``: median per site).
+  {"kind": "final"}   (eager engines only)
+      keep the final normalized hidden state (the LM head's input) of every request with
+      ``extra_args["ls_final"] = (k, lo, hi)`` at positions ``lo <= pos < hi``; ``fetch_final`` returns
+      ``{k: [hi - lo, D]}`` (``scripts/kick_kl.py``: logits through the model's own ``compute_logits``).
   {"kind": "norms"}   (eager engines only)
       keep the per-token norm of resid_pre at every site (every token but position 0); ``fetch_norms`` returns the
       median per site (``scripts/stream_norms.py``, for norm-matched activation addition).
@@ -162,6 +167,7 @@ class _Buffers:
         self.need_tokens = False
         self.capture = None  # eager-only analysis state
         self.norms = None
+        self.final = None
 
     def visit_index(self, i, pass_idx):
         c = self.core
@@ -198,7 +204,7 @@ class _Buffers:
         self.cls.zero_()
         self.slot.fill_(0)
         self.need_tokens = False
-        self.capture = self.norms = None
+        self.capture = self.norms = self.final = None
 
     # ------------------------------------------------------------------ token weights (graph-safe)
     def w(self, table, k, T):
@@ -248,6 +254,8 @@ class _Buffers:
         h = partial.float()
         for w in range(cap["n_windows"]):
             sel = (k >= 0) & w_mask[w]
+            if w == 0 and cap.get("norm_list") is not None and sel.any():
+                cap["norm_list"].setdefault(v, []).append(h[sel].norm(dim=-1).cpu())
             if sel.any():
                 cap["sum"][:, w, v].index_add_(0, k[sel], h[sel])
                 if v == 0:
@@ -341,7 +349,21 @@ def _visit(self, i, pass_idx, stack, num_blocks, bank, next_query, next_norm, po
     mix = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, None, 0.0, True)
     g.project(mix, T, v)
     fused = attn_res(stack[:num_blocks], stack[num_blocks], None, next_query, next_norm.weight, next_norm.eps, True)
-    return num_blocks, torch.where(on, rms_norm(mix, next_norm.weight[0], next_norm.eps, torch.bfloat16), fused)
+    out = torch.where(on, rms_norm(mix, next_norm.weight[0], next_norm.eps, torch.bfloat16), fused)
+    if g.final is not None:  # eager only
+        _record_final(g, out[0], positions, getattr(self, "_ls_runner", None))
+    return num_blocks, out
+
+
+def _record_final(g, h, positions, runner):
+    req, valid, extras = _token_info(runner, positions, h.shape[0])
+    for r, e in enumerate(extras):
+        if "ls_final" not in e:
+            continue
+        k, lo, hi = e["ls_final"]
+        sel = valid & (req == r) & (positions >= lo) & (positions < hi)
+        if sel.any():
+            g.final.setdefault(int(k), []).append((positions[sel].clone(), h[sel].clone()))
 
 
 def _run_layer(self, i, pass_idx, stack, num_blocks, inputs, bank, next_query, next_norm, positions, tau, plan):
@@ -427,10 +449,13 @@ def _install(model, specs):
             g.capture = {"sum": torch.zeros(s["n_req"], s["n_windows"], len(visits), g.abl_dir.shape[1],
                                             dtype=torch.float32, device=g.abl_dir.device),
                          "count": torch.zeros(s["n_req"], s["n_windows"], dtype=torch.float64, device=g.abl_dir.device),
-                         "n_windows": s["n_windows"]}
+                         "n_windows": s["n_windows"], "norm_list": {} if s.get("norms") else None}
             continue
         if k == "norms":
             g.norms = {}
+            continue
+        if k == "final":
+            g.final = {}
             continue
         if k not in n:
             raise ValueError(f"unsupported spec kind {k!r} for Inkling")
@@ -477,8 +502,8 @@ def _install(model, specs):
                 if sink is not None and sink != ratio:
                     raise ValueError("kick specs with different sink ratios")
                 sink = ratio
-    if (g.capture is not None or g.norms is not None) and not runner.model_config.enforce_eager:
-        raise RuntimeError("capture / norms run Python at every forward: build the engine with enforce_eager=True")
+    if (g.capture is not None or g.norms is not None or g.final is not None) and not runner.model_config.enforce_eager:
+        raise RuntimeError("capture / norms / final run Python at every forward: build the engine with enforce_eager=True")
     g.abl_any.copy_((g.abl_on > 0).any(0))
     if sink is not None:
         thr = _sink_thresholds(g, sink)
@@ -496,11 +521,30 @@ def fetch_norms(model):
     return {v: float(torch.cat(x).median()) for v, x in g.norms.items()}
 
 
+def fetch_final(model, reset=True):
+    """{k: final hidden states [n, D] (GPU) in position order} since ``install``; with ``reset``, forget them."""
+    g = model.model._lsg
+    out = {}
+    for k, parts in g.final.items():
+        pos = torch.cat([p for p, _ in parts])
+        out[k] = torch.cat([h for _, h in parts])[pos.argsort()]
+    if reset:
+        g.final = {}
+    return out
+
+
+def fetch_capture_norms(model):
+    """{visit index: median norm of the window-0 tokens} of a capture with ``"norms": True``."""
+    nl = model.model._lsg.capture["norm_list"]
+    return {v: float(torch.cat(x).median()) for v, x in nl.items()}
+
+
 def fetch_capture(model, reset=True):
     """(sums [R, W, S, D] fp32, counts [R, W]) on CPU; with ``reset``, zero them."""
     cap = model.model._lsg.capture
     out = (cap["sum"].cpu(), cap["count"].cpu())
     if reset:
-        cap["sum"].zero_()
-        cap["count"].zero_()
+        with torch.inference_mode():  # the buffers are inference tensors (made in install)
+            cap["sum"].zero_()
+            cap["count"].zero_()
     return out

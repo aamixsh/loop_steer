@@ -107,6 +107,8 @@ def no_think_prompt(tok, messages, ouro_thought=OURO_THOUGHT):
     empty thinking block: Qwen3, Nanbeige, Dory). Ouro-Thinking has no such switch and ends its turn at once after an
     empty block; it gets a one-line closed thought (``ouro_thought``; 39 of 40 persona questions answered) or, with
     ``ouro_thought=None``, the plain template (it answers "Who are you?" directly, but thinks on harder questions)."""
+    if "Thinking effort level" in (getattr(tok, "chat_template", None) or ""):  # Inkling: its lowest effort (0.0),
+        return tok.apply_chat_template(messages, tokenize=False, reasoning_effort="none")  # which still thinks briefly
     try:
         text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, enable_thinking=False)
     except TypeError:
