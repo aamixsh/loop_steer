@@ -15,11 +15,14 @@ import os
 from pathlib import Path
 
 
+SIDE_FILES = (".scored.parquet", ".coh.parquet")  # judge outputs and plus_tune.py coherence scores, not generations
+
+
 def expand(paths, rescore):
     files = []
     for p in paths:
         if p.is_dir():
-            files += [f for f in sorted(p.glob("*.parquet")) if not f.name.endswith(".scored.parquet")]
+            files += [f for f in sorted(p.glob("*.parquet")) if not f.name.endswith(SIDE_FILES)]
         else:
             files.append(p)
     return [f for f in files if rescore or not f.with_suffix(".scored.parquet").exists()]

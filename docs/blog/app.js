@@ -46,6 +46,8 @@ const MODELS = {
   dory: { label: "Dory", full: "Dory 1.0 4B", color: "var(--dory)", loops: 2, layers: 40, ramps: true, dir: "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", tags: "grid_test{,_b}" },
   dory4: { label: "Dory × 4 loops", full: "Dory 1.0 4B run with 4 loops", color: "var(--dory)", loops: 4, layers: 40, ramps: true, dir: "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", tags: "grid_test4{,_b}" },
   qwen: { label: "Qwen (dense)", full: "Qwen3-8B", color: "var(--dense)", loops: 4, layers: 36, straight: true, dir: "Qwen3-8B", tags: "grid_test{,_b}" },
+  /* a looped mixture of experts; on the setup cards only until its results are in */
+  inkling: { label: "Inkling", full: "Inkling 2 Mini", color: "var(--inkling)", loops: 3, layers: 12, dir: "Inkling-2-Mini", tags: "grid_test" },
 };
 const QLAYERS = ["0–8", "9–17", "18–26", "27–35"];
 /* the order models appear in everywhere: Dory first (and the default), then Nanbeige, Ouro and the dense Qwen */
@@ -64,16 +66,47 @@ function src(text) { SOURCES.push(text); } /* data files, listed once at the end
 const escHtml = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 function mathHtml(tex, display) {
   if (window.katex) {
-    try { return window.katex.renderToString(tex, { output: "mathml", displayMode: display, throwOnError: false }); } catch (e) { /* fall through */ }
+    try { return window.katex.renderToString(tex, { output: "mathml", displayMode: display, throwOnError: false, errorColor: "inherit" }); } catch (e) { /* fall through */ }
   }
   return `<code class="tex">${escHtml(tex)}</code>`;
+}
+/* $...$ only when it reads as maths: no space just inside the dollars, no digit right after the closing one (prices),
+   no escaped dollar, and no run of plain words (prose caught between two stray dollars, common in reasoning traces).
+   A pair that fails leaves its first dollar as text and tries again from the second. */
+function looksTex(t, next) {
+  if (!t || t.length > 300 || /^\s|\s$|\n/.test(t) || /\d/.test(next || "")) return false;
+  return !/[A-Za-z]{3,}[\s,.;:!?]+[A-Za-z]{3,}/.test(t.replace(/\\text\{[^}]*\}|\\[a-zA-Z]+/g, " "));
+}
+function texPairs(t, render) {
+  let out = "", i = 0;
+  for (;;) {
+    const a = t.indexOf("$", i);
+    if (a < 0) break;
+    if (a > 0 && t[a - 1] === "\\") { out += t.slice(i, a - 1) + "$"; i = a + 1; continue; }
+    const b = t.indexOf("$", a + 1);
+    if (b < 0) break;
+    if (looksTex(t.slice(a + 1, b), t[b + 1])) { out += t.slice(i, a) + render(t.slice(a + 1, b)); i = b + 1; }
+    else { out += t.slice(i, a + 1); i = a + 1; }
+  }
+  return out + t.slice(i);
+}
+/* display maths ($$...$$, \[...\]) and \(...\), left as text when implausibly long (an unclosed delimiter) */
+function texBlocks(t, stash) {
+  t = t.replace(/\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$/g, (m, a, b) => (m.length > 800 ? m : stash(mathHtml(a || b, true))));
+  return t.replace(/\\\(([\s\S]+?)\\\)/g, (m, a) => (m.length > 400 ? m : stash(mathHtml(a, false))));
+}
+/* a reasoning trace: plain text (shown pre-wrapped) with its maths rendered */
+function texText(t) {
+  const keep = [];
+  const stash = (html) => `\u0000${keep.push(html) - 1}\u0000`;
+  t = texPairs(texBlocks(String(t || ""), stash), (x) => stash(mathHtml(x, false)));
+  return escHtml(t).replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
 }
 function mdInline(t) {
   const keep = [];
   const stash = (html) => `\u0000${keep.push(html) - 1}\u0000`;
-  t = t.replace(/\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$/g, (_, a, b) => stash(mathHtml(a || b, true)));
-  t = t.replace(/\\\(([\s\S]+?)\\\)|\$([^$\n]+?)\$/g, (_, a, b) => stash(mathHtml(a || b, false)));
   t = t.replace(/`([^`]+)`/g, (_, c) => stash(`<code>${escHtml(c)}</code>`));
+  t = texPairs(texBlocks(t, stash), (x) => stash(mathHtml(x, false)));
   t = escHtml(t);
   t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   t = t.replace(/\*\*([^*]+?)\*\*|__([^_]+?)__/g, (_, a, b) => `<strong>${a || b}</strong>`);
@@ -154,46 +187,23 @@ function chips(el, items, { value, onChange, swatch = false, multi = false } = {
   return btns;
 }
 
-/* ------------------------------------------------------------------ dot-matrix scoreboard */
-const G = {
-  "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."], "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
-  "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"], "3": ["#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."],
-  "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."], "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
-  "6": ["..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."], "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
-  "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."], "9": [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
-  "%": ["##...", "##..#", "...#.", "..#..", ".#...", "#..##", "...##"], "+": [".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."],
-  "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."], " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
-  "?": [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."],
-};
+/* ------------------------------------------------------------------ scoreboard: a big number that counts to its value */
 class Board {
-  /* bare: the dot matrix alone, without the caption rows (the hero tiles) */
-  constructor(el, { title = "", color = "var(--ink)", slots = 4, bare = false } = {}) {
+  /* bare: the number alone, without the caption rows (the hero tiles) */
+  constructor(el, { title = "", color = "var(--ink)", bare = false } = {}) {
     el.innerHTML = "";
-    this.color = color; this.slots = slots; this.cur = null; this.raf = 0;
+    this.color = color; this.cur = null; this.raf = 0;
     this.tl = h("span"); this.tr = h("span"); this.bl = h("span"); this.br = h("span");
-    this.svg = s("svg", { viewBox: `0 0 ${slots * 60 - 10} 70`, role: "img" });
-    this.cells = [];
-    for (let k = 0; k < slots; k++) {
-      const slot = [];
-      for (let r = 0; r < 7; r++) {
-        const row = [];
-        for (let c = 0; c < 5; c++) row.push(s("circle", { cx: k * 60 + c * 10 + 5, cy: r * 10 + 5, r: 3.7, fill: "var(--led-off)" }, this.svg));
-        slot.push(row);
-      }
-      this.cells.push(slot);
-    }
-    if (bare) el.append(this.svg);
-    else el.append(h("div", { class: "bl" }, this.tl, this.tr), this.svg, h("div", { class: "bl" }, this.bl, this.br));
+    this.v = h("span", { class: "bv" }); this.u = h("span", { class: "bu" });
+    this.num = h("div", { class: "bnum", role: "img" }, this.v, this.u);
+    if (bare) el.append(this.num);
+    else el.append(h("div", { class: "bl" }, this.tl, this.tr), this.num, h("div", { class: "bl" }, this.bl, this.br));
     this.tl.innerHTML = title;
   }
-  text(str) {
-    str = str.slice(-this.slots).padStart(this.slots, " ");
-    for (let k = 0; k < this.slots; k++) {
-      const g = G[str[k]] || G["?"];
-      for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++)
-        this.cells[k][r][c].style.fill = g[r][c] === "#" ? this.color : "var(--led-off)";
-    }
-    this.svg.setAttribute("aria-label", str.trim());
+  text(num, unit = "") {
+    this.v.textContent = num; this.u.textContent = unit;
+    this.num.style.color = this.color;
+    this.num.setAttribute("aria-label", num + unit);
   }
   set(v, o = {}) {
     if (o.color) this.color = o.color;
@@ -201,17 +211,18 @@ class Board {
     if (o.right != null) this.tr.innerHTML = o.right;
     if (o.sub != null) this.bl.innerHTML = o.sub;
     if (o.subRight != null) this.br.innerHTML = o.subRight;
-    const suffix = o.suffix ?? "%";
-    const fmt = (x) => (v == null ? "-" : `${o.sign && Math.round(x) > 0 ? "+" : ""}${Math.round(x)}${suffix}`);
+    const unit = o.suffix ?? "%";
+    const show = (x) => this.text(`${o.sign && Math.round(x) > 0 ? "+" : ""}${Math.round(x)}`, unit);
     cancelAnimationFrame(this.raf);
-    if (v == null) { this.text("--"); this.cur = null; return; }
+    this.num.classList.toggle("idle", v == null);
+    if (v == null) { this.text("–"); this.cur = null; return; }
     const from = this.cur ?? v;
     this.cur = v;
-    if (RM || o.animate === false || from === v) { this.text(fmt(v)); return; }
+    if (RM || o.animate === false || from === v) { show(v); return; }
     const t0 = performance.now(), dur = 650;
     const step = (t) => {
       const p = clamp((t - t0) / dur, 0, 1);
-      this.text(fmt(lerp(from, v, easeOut(p))));
+      show(lerp(from, v, easeOut(p)));
       if (p < 1) this.raf = requestAnimationFrame(step);
     };
     this.raf = requestAnimationFrame(step);
@@ -222,11 +233,15 @@ class Board {
 /* Each dot is one test prompt (or problem). It sits in the left column when most of its samples show the behaviour
    (refused, solved) and in the right column otherwise; its fill is the share of samples that did. When steering
    changes, the dots that switch sides slide across. */
+/* how a dot is drawn for each kick outcome (export_blog_data.KICK_OUT): solved filled; a finished wrong answer a ring;
+   no answer a dashed ring; cut off: lighter to darker grey for still reasoning, repeating itself, incoherent */
+const KICK_STYLE = [{ f: 1 }, { f: 0 }, { f: 0, dash: "2 2" }, { f: 0.22 }, { f: 0.55 }, { f: 0.55, dash: "2 2" }, { f: 0.4 }];
 class Split {
-  /* marks: dots drawn with a dark ring (example prompts); onPick(i) when one of them is clicked */
-  constructor(el, { n = 100, labels = ["Refuses", "Complies"], tipFn = null, marks = [], onPick = null } = {}) {
+  /* marks: dots drawn with a dark ring (prompts whose replies can be read); onPick(i) when a dot is clicked (marked
+     dots only, or every dot with pickAll); select(i) rings the dot being read */
+  constructor(el, { n = 100, labels = ["Refuses", "Complies"], tipFn = null, marks = [], onPick = null, pickAll = false } = {}) {
     el.innerHTML = "";
-    this.labels = labels; this.n = n; this.vals = null; this.marks = new Set(marks);
+    this.labels = labels; this.n = n; this.vals = null; this.marks = new Set(marks); this.sel = null;
     const d = 13, cols = 10, gap = 28, top = 26;
     Object.assign(this, { d, cols, top, colX: [4 + d / 2, 4 + d / 2 + cols * d + gap] });
     this.svg = s("svg", { viewBox: `0 0 ${2 * cols * d + gap + 8} ${top + 10 * d + 4}`, role: "img", class: "split" }, el);
@@ -235,43 +250,150 @@ class Split {
     this.c = Array.from({ length: n }, (_, i) => {
       const c = s("circle", { cx: 0, cy: 0, r: d * 0.39, "stroke-width": 1.3 }, this.svg);
       if (tipFn) addTip(c, () => tipFn(i, this.vals ? this.vals[i] : null));
-      if (this.marks.has(i) && onPick) { c.style.cursor = "pointer"; c.addEventListener("click", () => onPick(i)); }
+      if (onPick && (pickAll || this.marks.has(i))) {
+        c.style.cursor = "pointer"; c.setAttribute("tabindex", "0"); c.setAttribute("role", "button"); c.setAttribute("data-i", i);
+        c.addEventListener("click", () => onPick(i));
+        c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(i); } });
+      }
       return c;
     });
     for (const i of this.marks) this.svg.appendChild(this.c[i]); /* on top */
     this.side = new Array(n).fill(1);
     this.first = true;
   }
-  set(vals, color, label) {
-    this.vals = vals;
+  select(i) { this.sel = i; if (this.last) this.set(...this.last); }
+  /* cats: optional category per dot (kicks: KICK_STYLE); dots of one category sit together in their column */
+  set(vals, color, label, cats = null) {
+    this.vals = vals; this.last = [vals, color, label, cats];
     const side = this.c.map((_, i) => (vals && vals[i] != null ? (vals[i] >= 0.5 ? 0 : 1) : this.side[i]));
     const count = [0, 0], slot = [0, 0];
     side.forEach((sd, i) => { if (vals && vals[i] != null) count[sd]++; });
+    const order = this.c.map((_, i) => i);
+    if (cats) order.sort((a, b) => (cats[a] ?? 9) - (cats[b] ?? 9) || a - b);
     let moved = 0;
-    this.c.forEach((c, i) => {
+    for (const i of order) {
+      const c = this.c[i];
       const sd = side[i], j = slot[sd]++, v = vals ? vals[i] : null;
       const x = this.colX[sd] + (j % this.cols) * this.d, y = this.top + this.d / 2 + Math.floor(j / this.cols) * this.d;
       c.style.transitionDelay = this.first ? "0ms" : `${(sd !== this.side[i] ? moved++ : 0) * 9}ms`;
       if (this.first) c.style.transition = "none";
       c.style.transform = `translate(${x}px, ${y}px)`;
-      const mk = this.marks.has(i);
+      const mk = this.marks.has(i), on = this.sel === i;
       if (Array.isArray(color)) { /* a ramp: the fill's colour is the share of samples, blue (none) to red (all) */
         const f = v == null ? null : rgbKey(mixRGB(color[0], color[1], v));
-        c.style.fill = f || "none"; c.style.stroke = mk ? "var(--ink)" : f || "var(--ink-3)";
+        c.style.fill = f || "none"; c.style.stroke = mk || on ? "var(--ink)" : f || "var(--ink-3)";
         c.style.fillOpacity = 1; c.style.strokeOpacity = v == null ? 0.25 : 1;
-        c.setAttribute("stroke-width", mk ? 2.2 : 1);
+        c.setAttribute("stroke-width", on ? 3.2 : mk ? 2.2 : 1);
         if (v == null) c.setAttribute("stroke-dasharray", "2 3"); else c.removeAttribute("stroke-dasharray");
-        return;
+        continue;
       }
-      c.style.fill = color; c.style.stroke = mk ? "var(--ink)" : color;
+      c.style.fill = color; c.style.stroke = mk || on ? "var(--ink)" : color;
+      c.setAttribute("stroke-width", on ? 3 : 1.3);
+      const k = cats && v != null ? KICK_STYLE[cats[i]] : null;
       if (v == null) { c.style.fillOpacity = 0; c.style.strokeOpacity = 0.25; c.setAttribute("stroke-dasharray", "2 3"); }
-      else { c.style.fillOpacity = 0.06 + 0.94 * v; c.style.strokeOpacity = 0.85; c.removeAttribute("stroke-dasharray"); }
-    });
+      else if (k) {
+        c.style.fillOpacity = k.f; c.style.strokeOpacity = 0.9;
+        if (k.dash) c.setAttribute("stroke-dasharray", k.dash); else c.removeAttribute("stroke-dasharray");
+      } else { c.style.fillOpacity = 0.06 + 0.94 * v; c.style.strokeOpacity = 0.85; c.removeAttribute("stroke-dasharray"); }
+    }
     if (this.first) { this.first = false; requestAnimationFrame(() => this.c.forEach((c) => { c.style.transition = ""; })); }
     this.side = side;
     this.head.forEach((t, k) => { t.textContent = vals ? `${this.labels[k]} · ${count[k]}` : this.labels[k]; });
     this.svg.setAttribute("aria-label", label || (vals ? `${count[0]} ${this.labels[0].toLowerCase()}, ${count[1]} ${this.labels[1].toLowerCase()}` : "not run"));
   }
+}
+
+/* ------------------------------------------------------------------ replies behind the dots */
+/* gzipped JSON, base64-encoded as text (samples/<path>.txt, scripts/export_blog_samples.py), fetched once per file on
+   the first click */
+const SAMPLES = new Map();
+function loadSamples(path) {
+  if (!SAMPLES.has(path)) {
+    SAMPLES.set(path, (async () => {
+      const res = await fetch(`samples/${path}.txt`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const b64 = (await res.text()).trim();
+      if (typeof DecompressionStream === "undefined") throw new Error("this browser cannot unpack them");
+      const bin = atob(b64), buf = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; k++) buf[k] = bin.charCodeAt(k);
+      const text = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+      return JSON.parse(text);
+    })().catch((e) => { SAMPLES.delete(path); throw e; }));
+  }
+  return SAMPLES.get(path);
+}
+const fmtInt = (n) => Number(n).toLocaleString("en-US");
+/* one reply: the prompt, a who / verdict line, the reasoning folded behind "Thought for N tokens" (opened on a click),
+   and the answer, always shown */
+function replyView(el, { prompt, promptLabel = "Prompt", who, verdict = "", col = "var(--ink-3)", think = null, tokens = 0, closed = true, answer = "", note = "" }) {
+  clearEl(el);
+  if (prompt != null) { /* normal text flow (inside the .md grid every formula took a row of its own); figures folded away */
+    const figs = [], text = String(prompt).replace(/\[asy\]([\s\S]*?)\[\/asy\]/g, (_, c) => { figs.push(c.trim()); return "[figure]"; });
+    const p = h("div", { class: "md-inline" }); p.innerHTML = mdInline(text);
+    const box = h("div", { class: "ex-prompt" }, h("span", { class: "label" }, promptLabel), p);
+    figs.forEach((c, k) => box.append(h("details", { class: "think asy" }, h("summary", {}, `${figs.length > 1 ? `Figure ${k + 1}` : "The figure"}, as the Asymptote code the model saw`), h("pre", {}, c))));
+    el.append(box);
+  }
+  const card = h("div", { class: "reply" }, h("div", { class: "who" }, h("span", {}, who), h("span", { class: "verdict", style: `--c:${col}` }, verdict)));
+  if (think != null) {
+    const body = h("div", { class: "think-body" });
+    const det = h("details", { class: "think" }, h("summary", {}, closed ? `Thought for ${fmtInt(tokens)} tokens` : `Thought for ${fmtInt(tokens)} tokens, then hit the length limit`), body);
+    det.addEventListener("toggle", () => { if (det.open && !body.textContent) { if (think) body.innerHTML = texText(think); else body.textContent = "(no reasoning text)"; } });
+    card.append(det);
+  }
+  const ans = h("div", { class: "md answer" });
+  ans.innerHTML = answer ? markdown(answer) : `<p><i>${escHtml(note)}</i></p>`;
+  card.append(ans);
+  el.append(card);
+}
+
+/* a harmful test prompt's reply in one refusal run: its verdict over 9 samples and, for the mild prompts
+   (D.examples.safe), one sample's reasoning and answer; the other prompts show their verdict only */
+async function showRefusalReply(el, { run, cand, i, v, who, seq, cur }) {
+  const EX = D.examples, n9 = v == null ? null : Math.round(9 * v), refused = n9 != null && v >= 0.5;
+  const base = { prompt: `“${EX.all[i]}”`, promptLabel: `Prompt ${i + 1}`, who,
+    verdict: n9 == null ? "" : `${refused ? "refuses" : "complies"} · ${n9} of 9 samples refused`,
+    col: n9 == null ? "var(--ink-3)" : refused ? "var(--refuse)" : "var(--flow-ink)" };
+  if (!EX.safe.includes(i)) {
+    replyView(el, { ...base, note: "Reply not shown. The page only shows replies to the mild requests (the dots with a dark ring); for the rest it shows the verdict." });
+    return;
+  }
+  replyView(el, { ...base, note: "Loading the reply…" });
+  let x;
+  try { x = ((await loadSamples(`refusal-${run}.json.gz`)).cands[cand] || {})[String(i)]; }
+  catch (e) { if (seq === cur()) replyView(el, { ...base, note: `Could not load the replies (${e.message}).` }); return; }
+  if (seq !== cur()) return; /* another dot was picked meanwhile */
+  if (!x) { replyView(el, { ...base, note: "No sample for this prompt in this run." }); return; }
+  const [, closed, tokens, think, answer] = x;
+  replyView(el, { ...base, think, tokens, closed: !!closed, answer, note: "No answer: the reasoning hit the length limit, so the judge read the reasoning itself." });
+}
+
+/* kick outcomes: a key with counts under the dots, and one response on a click */
+function kickKey(el, out) {
+  clearEl(el);
+  if (!out) return;
+  const names = D.kicks.outcomes;
+  names.forEach((name, k) => {
+    const n = out.filter((c) => c === k).length;
+    if (!n && k > 1) return; /* always list solved and wrong answer; the rest when they occur */
+    const st = KICK_STYLE[k], sw = s("svg", { width: 12, height: 12, viewBox: "0 0 12 12", "aria-hidden": "true" });
+    s("circle", { cx: 6, cy: 6, r: 4.5, fill: "var(--kick)", "fill-opacity": st.f, stroke: "var(--kick)", "stroke-width": 1.3, "stroke-dasharray": st.dash || null }, sw);
+    el.append(h("span", {}, sw, `${name} · ${n}`));
+  });
+}
+async function showKickReply(el, { run, cand, i, code, who, seq, cur }) {
+  const names = D.kicks.outcomes, verdict = code == null ? "" : names[code], col = code === 0 ? "var(--ink)" : "var(--ink-2)";
+  let P, x;
+  replyView(el, { who, verdict, col, note: "Loading the response…" });
+  try { [P, x] = await Promise.all([loadSamples("math500.json.gz"), loadSamples(`kick-${run}/${cand}.json.gz`)]); }
+  catch (e) { if (seq === cur()) replyView(el, { who, verdict, col, note: `Could not load the responses (${e.message}).` }); return; }
+  if (seq !== cur()) return;
+  const ans = String(P.answers[i]), ansTxt = /^[A-Za-z][A-Za-z .,'-]*$/.test(ans) ? ans : `$${ans}$`; /* a word answer stays upright text */
+  const row = x.rows[i], base = { prompt: `${P.problems[i]} (correct answer: ${ansTxt})`, promptLabel: `Problem ${i + 1}`, who, verdict, col };
+  if (!row) { replyView(el, { ...base, note: "No response for this problem in this run." }); return; }
+  const [, closed, tokens, think, answer, pred] = row;
+  replyView(el, { ...base, verdict: `${verdict}${closed && pred != null && code !== 0 ? ` · said ${pred}` : ""}`, think, tokens, closed: !!closed, answer,
+    note: closed ? "The reasoning closed but no answer followed." : "No answer: the response was cut off at the length limit while still in its reasoning (open it above)." });
 }
 
 /* ------------------------------------------------------------------ the track: a two-lane ribbon */
@@ -295,7 +417,10 @@ const GEO = {
   /* pre / post: Ouro and Nanbeige go from the embedding straight into loop 1, and from the last loop straight into the LM head */
   ouro: { loop: 24, pre: 0.6, post: 0.6, ends: ["embed", "head"], site: { push: 16, kick: 12, persona: 12 } },
   nanbeige: { loop: 22, pre: 0.6, post: 0.6, ends: ["embed", "head"], site: { push: 15, kick: 11, persona: 11 } },
-  dory: { loop: 40, pre: 16, post: 16, ends: ["entry stack · 16", "exit stack · 16"], site: { push: 26, kick: 36, persona: 36 } },
+  dory: { loop: 40, pre: 16, post: 16, stacks: true, ends: ["entry stack · 16", "exit stack · 16"], site: { push: 26, kick: 36, persona: 36 } },
+  /* Inkling: a prelude of 6 layers, a core of 12 run 3 times (passes), a coda of 6; its picked refusal site is layer 11
+     (core layer 6 of 12), its kicks go in at layer 12 */
+  inkling: { loop: 12, pre: 6, post: 6, stacks: true, ends: ["prelude · 6", "coda · 6"], names: ["prelude", "coda", "core, 3 passes"], site: { push: 5, kick: 6, persona: 6 } },
   qwen: { straight: true, total: 36, site: { push: 3, kick: 4, persona: 4 } },
 };
 GEO.dory4 = GEO.dory;
@@ -455,7 +580,7 @@ class Track {
      renorm   = the stream itself is put back to unit length after every sublayer (a dark tick past the edges: Dory) */
   drawTicks(g, p0, p1, kind) {
     const G = this.G, w = this.w, T = this.T;
-    const inLayers = (p) => (this.straight ? p < G.total : G.pre >= 8 ? p < T : p >= G.pre && p < G.pre + this.n * G.loop);
+    const inLayers = (p) => (this.straight ? p < G.total : G.stacks ? p < T : p >= G.pre && p < G.pre + this.n * G.loop);
     for (let p = Math.floor(p0) + 0.5, end = Math.min(p1, T); p < end; p++) {
       if (p < p0 || !inLayers(p)) continue;
       const q = this.S[this.idxAt(p)], tx = -q.ny, ty = q.nx;
@@ -486,11 +611,11 @@ class Track {
         this.lapEls[k] = s("text", { x, y: y + 5, "text-anchor": "middle", class: "trk-loop", text: g.r < 15 ? `L${k}` : `LOOP ${k}` }, gk);
         if (k > this.trained) s("text", { x, y: y + 18, "text-anchor": "middle", class: "trk-small trk-extra", text: g.r < 15 ? "extra" : "extra loop" }, gk);
       }
-      if (G.pre >= 8) s("text", { x: g.x0 + g.pre / 2, y: g.yb + w + 17, "text-anchor": "middle", class: "trk-small", text: G.ends[0] }, L);
+      if (G.stacks) s("text", { x: g.x0 + g.pre / 2, y: g.yb + w + 17, "text-anchor": "middle", class: "trk-small", text: G.ends[0] }, L);
     }
     /* the end of the drawing (exit stack label, flag, outcome labels) slides as one piece when loops are added */
     const T = (this.tailLab = s("g", {}, L));
-    if (!this.straight && G.pre >= 8) s("text", { x: g.xe + g.post / 2, y: g.yb + w + 17, "text-anchor": "middle", class: "trk-small", text: G.ends[1] }, T);
+    if (!this.straight && G.stacks) s("text", { x: g.xe + g.post / 2, y: g.yb + w + 17, "text-anchor": "middle", class: "trk-small", text: G.ends[1] }, T);
     s("line", { x1: g.x0, x2: g.x0, y1: g.yb - w - 3, y2: g.yb + w + 3, stroke: "var(--ink-3)", "stroke-width": 1.5 }, L);
     s("rect", { x: g.end - 3, y: g.yb - w - 2, width: 6, height: 2 * w + 4, fill: `url(#${this.id}flag)`, stroke: "var(--ink)", "stroke-width": 0.8 }, T);
     if (!this.solo) {
@@ -505,9 +630,9 @@ class Track {
     const A = this.o.arch;
     if (!A) return;
     const g = this.geo, G = this.G, w = this.w, L = this.lab;
-    if (!this.straight && G.pre >= 8) {
-      s("text", { x: g.x0 + g.pre / 2, y: g.yb + w + 13, "text-anchor": "middle", class: "trk-small", text: "entry stack" }, L);
-      s("text", { x: g.xe + g.post / 2, y: g.yb + w + 13, "text-anchor": "middle", class: "trk-small", text: "exit stack" }, L);
+    if (!this.straight && G.stacks) {
+      s("text", { x: g.x0 + g.pre / 2, y: g.yb + w + 13, "text-anchor": "middle", class: "trk-small", text: (G.names || ["entry stack"])[0] }, L);
+      s("text", { x: g.xe + g.post / 2, y: g.yb + w + 13, "text-anchor": "middle", class: "trk-small", text: (G.names || [0, "exit stack"])[1] }, L);
     }
     if (A.gates) for (let k = 1; k < this.n; k++) {
       const x = g.x0 + g.pre + k * 2 * Math.PI * g.r;
@@ -586,7 +711,7 @@ class Track {
   bld(p) {
     const G = this.G;
     if (this.straight) return smooth((p - 3) / 24);
-    if (G.pre >= 8) return p < G.pre ? 0.35 * smooth(p / G.pre) : 0.35 + 0.65 * smooth((p - G.pre) / (0.25 * G.loop));
+    if (G.stacks) return p < G.pre ? 0.35 * smooth(p / G.pre) : 0.35 + 0.65 * smooth((p - G.pre) / (0.25 * G.loop));
     return smooth((p - G.pre) / (0.7 * G.loop));
   }
   idxAt(p) {
@@ -890,7 +1015,7 @@ class Stream3D {
     this.el = el;
     this.o = Object.assign({ model: "ouro", loops: null, maxLaps: null, trained: null, mini: false, meaning: MEAN.refusal, types: [], label: "", reinject: false, arch: null, speed: 1 }, o);
     this.G = GEO[this.o.model]; this.straight = !!this.G.straight;
-    this.feed = !this.straight && this.G.pre >= 8; /* Dory: every drawing of it gets its shortcut */
+    this.feed = !this.straight && !!this.G.stacks; /* Dory and Inkling: every drawing gets the shortcut from the stack that runs first */
     this.token = 0; this.runs = []; this.visible = false; this.dirty = true;
     if (el._track) { el._track.token++; if (el._track.dispose) el._track.dispose(); }
     el._track = this;
@@ -1108,7 +1233,7 @@ class Stream3D {
   /* the model cards: one ring per layer for how it normalises, and a gate where loops hand over */
   arch3() {
     const A = this.o.arch, G = this.G, T = this.T, kind = A.ticks;
-    const inLayers = (p) => (this.straight ? p < G.total : G.pre >= 8 ? p < T : p >= G.pre && p < G.pre + this.n * G.loop);
+    const inLayers = (p) => (this.straight ? p < G.total : G.stacks ? p < T : p >= G.pre && p < G.pre + this.n * G.loop);
     const ps = [];
     if (kind) for (let p = 0.5; p < T; p++) if (inLayers(p)) ps.push(p);
     const dbl = kind === "sandwich", geo = new T3.TorusGeometry(D3.rt * (kind === "renorm" ? 1.16 : 1.05), kind === "renorm" ? 0.016 : 0.011, 6, 30);
@@ -1125,6 +1250,81 @@ class Stream3D {
       this.root.add(ring);
     }
     if (A.exits && !this.straight) this.exits3();
+    if (A.moe) this.moe3();
+    if (A.plugs && !this.straight) this.plugs3();
+    if (A.msgs && !this.straight) this.msgs3();
+  }
+  /* Inkling's mixture of experts: a ring of 16 beads around every layer visit, each bead standing for 8 of the layer's
+     128 experts, one of them lit (the token goes to 8). The lit bead is a sketch; it moves between passes because the
+     router sees a new state on every pass, so the same layer can pick other experts. On the card it swells as the bead
+     passes. */
+  moe3() {
+    const G = this.G, T = this.T, NB = 16, R = D3.rt * 1.62, ps = [];
+    for (let p = 0.5; p < T; p++) ps.push(p);
+    const layerOf = (p) => { const i = Math.floor(p); if (i < G.pre) return [i, 0]; const c = i - G.pre; return c < this.n * G.loop ? [G.pre + (c % G.loop), 1 + Math.floor(c / G.loop)] : [G.pre + G.loop + (c - this.n * G.loop), 0]; };
+    const pick = (l, pass) => (l * 7 + pass * 5 + ((l * l * 3) % 5)) % NB;
+    const dimG = new T3.SphereGeometry(0.023, 8, 6), litG = new T3.SphereGeometry(0.036, 12, 9);
+    const dim = new T3.InstancedMesh(dimG, new T3.MeshStandardMaterial({ color: this.col.edge, roughness: 0.5, transparent: true, opacity: 0.75 }), ps.length * (NB - 1));
+    const litC = new T3.Color(cssHex("--inkling"));
+    const lit = new T3.InstancedMesh(litG, new T3.MeshStandardMaterial({ color: litC, emissive: litC, emissiveIntensity: 0.25, roughness: 0.4 }), ps.length);
+    const m = new T3.Matrix4(), qt = new T3.Quaternion(), one = new T3.Vector3(1, 1, 1);
+    this.moeLit = [];
+    let c = 0;
+    ps.forEach((p, j) => {
+      const [l, pass] = layerOf(p), k0 = pick(l, pass), at = this.ptAt(p);
+      qt.setFromUnitVectors(ZA, this.tanAt(p));
+      for (let k = 0; k < NB; k++) {
+        const a = (2 * Math.PI * k) / NB, pos = new T3.Vector3(R * Math.cos(a), R * Math.sin(a), 0).applyQuaternion(qt).add(at);
+        if (k === k0) { m.compose(pos, qt, one); lit.setMatrixAt(j, m); this.moeLit.push({ p, pos, q: qt.clone() }); }
+        else { m.compose(pos, qt, one); dim.setMatrixAt(c++, m); }
+      }
+    });
+    this.moeMesh = lit;
+    this.root.add(dim, lit);
+  }
+  moePulse(pb) {
+    if (!this.moeMesh) return;
+    const m = new T3.Matrix4(), sc = new T3.Vector3();
+    this.moeLit.forEach((b, j) => { const f = 1 + 0.9 * Math.exp(-(((b.p - pb) / 0.45) ** 2)); sc.set(f, f, f); m.compose(b.pos, b.q, sc); this.moeMesh.setMatrixAt(j, m); });
+    this.moeMesh.instanceMatrix.needsUpdate = true;
+  }
+  /* Inkling: every pass restarts from the prelude's state, so the stream of the pass before stops at a plug just before
+     the shortcut rises into the next pass */
+  plugs3() {
+    const G = this.G, mat = new T3.MeshStandardMaterial({ color: this.col.ink, roughness: 0.5 });
+    for (let k = 1; k < this.n; k++) {
+      const p = G.pre + k * G.loop - 0.32, disc = new T3.Mesh(new T3.CylinderGeometry(D3.rt * 1.22, D3.rt * 1.22, 0.045, 30), mat);
+      disc.position.copy(this.ptAt(p)); disc.quaternion.setFromUnitVectors(UP, this.tanAt(p));
+      this.root.add(disc);
+    }
+  }
+  /* Inkling: the passes talk through gated messages, read from the previous pass into every core sublayer: a dashed
+     bridge from the top of each pass to the top of the next, with a valve (the gate) at its peak */
+  msgYs() { const y0 = 2 * D3.d + D3.rt + 0.06; return { y0, peak: y0 + 0.36 }; }
+  msgs3() {
+    const G = this.G, ink = new T3.MeshStandardMaterial({ color: this.col.ink2, roughness: 0.5 }), { y0, peak } = this.msgYs();
+    const rod = new T3.CylinderGeometry(0.016, 0.016, 1, 8);
+    for (let k = 1; k < this.n; k++) {
+      const a = this.ptAt(G.pre + (k - 0.5) * G.loop), b = this.ptAt(G.pre + (k + 0.5) * G.loop);
+      const P0 = new T3.Vector3(a.x + 0.05, y0, a.z), P2 = new T3.Vector3(b.x - 0.05, y0, b.z), P1 = new T3.Vector3((a.x + b.x) / 2, 2 * peak - y0, (a.z + b.z) / 2);
+      const bz = (t) => P0.clone().multiplyScalar((1 - t) ** 2).addScaledVector(P1, 2 * t * (1 - t)).addScaledVector(P2, t * t);
+      const pts = Array.from({ length: 61 }, (_, i) => bz(i / 60)), cum = [0];
+      for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+      const L = cum[cum.length - 1], at = (l) => { let i = 1; while (i < cum.length - 1 && cum[i] < l) i++; const f = (l - cum[i - 1]) / Math.max(1e-9, cum[i] - cum[i - 1]); return pts[i - 1].clone().lerp(pts[i], f); };
+      const on = 0.07, off = 0.045, gap = 0.13; /* no dashes under the valve */
+      for (let l = 0.02; l + on < L - 0.06; l += on + off) {
+        if (Math.abs(l + on / 2 - L / 2) < gap) continue;
+        const u = at(l), v = at(l + on), d = new T3.Mesh(rod, ink);
+        d.position.copy(u).lerp(v, 0.5); d.scale.set(1, u.distanceTo(v), 1); d.quaternion.setFromUnitVectors(UP, v.clone().sub(u).normalize());
+        this.root.add(d);
+      }
+      const tip = new T3.Mesh(new T3.ConeGeometry(0.042, 0.09, 14), ink), e = at(L - 0.04), e0 = at(L - 0.12);
+      tip.position.copy(e); tip.quaternion.setFromUnitVectors(UP, e.clone().sub(e0).normalize()); this.root.add(tip);
+      const mid = at(L / 2), wheel = new T3.Mesh(new T3.TorusGeometry(0.075, 0.016, 8, 28), ink); wheel.position.copy(mid);
+      const bar = new T3.Mesh(new T3.BoxGeometry(0.15, 0.016, 0.016), ink); bar.position.copy(mid);
+      const bar2 = bar.clone(); bar2.rotation.z = Math.PI / 2;
+      this.root.add(wheel, bar, bar2);
+    }
   }
   /* Ouro: after every loop an exit gate can stop and send the stream to the LM head (trained that way; we always run
      every loop, so the routes stay empty). Each gate is a valve under the loop's end with its own dashed route to the
@@ -1167,6 +1367,7 @@ class Stream3D {
   topY() {
     const G = this.G, st = this.straight, d = D3.d;
     let y = (st ? 0 : 2 * d) + D3.rt;
+    if (!st && this.o.arch && this.o.arch.msgs) y = this.msgYs().peak + 0.08;
     for (const t of (this.o.types || []).filter((t) => t !== "erase")) {
       const ys = st ? 0 : d * (1 - Math.cos((2 * Math.PI * G.site[t]) / G.loop));
       y = Math.max(y, this.dropTop(ys) + 0.33);
@@ -1183,13 +1384,15 @@ class Stream3D {
       return;
     }
     const X = this.Xs, per = this.per;
-    this.label("looped stack", V((X[0] + X[this.n]) / 2, top), "s3-small", { mid: true });
-    if (G.pre >= 8 && (mini || !this.narrow)) {
-      this.label("entry stack", V(X[0] - (G.pre * per) * 0.62, mini ? -0.52 : -0.4), "s3-small", { p: G.pre / 2 });
-      this.label("exit stack", V(X[this.n] + (G.post * per) * 0.6, mini ? -0.52 : -0.4), "s3-small", { p: this.T - G.post / 2 });
+    const NM = G.names || ["entry stack", "exit stack", "looped stack"];
+    this.label(NM[2], V((X[0] + X[this.n]) / 2, top), "s3-small", { mid: true });
+    if (G.stacks && (mini || !this.narrow)) {
+      this.label(NM[0], V(X[0] - (G.pre * per) * 0.62, mini ? -0.52 : -0.4), "s3-small", { p: G.pre / 2 });
+      this.label(NM[1], V(X[this.n] + (G.post * per) * 0.6, mini ? -0.52 : -0.4), "s3-small", { p: this.T - G.post / 2 });
     }
+    if (o.arch && o.arch.msgs && this.n > 1) this.label("messages", V(X[this.n - 1] + Math.PI * D3.r + 0.62, this.msgYs().peak - 0.12), "s3-small");
     if (o.arch && o.arch.exits) this.label("exit gates", V((X[1] + X[this.n]) / 2, this.exitDepth(1) - 0.2), "s3-small");
-    if (mini && o.arch && G.pre < 8) { /* Ouro and Nanbeige: the two ends of the tube */
+    if (mini && o.arch && !G.stacks) { /* Ouro and Nanbeige: the two ends of the tube */
       this.label("embedding", V(this.S[0].x - 0.05, -0.46), "s3-small");
       this.label("LM head", V(this.bulb.g.position.x + 0.62, 0), "s3-small");
     }
@@ -1207,10 +1410,10 @@ class Stream3D {
       else {
         const x0 = S[0].x + G.pre * (LOOP3 / G.loop), xe = x0 + 2 * Math.PI * D3.r * nF;
         pts.push(V((x0 + xe) / 2, top));
-        if (G.pre >= 8) pts.push(V(S[0].x + 0.3, mini ? -0.6 : -0.5), V(S[S.length - 1].x - 0.3, mini ? -0.6 : -0.5));
+        if (G.stacks) pts.push(V(S[0].x + 0.3, mini ? -0.6 : -0.5), V(S[S.length - 1].x - 0.3, mini ? -0.6 : -0.5));
         if (this.feed) pts.push(V(x0 - 0.7, D3.byY - D3.byR - 0.06), V(xe, D3.byY - D3.byR - 0.06));
         if (this.o.arch && this.o.arch.exits) { const yd = this.exitDepth(1) - 0.3; pts.push(V(x0, yd), V(xe, yd)); }
-        if (mini && this.o.arch && G.pre < 8) pts.push(V(S[0].x - 0.6, -0.62), V(S[S.length - 1].x + 1.7, 0));
+        if (mini && this.o.arch && !G.stacks) pts.push(V(S[0].x - 0.6, -0.62), V(S[S.length - 1].x + 1.7, 0));
       }
       pts.n = nF; this.fitPts = pts;
     }
@@ -1254,8 +1457,8 @@ class Stream3D {
     const P = this.P, m = this.o.meaning, SIG = (m && m.sig) || RGB.red, q = this.S[i];
     if (!m && !P.leak) return RGB.grey; /* the model cards: no behaviour, just the architecture */
     if (P.leak) return mixRGB(RGB.flow, RGB.red, this.HALO[i]);
-    let vis = 1;
-    if (!P.curve) for (const e of this.evs) if (e.type === "erase") {
+    let vis = 1; /* a filter clears the liquid in its loop; a random-direction filter takes out nothing, so the behaviour builds as usual */
+    if (!P.curve && !P.random) for (const e of this.evs) if (e.type === "erase") {
       if (q.p >= e.a && q.p <= e.b) vis = 0;
       else if (q.p > e.b) vis = Math.min(vis, smooth((q.p - e.b) / (0.3 * (this.straight ? 9 : this.G.loop))));
     }
@@ -1432,13 +1635,14 @@ class Stream3D {
     }
   }
   /* ---------- runs */
-  play(P, { onDone, until, onProgress } = {}) {
+  play(P, { onDone, until, onProgress, placed = false } = {}) {
     const tok = ++this.token;
     this.runs = [];
     this.apply(P);
     const pEnd = until == null ? this.T : until;
-    if (RM) { for (const dv of this.devs) dv.ins = 1; this.placeDevices(); this.setFront(pEnd); onDone && onDone(); return; }
-    const wait = this.insertDevices();
+    if (RM || placed) { for (const dv of this.devs) dv.ins = 1; this.placeDevices(); } /* placed: the filters already dropped in (during a morph) */
+    if (RM) { this.setFront(pEnd); onDone && onDone(); return; }
+    const wait = placed ? 0 : this.insertDevices();
     const dur = Math.max(600, (pEnd * this.per * MSU) / this.o.speed), t0 = performance.now() + wait; /* same speed along the tube in every model */
     this.runs.push((now) => {
       if (tok !== this.token) return false;
@@ -1462,7 +1666,7 @@ class Stream3D {
     this.show({});
     if (RM) return;
     const t0 = performance.now(), ms = this.T * this.per * MSU; /* the cards' bead moves at the same speed as every run */
-    const f = (now) => { this.placeBead((((now - t0) / ms) % 1) * this.T); this.dirty = true; return true; };
+    const f = (now) => { const p = (((now - t0) / ms) % 1) * this.T; this.placeBead(p); this.moePulse(p); this.dirty = true; return true; };
     f.visOnly = true; this.runs.push(f); glKick();
   }
   /* add loops in place: the run with fromN loops grows into this one, or shrinks back with reverse */
@@ -1687,7 +1891,7 @@ function missingNote(m, missing, P, erase = false) {
   const novec = missing.filter((t) => !P.vector.includes(t)), weak = missing.filter((t) => P.vector.includes(t)), parts = [];
   if (weak.length) parts.push(`${andList(weak)}, which no strength that keeps replies coherent moves by 10 points even on every ${MODELS[m].straight ? "quarter" : "loop"} (best ${andList(weak.map((t) => sgn(P.tune[t].best)))})`);
   if (novec.length) parts.push(`${andList(novec)}, which ${name} will not play even when ${erase ? "its system prompt asks for it" : "told to"}, so there is no vector${erase ? " to erase" : ""}`);
-  return `Greyed out for ${name}: ${parts.join("; ")}.`;
+  return `* Not shown for ${name}: ${parts.join("; ")}.`;
 }
 function kickRows(m) { return D.kicks[m].rows; }
 function kickClean(m) { return kickRows(m).find((r) => r.cand === "none"); }
@@ -1709,15 +1913,14 @@ function kickFind(m, unit, eps, every = false) {
     { t: "Add 2 extra loops", v: ex.at_extra, loops: 4, plan: { events: both, vExit: vOf(c, ex.at_extra.r), bite, peak } },
   ];
   let auto = true, last = 0;
-  /* each tile: its name, a small dot-matrix scoreboard and the 95% interval, all in blue and red mixed by its refusal rate */
-  const slots = Math.max(...steps.map((st) => `${Math.round(st.v.r)}%`.length));
+  /* each tile: its name, its refusal rate as a big counting number and the 95% interval, all in blue and red mixed by its refusal rate */
   const tiles = steps.map((st, i) => {
-    const col = rgbCss(mixRGB(RGB.flow, RGB.red, st.v.r / 100)), led = h("div", { class: "led" });
+    const col = rgbCss(mixRGB(RGB.flow, RGB.red, st.v.r / 100)), led = h("div", { class: "num" });
     const b = h("button", { class: "step", type: "button", "aria-pressed": String(i === 0), style: `--c:${col}`, "aria-label": `${st.t}: ${pct(st.v.r)} refusal` },
       h("span", { class: "k" }, st.t), led, h("span", { class: "ci" }, `95% CI ${r0(st.v.lo)}–${pct(st.v.hi)}`));
     b.addEventListener("click", () => { auto = false; run(i); });
     $("hero-steps").append(b);
-    const board = new Board(led, { color: col, slots, bare: true });
+    const board = new Board(led, { color: col, bare: true });
     board.set(st.v.r, { animate: false });
     return { b, board };
   });
@@ -1728,11 +1931,14 @@ function kickFind(m, unit, eps, every = false) {
     const st = steps[i], bd = tiles[i].board, from = last === i ? 0 : steps[last].v.r, to = st.v.r;
     tiles.forEach((x, j) => { x.b.setAttribute("aria-pressed", String(i === j)); if (j !== i) x.board.set(steps[j].v.r, { animate: false }); });
     bd.set(from, { animate: false });
-    const go = () => tr.play(st.plan, { onProgress: (f) => bd.set(lerp(from, to, f), { animate: false }),
+    const go = (placed) => tr.play(st.plan, { placed, onProgress: (f) => bd.set(lerp(from, to, f), { animate: false }),
       onDone: () => { bd.set(to, { animate: false }); last = i; if (then) setTimeout(() => auto && then(), 1600); } });
-    if (st.loops > tr.n) { tr.build(st.loops, 2); tr.apply(st.plan); tr.morph(2, { onDone: go }); } /* the same model, run for 2 more loops */
+    if (st.loops > tr.n) { /* the same model, run for 2 more loops: the filters drop in while the tube grows */
+      tr.build(st.loops, 2); tr.apply(st.plan); tr.morph(2, { onDone: () => go(true) });
+      if (!RM) tr.insertDevices();
+    }
     else if (st.loops < tr.n) { tr.apply({ peak }); tr.morph(st.loops, { reverse: true, dur: 800, onDone: () => { tr.build(st.loops, 2); go(); } }); }
-    else go();
+    else go(false);
   }
   tr.show(steps[0].plan);
   /* the tiles sit right under the drawing, above its legend, so the two stay in view together on a phone */
@@ -1759,6 +1965,10 @@ function kickFind(m, unit, eps, every = false) {
     ["qwen", "Qwen3-8B", "Alibaba · 8B · 36 layers, once", { ticks: "pre" },
       [["each layer", "h \\leftarrow h + f(\\mathrm{N}(h))"]],
       "The dense control: 36 different layers, each run once, with the same pre-norm layers as Nanbeige. We cut it into four quarters of 9 layers to line it up with a four-loop model."],
+    ["inkling", "Inkling 2 Mini", "Thinking Machines · 26B MoE · 6 in, 12 × 3 passes, 6 out", { moe: true, plugs: true, msgs: true },
+      [["each layer", "b \\leftarrow b + f\\big(\\mathrm{N}(\\textstyle\\sum_j a_j\\, \\mathrm{N}(b_j))\\big)"], ["MoE layer", "f(x) = \\textstyle\\sum_{e \\in \\mathrm{top}\\,8} g_e(x)\\, E_e(x)"],
+        ["pass start", "b \\leftarrow b_{\\text{prelude}}"], ["message", "u \\leftarrow (1 - \\tanh \\phi) \\odot u + \\tanh \\gamma \\odot m"]],
+      "A looped mixture of experts: each layer's MLP has 128 experts, and a router sends every token to 8 of them (3.4B of 26B weights active; the rings, where each bead stands for 8 experts). There is no single residual stream: every sublayer reads a learned mix a of the finished 6-layer blocks b_j and the running block b. The prelude runs once, the core three times, the coda once. Each pass restarts from the prelude's state (the shortcut; the plug is where the pass before stops) and hears that pass only through gated messages m blended into every core sublayer's input u (the bridges). The router sees a new state on each pass, so a layer can pick other experts each time; which bead lights is a sketch. Its results are not in the figures yet."],
   ];
   for (const [m, name, spec, arch, eqs, desc] of info) {
     const box = h("div", { class: "trackbox mini" });
@@ -1768,7 +1978,7 @@ function kickFind(m, unit, eps, every = false) {
       h("div", { class: "spec" }, spec), box, eq, h("p", {}, desc));
     $("model-cards").append(card);
     const t = new Track3(box, { model: m, loops: MODELS[m].loops, mini: true, meaning: null, arch,
-      label: `${name}: ${m === "qwen" ? "one straight pass" : `${MODELS[m].loops} loops`}${arch.reinject ? ", input re-added before every loop" : arch.gates ? ", a shared norm between loops" : ""}` });
+      label: `${name}: ${m === "qwen" ? "one straight pass" : arch.msgs ? `${MODELS[m].loops} passes, each restarting from the prelude and reading the pass before through gated messages; 8 of 128 experts per layer` : `${MODELS[m].loops} loops`}${arch.reinject ? ", input re-added before every loop" : arch.gates ? ", a shared norm between loops" : ""}` });
     t.idle();
   }
   /* key to the marks on the cards */
@@ -1780,10 +1990,13 @@ function kickFind(m, unit, eps, every = false) {
     [(v) => { tube(v); for (const x of [8, 17, 26]) for (const dx of [-1.3, 1.3]) ring(v, x + dx, 4.3, "var(--ink-2)", 0.8); }, "double ring: reads and writes are normalised"],
     [(v) => { tube(v); for (const x of [8, 17, 26]) ring(v, x, 5.6, "var(--ink)", 1.1); }, "dark ring: the stream itself is renormalised"],
     [(v) => { tube(v); ring(v, 17, 6.6, "var(--ink)", 2.6); }, "collar: a norm between loops"],
-    [(v) => { s("path", { d: "M1 4H33M5 4C9 4 8 13 12 13H26V5", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.2 }, v); }, "shortcut: input added back each loop"],
+    [(v) => { s("path", { d: "M1 4H33M5 4C9 4 8 13 12 13H26V5", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.2 }, v); }, "shortcut: the first stack's output, added back each loop (Dory) or restarting each pass (Inkling)"],
     [(v) => { s("rect", { x: 0.5, y: 0.5, width: 26, height: 5, rx: 2.5, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 0.8 }, v); s("circle", { cx: 30, cy: 3, r: 3, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 1 }, v);
       s("line", { x1: 9, x2: 9, y1: 5.5, y2: 7.2, stroke: "var(--ink-2)", "stroke-width": 1.4 }, v); s("circle", { cx: 9, cy: 9, r: 1.9, fill: "none", stroke: "var(--ink-2)", "stroke-width": 1 }, v);
       s("path", { d: "M9 11.2V14.5H30V6.5", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.1, "stroke-dasharray": "2 1.4" }, v); }, "exit gate: a valve that can send a loop's output on its own route to the LM head"],
+    [(v) => { tube(v); for (let k = 0; k < 8; k++) { const a = (2 * Math.PI * k) / 8; s("circle", { cx: 17 + 3.2 * Math.cos(a), cy: 8 + 6.6 * Math.sin(a), r: k === 2 ? 1.7 : 1.05, fill: k === 2 ? "var(--inkling)" : "var(--ink-3)", "fill-opacity": k === 2 ? 1 : 0.6 }, v); } }, "expert ring: each bead is 8 of a layer's 128 experts; the lit one is where the token goes"],
+    [(v) => { tube(v); s("rect", { x: 15.6, y: 1.5, width: 2.8, height: 13, rx: 1.2, fill: "var(--ink)" }, v); }, "plug: the stream stops here, and the next pass restarts from the prelude"],
+    [(v) => { s("path", { d: "M3 14Q17 -4 31 14", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.2, "stroke-dasharray": "2.4 1.6" }, v); s("circle", { cx: 17, cy: 5, r: 2.6, fill: "var(--panel)", stroke: "var(--ink-2)", "stroke-width": 1 }, v); }, "bridge: a gated message from one pass into the next"],
   ];
   for (const [draw, text] of items) key.append(h("span", {}, sw(draw), text));
   const def = h("p", { class: "norm-def" });
@@ -1799,25 +2012,20 @@ function kickFind(m, unit, eps, every = false) {
   const EX = D.examples, exIds = Object.keys(EX.prompts).map(Number);
   const exNames = { 20: "An insult", 25: "A spam bot", 94: "A biased rubric" };
   st.ex = exIds[0];
-  const dots = new Split($("sb-dots"), { marks: exIds, onPick: (i) => { st.ex = i; exChips.forEach((b, j) => b.setAttribute("aria-pressed", String(exIds[j] === i))); showEx(); },
-    tipFn: (i, v) => (v == null ? `Prompt ${i + 1}: no data` : `${exIds.includes(i) ? `<b>“${EX.prompts[i]}”</b><br>` : `Prompt ${i + 1}<br>`}refused in ${Math.round(9 * v)} of its 9 samples`) });
+  const SAFE = new Set(EX.safe);
+  const dots = new Split($("sb-dots"), { marks: EX.safe, pickAll: true, onPick: (i) => { st.ex = i; exChips.forEach((b, j) => b.setAttribute("aria-pressed", String(exIds[j] === i))); showEx(); },
+    tipFn: (i, v) => (v == null ? `Prompt ${i + 1}: no data` : `${SAFE.has(i) ? `<b>“${escHtml(EX.all[i])}”</b><br>` : `Prompt ${i + 1}<br>`}refused in ${Math.round(9 * v)} of its 9 samples<br><i>click to ${SAFE.has(i) ? "read the reply" : "see the prompt"}</i>`) });
   chips($("sb-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })),
     { value: st.m, swatch: true, onChange: (m) => { st.m = m; st.sel = new Set([1]); build(); } });
   chips($("sb-mode"), [{ id: "erase", label: "Erase" }, { id: "push", label: "Add" }], { value: "erase", onChange: (v) => { st.mode = v; update(true); } });
   /* one reply per setting for a few prompts (a sample that agrees with the prompt's majority verdict) */
   const exChips = chips($("sb-ex-chips"), exIds.map((i) => ({ id: i, label: exNames[i] || `Prompt ${i + 1}` })), { value: st.ex, onChange: (i) => { st.ex = i; showEx(); } });
+  let exSeq = 0;
   function showEx() {
-    const sel = [...st.sel].sort(), key = sel.length ? `${st.mode}:${sel.join("")}` : "none";
-    const [share, text] = EX.models[st.m][String(st.ex)][key] || [null, ""];
+    const sel = [...st.sel].sort(), r = sel.length ? rec(st.m, st.mode, sel) : grid(st.m).clean;
     const where = sel.length ? `${st.mode === "erase" ? "erased" : "added"} on ${sel.map((k) => unitName(st.m, k)).join(" + ")}` : "no steering";
-    const refused = share != null && share >= 0.5, col = share == null ? "var(--ink-3)" : refused ? "var(--refuse)" : "var(--flow-ink)";
-    const body = h("div", { class: "md" });
-    body.innerHTML = text ? markdown(text) : "<p><i>No finished reply among its samples.</i></p>";
-    clearEl($("sb-ex"));
-    $("sb-ex").append(
-      h("div", { class: "ex-prompt" }, h("span", { class: "label" }, "Prompt"), h("span", {}, `“${EX.prompts[st.ex]}”`)),
-      h("div", { class: "reply" }, h("div", { class: "who" }, h("span", {}, `${MODELS[st.m].label} · ${where}`),
-        h("span", { class: "verdict", style: `--c:${col}` }, share == null ? "" : `${refused ? "refuses" : "complies"} · ${Math.round(9 * share)} of 9 samples refused`)), body));
+    dots.select(st.ex);
+    showRefusalReply($("sb-ex"), { run: st.m, cand: r.cand, i: st.ex, v: r.dots ? r.dots[st.ex] : null, who: `${MODELS[st.m].label} · ${where}`, seq: ++exSeq, cur: () => exSeq });
   }
   chips($("sb-presets"), [{ id: "first", label: "First" }, { id: "last", label: "Last" }, { id: "all", label: "All" }, { id: "none", label: "None" }],
     { multi: true, onChange: (v, b) => {
@@ -1885,30 +2093,103 @@ function kickFind(m, unit, eps, every = false) {
   $("plus-chart").append(pbox);
   const plusUnits = {
     dory: [["first", "L1", "loop 1"], ["last", "L2", "loop 2"], ["all", "all", "both loops"]],
-    dory4: [["first", "L1", "loop 1"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
+    dory4: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["l3", "L3", "loop 3"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
     nanbeige: [["first", "L1", "loop 1"], ["last", "L2", "loop 2"], ["all", "all", "both loops"]],
-    ouro: [["first", "L1", "loop 1"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
+    ouro: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["l3", "L3", "loop 3"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
     qwen: [["first", "Q1", "Q1"], ["q2", "Q2", "Q2"], ["q3", "Q3", "Q3"], ["last", "Q4", "Q4"], ["all", "all", "all four quarters"]],
   };
-  const unc = (m, k) => (P[m].unclosed && P[m].unclosed[k] != null ? `<br>${pct(P[m].unclosed[k])} of reasoning traces never close (no steering: ${pct(P[m].unclosed.clean)})` : "");
+  /* each model at the strength tuned for refusal vs coherence (E15) where those runs exist, else E14's 4x */
+  const TP = (m) => P[m].tuned || P[m];
+  const extra = (m, k) => {
+    const T = TP(m), parts = [];
+    if (T.coh && T.coh[k] != null) parts.push(`coherence ${r0(T.coh[k])} (unsteered ${r0(T.coh.clean)})`);
+    if (T.unclosed && T.unclosed[k] != null) parts.push(`${pct(T.unclosed[k])} of reasoning traces never close (unsteered ${pct(T.unclosed.clean)})`);
+    return parts.length ? `<br>${parts.join("<br>")}` : "";
+  };
+  /* one y scale for every panel, just above the largest bar (the tuned additions refuse far less than 100%) */
+  const PMAX = Math.max(20, Math.ceil(Math.max(...Object.entries(plusUnits).flatMap(([m, us]) =>
+    [...us.map(([k]) => TP(m)[k]), TP(m).random, TP(m).clean].filter((v) => v != null))) / 10) * 10);
   for (const [m, us] of Object.entries(plusUnits)) {
     const b = h("div", { class: m === "qwen" ? "span2" : null }); pbox.append(b);
-    const every = m === "qwen" ? "all four quarters" : "every loop";
-    barChart(b, { title: MODELS[m].label, subtitle: m === "dory4" ? "trained with 2 loops" : m === "qwen" ? "added at the start of each quarter" : null, w: m === "qwen" ? 470 : 230,
-      items: us.map(([k, lab, name]) => ({ label: lab, value: P[m][k], color: MODELS[m].color, faded: k === "all",
-        tip: P[m][k] == null ? `${MODELS[m].full}: addition on ${name} not run yet` : `${MODELS[m].full}: refusal direction added on ${name} → ${pct(P[m][k], 1)} of harmless prompts refused${unc(m, k)}` }))
-        .concat([{ label: "rand", value: P[m].random, color: "var(--neutral)",
-          tip: `${MODELS[m].full}: a random direction of the same size added on ${every} → ${pct(P[m].random, 1)} of harmless prompts “refused”${unc(m, "random")}` }]),
-      refs: [{ value: P[m].clean, label: `none ${pct(P[m].clean)}` }] });
+    const T = TP(m), every = m === "qwen" ? "all four quarters" : "every loop";
+    const sub = [m === "dory4" ? "trained with 2" : m === "qwen" ? "start of each quarter" : null, T.mult ? `strength ${T.mult}×` : null].filter(Boolean).join(" · ");
+    /* Qwen spans two columns on wide screens; on a phone (one column) a 470-wide panel would shrink to half size */
+    barChart(b, { title: MODELS[m].label, subtitle: sub || null, w: m === "qwen" ? (window.innerWidth < 640 ? 300 : 470) : 230, max: PMAX, padR: us.length >= 5 && m !== "qwen" ? 60 : 46,
+      items: us.map(([k, lab, name]) => ({ label: lab, value: T[k], color: MODELS[m].color, faded: k === "all",
+        tip: T[k] == null ? `${MODELS[m].full}: addition on ${name} not run yet` : `${MODELS[m].full}: refusal direction added on ${name} → ${pct(T[k], 1)} of harmless prompts refused${extra(m, k)}` }))
+        .concat([{ label: "rand", value: T.random, color: "var(--neutral)",
+          tip: `${MODELS[m].full}: a random direction of the same size added on ${every} → ${pct(T.random, 1)} of harmless prompts “refused”${extra(m, "random")}` }]),
+      refs: [{ value: T.clean, label: `none ${pct(T.clean)}` }] });
   }
-  src("Flip the sign: data/runs/<model>/generations/plus_harmless (Dory ×4: plus_harmless4), 100 harmless test prompts; 4 times the tuned |c| (Nanbeige c = 4, Dory c = 2, Ouro c = 4, Qwen c = 4); random direction at the same c on every loop / quarter");
-  const PO = P.ouro;
-  $("plus-ouro").textContent = `Ouro keeps the same order (${pct(PO.first)} on loop 1, ${pct(PO.last)} on loop 4), but it takes the addition badly: ${pct(PO.unclosed.last)} of its loop-4 reasoning traces never close (${pct(PO.unclosed.clean)} without steering), and on every loop a random direction scores ${pct(PO.random)} too, so its numbers say more about a broken model than about refusal.`;
-  const pq = ["first", "q2", "q3", "last"].map((k) => P.qwen[k]);
-  $("plus-qwen").textContent = pq.every((v) => v != null)
-    ? `Qwen again does it in the middle: the addition at the start of Q2 or Q3 makes it refuse ${pct(P.qwen.q2)} and ${pct(P.qwen.q3)} of harmless prompts, against ${pct(P.qwen.first)} for Q1 and ${pct(P.qwen.last)} for Q4.`
-    : `In Qwen the last quarter alone reaches only ${pct(P.qwen.last)} and the first ${pct(P.qwen.first)}, against ${pct(P.qwen.all)} for all four; the middle quarters have not been run yet.`;
+  src("Flip the sign: data/runs/<model>/generations/plus_harmless (Dory ×4: plus_harmless4), 100 harmless test prompts, at the strength tuned per model on 50 held-out harmless prompts (analysis/plus_tune.json, scripts/plus_tune.py; coherence judged by gpt-oss-20b); random direction at the same strength on every loop / quarter");
+  plusTune($("plus-tune"), P);
+  plusText(P, TP);
 })();
+
+/* the sentences under "flip the sign" that quote Ouro's and Qwen's bars */
+function plusText(P, TP) {
+  const q = TP("qwen"), o = TP("ouro"), n = TP("nanbeige"), d = TP("dory");
+  /* the sentences follow the data: whether the last loop alone gets most of the every-loop effect, and whether Qwen's
+     middle quarters stand out */
+  $("plus-dory").textContent = d.last >= 0.6 * d.all
+    ? `Dory's last loop does nearly all of it: the addition there alone makes it refuse ${pct(d.last)} of harmless prompts, against ${pct(d.all)} on both loops, ${pct(d.first)} on the first loop and ${pct(d.clean)} unsteered.`
+    : `Dory refuses ${pct(d.last)} of harmless prompts with the addition on its last loop, ${pct(d.all)} on both loops and ${pct(d.first)} on the first (${pct(d.clean)} unsteered).`;
+  const most = (t) => t.last >= 0.6 * t.all, d4 = TP("dory4");
+  const mid = (t) => (t.l2 != null && t.l3 != null ? [t.l2, t.l3] : null);
+  $("plus-dory").textContent += mid(d4) ? ` Run with four loops, Dory refuses ${pct(d4.last)} with the addition on loop 4 alone, against ${pct(d4.first)}, ${pct(d4.l2)} and ${pct(d4.l3)} on loops 1 to 3.` : "";
+  $("plus-ouro").textContent = (!most(n) && !most(o)
+    ? `Nanbeige and Ouro need it on every loop: ${pct(n.all)} and ${pct(o.all)}, against ${pct(n.last)} and ${pct(o.last)} with it on the last loop alone.`
+    : `Nanbeige refuses ${pct(n.last)} with it on the last loop and ${pct(n.all)} on every loop; Ouro ${pct(o.last)} and ${pct(o.all)}.`)
+    + (!mid(o) ? "" : Math.max(o.l2, o.l3) <= o.first + 2 ? ` Ouro's middle loops on their own do no more than its first (${pct(o.l2)} and ${pct(o.l3)}).` : ` With it on loop 2 or loop 3 alone, Ouro refuses ${pct(o.l2)} and ${pct(o.l3)}.`);
+  const qs = [q.first, q.q2, q.q3, q.last], top = Math.max(...qs), bi = qs.indexOf(top), ends = Math.max(q.first, q.last);
+  const midTop = (bi === 1 || bi === 2) && top >= ends + 3;
+  $("plus-qwen").textContent = q.q2 == null ? ""
+    : top < 3
+      ? `Qwen hardly moves at a strength that keeps it coherent: ${pct(q.all)} with the addition in all four quarters, at most ${pct(top)} with one.`
+      : `Qwen refuses ${pct(q.all)} with the addition in all four quarters and at most ${pct(top)} with it in one, Q${bi + 1}`
+        + (midTop ? `, a middle quarter as with erasing (Q1 ${pct(q.first)}, Q4 ${pct(q.last)}).` : ".");
+}
+
+/* choosing the strength of +u: refusal of harmless prompts and judged coherence at each strength tried (every loop at once,
+   50 held-out prompts); the chosen strength is ringed, strengths that break the rule are hollow */
+function plusTune(el, P) {
+  if (!el) return;
+  el.innerHTML = "";
+  const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => P[m].tune);
+  if (!ms.length) { el.closest(".fig").hidden = true; return; }
+  const box = h("div", { class: "multiples" }); el.append(box);
+  for (const m of ms) {
+    const U = P[m].tune, rows = U.rows, W = 230, H = 196, mL = 30, mR = 10, top = 40, bot = H - 30;
+    /* strengths on a log scale (the grid doubles from 0.5x to 4x, with extra points inside the coherence cliff);
+       only the doubling grid is labelled */
+    const xs = rows.map((r) => r.mult), l0 = Math.log2(xs[0]), l1 = Math.log2(xs[xs.length - 1]);
+    const X = (i) => mL + ((W - mL - mR) * (Math.log2(xs[i]) - l0)) / (l1 - l0), Y = (v) => bot - ((bot - top) * clamp(v, 0, 100)) / 100;
+    const LAB = [0.25, 0.5, 1, 1.5, 2, 3, 4];
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${MODELS[m].label}: refusal and coherence at each strength` }, h("div", {}));
+    box.append(svg.parentNode);
+    s("text", { x: 0, y: 15, class: "t-title", text: MODELS[m].label }, svg);
+    s("text", { x: 0, y: 29, text: `chosen: ${U.mult}× ${U.any_ok ? "" : "(none passed; the weakest)"}`, "font-size": 10 }, svg);
+    for (const v of [0, 50, 100]) {
+      s("line", { x1: mL, x2: W - mR, y1: Y(v), y2: Y(v), stroke: "var(--line)" }, svg);
+      s("text", { x: mL - 5, y: Y(v) + 3.5, "text-anchor": "end", text: String(v), "font-size": 9.5 }, svg);
+    }
+    const thr = U.clean.coherence - 10;
+    s("line", { x1: mL, x2: W - mR, y1: Y(thr), y2: Y(thr), stroke: "var(--ink-3)", "stroke-dasharray": "3 3" }, svg);
+    xs.forEach((x, i) => { if (LAB.includes(x)) s("text", { x: X(i), y: bot + 14, "text-anchor": "middle", text: `${x}×`, "font-size": 9.5 }, svg); });
+    const line = (k, col, w) => s("polyline", { points: rows.map((r, i) => `${X(i).toFixed(1)},${Y(r[k]).toFixed(1)}`).join(" "), fill: "none", stroke: col, "stroke-width": w, "stroke-linejoin": "round" }, svg);
+    line("coherence", "var(--ink-2)", 1.6); line("refusal", "var(--refuse)", 2.2);
+    rows.forEach((r, i) => {
+      const chosen = r.c === U.c;
+      for (const [k, col] of [["coherence", "var(--ink-2)"], ["refusal", "var(--refuse)"]])
+        s("circle", { cx: X(i), cy: Y(r[k]), r: 3.4, fill: r.ok ? col : "var(--panel)", stroke: col, "stroke-width": 1.4 }, svg);
+      if (chosen) s("rect", { x: X(i) - 6.5, y: top - 6, width: 13, height: bot - top + 12, rx: 6.5, fill: "none", stroke: "var(--steer)", "stroke-width": 1.6 }, svg);
+      /* hover band: halfway to each neighbour */
+      const a = i ? (X(i - 1) + X(i)) / 2 : X(i) - 12, b = i < rows.length - 1 ? (X(i) + X(i + 1)) / 2 : X(i) + 12;
+      addTip(s("rect", { x: a, y: top - 8, width: b - a, height: bot - top + 24, fill: "transparent" }, svg),
+        `${MODELS[m].full}, +u on ${m === "qwen" ? "all four quarters" : "every loop"} at ${r.mult}× (c = ${r.c})<br>refusal ${pct(r.refusal)} of harmless prompts (unsteered ${pct(U.clean.refusal)})<br>coherence ${r0(r.coherence)} (unsteered ${r0(U.clean.coherence)})<br>never closes: ${pct(r.capped)} (unsteered ${pct(U.clean.capped)})${chosen ? "<br><b>chosen</b>" : r.ok ? "" : "<br>fails the coherence rule"}`);
+    });
+  }
+}
 
 /* looped vs dense, side by side along the forward pass: each stretch that can be erased gets a column, red up to the
    refusal rate after erasing that stretch alone, blue for the rest. Qwen dips in the middle; Dory only at the end. */
@@ -1966,7 +2247,7 @@ function contrastChart(el) {
   const refusalExp = (mode) => (m) => {
     const e = D.extra[m][mode], n = trainedOf(m), c = grid(m).clean.r, bite = vRef(m, mode, String(n));
     const ev = Array.from({ length: n }, (_, i) => ({ k: i + 1, type: mode }));
-    return { a: e.at_trained, b: e.at_extra, c: e.clean.r, unit: "%", dots: true, what: "refusal rate", steered: "every trained loop", color: "var(--refuse)",
+    return { a: { ...e.at_trained, run: m }, b: { ...e.at_extra, run: m === "dory" ? "dory4" : "ouro6" }, c: e.clean.r, gain: e.gain, unit: "%", dots: true, what: "refusal rate", steered: "every trained loop", color: "var(--refuse)",
       plan: (x) => ({ events: ev, vExit: vOf(c, (x ? e.at_extra : e.at_trained).r), bite, peak: c / 100 }) };
   };
   const EXPS = {
@@ -1989,7 +2270,8 @@ function contrastChart(el) {
       /* darkness = accuracy lost: the kick darkens the stream as much as it costs when nothing follows, and the extra
          loops wash out as much of that as they win back */
       const dA = clamp(1 - ra.acc / cA, 0, 1), dB = clamp(1 - rb.acc / cB, 0, 1);
-      return { a: { r: 100 * ra.acc, dots: ra.dots }, b: { r: 100 * rb.acc, dots: rb.dots }, c: 100 * cB, cA: 100 * cA, unit: "%", dots: true, what: "MATH-500 accuracy",
+      return { a: { r: 100 * ra.acc, dots: ra.dots, out: ra.out, cand: ra.cand, run: A }, b: { r: 100 * rb.acc, dots: rb.dots, out: rb.out, cand: rb.cand, run: B },
+        c: 100 * cB, cA: 100 * cA, unit: "%", dots: true, what: "MATH-500 accuracy",
         steered: `loop ${loop} (kick size 1)`, kickLap: loop, color: "var(--kick)",
         plan: (x) => ({ events: [{ k: loop, type: "kick" }], vExit: x ? dB : dA, bite: dA }) };
     } },
@@ -2002,7 +2284,17 @@ function contrastChart(el) {
   }
   const togg = chips($("ex-toggle"), [{ id: false, label: "Trained loops" }, { id: true, label: "+2 extra loops" }], { value: false,
     onChange: (v) => { const was = st.extra; st.extra = v; update(true, v && !was ? "grow" : !v && was ? "shrink" : null); } });
-  let dotsKind = null;
+  let dotsKind = null, exCur = null, exSeq = 0;
+  const exPick = { refusal: D.examples.safe[0], kick: 0 };
+  /* the reply behind the picked dot, in the run on show (trained loops or two extra) */
+  function exReply() {
+    if (!exCur || !dots) return;
+    const M = MODELS[st.m], E = EXPS[st.exp], kind = st.exp === "kick" ? "kick" : "refusal", i = exPick[kind];
+    const who = `${M.label} · ${E.label.toLowerCase()} · ${trainedOf(st.m) + (st.extra ? 2 : 0)} loops`;
+    dots.select(i);
+    if (kind === "kick") showKickReply($("ex-ex"), { run: exCur.run, cand: exCur.cand, i, code: exCur.out ? exCur.out[i] : null, who, seq: ++exSeq, cur: () => exSeq });
+    else showRefusalReply($("ex-ex"), { run: exCur.run, cand: exCur.cand, i, v: exCur.dots[i], who, seq: ++exSeq, cur: () => exSeq });
+  }
   function update(animate, morph) {
     const M = MODELS[st.m], E = EXPS[st.exp], x = E.get(st.m);
     const trained = trainedOf(st.m), n = trained + (st.extra ? 2 : 0);
@@ -2018,13 +2310,19 @@ function contrastChart(el) {
       if (x.dots) {
         const kind = st.exp === "kick" ? "kick" : "refusal";
         if (dotsKind !== kind) {
+          const pick = (i) => { exPick[kind] = i; exReply(); };
           dots = new Split($("ex-dots"), kind === "kick"
-            ? { labels: ["Solved", "Wrong"], tipFn: (i, w) => `Problem ${i + 1}: ${w == null ? "no data" : w >= 0.5 ? "solved" : "wrong or unfinished"}` }
-            : { tipFn: (i, w) => (w == null ? `Prompt ${i + 1}: no data` : `Prompt ${i + 1}<br>refused in ${pct(100 * w)} of its 9 samples`) });
+            ? { labels: ["Solved", "Not solved"], pickAll: true, onPick: pick,
+                tipFn: (i, w) => `Problem ${i + 1}: ${w == null ? "no data" : exCur && exCur.out ? D.kicks.outcomes[exCur.out[i]] : w >= 0.5 ? "solved" : "not solved"}<br><i>click to read the response</i>` }
+            : { marks: D.examples.safe, pickAll: true, onPick: pick,
+                tipFn: (i, w) => (w == null ? `Prompt ${i + 1}: no data` : `Prompt ${i + 1}<br>refused in ${Math.round(9 * w)} of its 9 samples<br><i>click to ${D.examples.safe.includes(i) ? "read the reply" : "see the prompt"}</i>`) });
           dotsKind = kind;
         }
-        $("ex-dots").hidden = false; dots.set(v.dots, kind === "kick" ? "var(--kick)" : [RGB.flow, RGB.red]);
-      } else $("ex-dots").hidden = true;
+        exCur = v;
+        $("ex-dots").hidden = false; dots.set(v.dots, kind === "kick" ? "var(--kick)" : [RGB.flow, RGB.red], null, kind === "kick" ? v.out : null);
+        kickKey($("ex-key"), kind === "kick" ? v.out : null);
+        exReply();
+      } else { $("ex-dots").hidden = true; clearEl($("ex-key")); clearEl($("ex-ex")); exCur = null; }
     };
     const go = () => {
       if (animate) { board.set(null, { sub: "running…", subRight: "" }); tr.play(plan, { onDone: done }); }
@@ -2040,10 +2338,15 @@ function contrastChart(el) {
     const unitFmt = (val) => (x.unit === "%" ? pct(val, 1) : (x.sign ? `${val > 0 ? "+" : ""}${val.toFixed(1)}` : val.toFixed(1)));
     $("ex-cap").textContent = `${M.full}, ${E.label.toLowerCase()} on ${x.steered}. With ${trained} loops: ${unitFmt(x.a.r)}. With ${trained + 2} loops: ${unitFmt(x.b.r)}` +
       (st.exp === "persona" ? " (unsteered: +0)." : ` (unsteered: ${unitFmt(x.c)}).`) + ` The extra loops undo ${r0(100 * clamp(rcv, -1, 2))}% of the effect.` +
+      (x.gain ? ` On the same ${x.gain.n} prompts, they add ${x.gain.d > 0 ? "+" : ""}${x.gain.d.toFixed(1)} points of refusal (95% CI ${x.gain.lo.toFixed(1)} to ${x.gain.hi.toFixed(1)}).` : "") +
       (st.exp === "perase" ? ` The persona is set by a system prompt; erasing a random direction leaves ${paRow("dory4", "random_all").trait_score}.` : "");
   }
   drawExps(); update(false);
-  SOURCES.push("Extra loops: grid_test4{,_b} (Dory), grid_test6 (Ouro), persona_*_loops4.csv, capability/math500/kickp_loops4 and kickp_loops6");
+  { /* the paired refusal gains, in the text under the figure */
+    const g = (m) => D.extra[m].erase.gain, f = (x) => `${x.d > 0 ? "+" : ""}${x.d.toFixed(1)} points (95% CI ${x.lo.toFixed(1)} to ${x.hi.toFixed(1)})`;
+    $("ex-gains").textContent = ` With refusal erased on every trained loop, two extra loops add ${f(g("dory"))} of refusal for Dory and ${f(g("ouro"))} for Ouro, each measured on the same prompts with and without the extra loops (${g("dory").n === g("ouro").n ? `${g("dory").n} prompts each` : `${g("dory").n} prompts for Dory, ${g("ouro").n} for Ouro`}).`;
+  }
+  SOURCES.push("Extra loops: grid_test4{,_b} (Dory), grid_test6{,_b} (Ouro), each pair on the prompts both runs and the unsteered run share; persona_*_loops4.csv, capability/math500/kickp_loops4 and kickp_loops6");
 })();
 
 function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unsteered") {
@@ -2064,21 +2367,19 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     if (ks.length === MODELS[m].loops) return MODELS[m].straight ? "All quarters" : "Every loop";
     return ks.map((k) => unitName(m, k)).join(" + ");
   };
-  chips($("pe-models"), ORDER4.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
+  chips($("pe-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
     onChange: (m) => { st.m = m; st.trait = null; st.units = null; draw(true); } });
   function draw(animate) {
     const P = D.persona[st.m], traits = Object.keys(P.traits);
     if (!st.trait || !P.traits[st.trait]) st.trait = traits.includes("optimistic") ? "optimistic" : traits[0];
     const us = order(st.m);
     if (!st.units || !us.includes(st.units)) st.units = us[0];
-    /* every trait, in one order for every model; the ones this model cannot be steered on are greyed out, with the reason */
-    const why = (t) => (!P.vector.includes(t) ? `${MODELS[st.m].label} will not play ${t} even when told to, so there is no vector`
-      : `no strength that keeps replies coherent moves ${t} by 10 points, even on every loop (best ${sgn(P.tune[t].best)})`);
-    chips($("pe-traits"), PTRAITS.map((t) => ({ id: t, label: t, color: rgbCss(traitRGB(t)), disabled: !P.traits[t], title: P.traits[t] ? null : `Not steerable: ${why(t)}` })),
+    /* the traits this model can be steered on, in one order for every model; the footnote says why the others are missing */
+    chips($("pe-traits"), PTRAITS.filter((t) => P.traits[t]).map((t) => ({ id: t, label: t, color: rgbCss(traitRGB(t)) })),
       { value: st.trait, swatch: true, onChange: (t) => { st.trait = t; draw(true); } });
     $("pe-missing").textContent = missingNote(st.m, PTRAITS.filter((t) => !P.traits[t]), P);
     chips($("pe-units"), us.map((u) => ({ id: u, label: uLabel(st.m, u) })), { value: st.units, onChange: (u) => { st.units = u; draw(true); } });
-    if (trM !== st.m) { tr = new Track3($("pe-track"), { model: st.m, loops: MODELS[st.m].loops, meaning: traitMean("persona", st.trait), types: ["persona"], label: `${MODELS[st.m].full} with a persona vector` }); trM = st.m; }
+    if (trM !== st.m) { tr = new Track3($("pe-track"), { model: st.m, loops: MODELS[st.m].loops, trained: st.m === "dory4" ? 2 : MODELS[st.m].loops, meaning: traitMean("persona", st.trait), types: ["persona"], label: `${MODELS[st.m].full} with a persona vector` }); trM = st.m; }
     tr.o.meaning = traitMean("persona", st.trait); /* each trait has its own colour */
     const plan = personaPlan(st.m, st.trait, st.units);
     if (animate) tr.play(plan); else tr.show(plan);
@@ -2087,7 +2388,8 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     gauge($("pe-gauge-coh"), "Coherence", b.coh, T.coh_clean, "var(--ink-3)");
     const sg = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}`;
     $("pe-cap").textContent = `${MODELS[st.m].full}, ${st.trait} on ${lc(uLabel(st.m, st.units))}: ${sg(b.gain)} over unsteered. ` +
-      (st.units === allU ? "" : `On every ${MODELS[st.m].straight ? "quarter" : "loop"} at the same strength: ${sg(T.by_units[allU].gain)}. `) + "Scores average 100 replies (20 questions × 5).";
+      (st.units === allU ? "" : `On every ${MODELS[st.m].straight ? "quarter" : "loop"} at the same strength: ${sg(T.by_units[allU].gain)}. `) + "Scores average 100 replies (20 questions × 5)." +
+      (st.trait === "hallucinating" ? ` ${halluNote(st.m)}` : "");
     $("pe-q").textContent = `Example question: “${T.question}”`;
     const ex = T.examples, cleanEx = ex.clean, stEx = ex[st.units];
     $("pe-replies").innerHTML = "";
@@ -2112,12 +2414,24 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
   }
 })();
 
+/* hallucination starts high: every question asks about something that does not exist, and the small models often say
+   so in their first line and then pad the reply with invented names and places, which the judge counts (Ouro mostly plays
+   along: in about half of the replies scored 70 or more, Dory, Nanbeige and Qwen open by saying the thing does not exist) */
+function halluNote(m) {
+  const H = (k) => D.persona[k].traits.hallucinating, allU = (k) => Array.from({ length: MODELS[k].loops }, (_, i) => i).join(",");
+  const g = (k) => H(k).by_units[allU(k)].gain, name = (k) => (k === "dory4" ? "Dory × 4" : MODELS[k].label.replace(" (dense)", ""));
+  const ks = ORDER5.filter((k) => D.persona[k].traits.hallucinating), weak = ks.filter((k) => g(k) < 15), strong = ks.filter((k) => g(k) >= 15);
+  const c = H(m).clean;
+  return `Every hallucination question asks about something that does not exist (a 2024 Mars mission, the Quantium X7 processor), and the unsteered score is already ${r0(c)}${c >= 70 ? ", which leaves little room to push" : ""}. ` +
+    `Ouro mostly plays along, and the other models often say the thing does not exist in their first line and then pad the reply with invented names, places and findings, which the judge still counts as hallucination. ` +
+    `On every loop (Qwen: every quarter) the vector adds ${andList(weak.map((k) => `${sgn(g(k))} for ${name(k)}`))}, against ${andList(strong.map((k) => `${sgn(g(k))} for ${name(k)}`))}.`;
+}
+
 /* ================================================================== 4b. erase a prompted persona */
 (function personaErase() {
   const A = D.persona_ablate, MS = ORDER5;
   const st = { m: "dory", trait: "humorous", cond: "ablate_1" };
   let tr = null, trM = null;
-  const board = new Board($("pa-board"), { title: "", color: "var(--steer)" });
   const every = (m) => (MODELS[m].straight ? "quarter" : "loop");
   const parse = (m, c) => (c === "ablate_all" || c === "random_all" ? Array.from({ length: MODELS[m].loops }, (_, i) => i + 1) : c.replace("ablate_", "").replace("q", "").split("").map(Number));
   const rank = (m, c) => (c === "random_all" ? 99 : c === "ablate_all" ? 90 : parse(m, c).length * 10 + parse(m, c)[0]);
@@ -2138,8 +2452,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     if (!P.traits[st.trait]) st.trait = traits.includes("humorous") ? "humorous" : traits[0];
     const cs = conds(m);
     if (!cs.includes(st.cond)) st.cond = cs[0];
-    chips($("pa-traits"), PTRAITS.map((t) => ({ id: t, label: t, color: rgbCss(traitRGB(t)), disabled: !P.traits[t],
-      title: P.traits[t] ? null : `${MODELS[m].label} will not play ${t} even when its system prompt asks for it, so there is no vector to erase` })),
+    chips($("pa-traits"), PTRAITS.filter((t) => P.traits[t]).map((t) => ({ id: t, label: t, color: rgbCss(traitRGB(t)) })),
       { value: st.trait, swatch: true, onChange: (t) => { st.trait = t; draw(true); } });
     $("pa-missing").textContent = missingNote(m, PTRAITS.filter((t) => !P.traits[t]), P, true);
     chips($("pa-units"), cs.map((c) => ({ id: c, label: cLabel(m, c) })), { value: st.cond, onChange: (c) => { st.cond = c; draw(true); } });
@@ -2150,9 +2463,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     tr.o.meaning = traitMean("perase", st.trait);
     const tc = rgbCss(traitRGB(st.trait));
     const T = P.traits[st.trait], r = rowOf(T, st.cond), pl = plan(m, T, st.cond);
-    const fin = () => board.set(r.score, { title: `${MODELS[m].label} · <b>${st.trait}</b>`, suffix: "", color: tc, right: `prompted ${r0(T.prompted)} · no prompt ${r0(T.noprompt)}`,
-      sub: `erased: ${lc(cLabel(m, st.cond))}`, subRight: "trait score, 0–100" });
-    if (animate) { board.set(null, { sub: "running…", subRight: "" }); tr.play(pl, { onDone: fin }); } else { tr.show(pl); fin(); }
+    if (animate) tr.play(pl); else tr.show(pl); /* the bar chart beside it holds the numbers */
     gauge($("pa-gauge-coh"), "Coherence", r.coh, rowOf(T, "prompted").coh, "var(--ink-3)", (v) => r0(v), "prompted");
     const el = $("pa-chart");
     el.innerHTML = "";
@@ -2161,7 +2472,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
         tip: `${MODELS[m].full}, ${st.trait}: erased on ${lc(cLabel(m, c))} → trait ${x.score}, coherence ${x.coh}` }; }),
       refs: [{ value: T.prompted, label: `prompted ${r0(T.prompted)}` }, { value: T.noprompt, label: `no prompt ${r0(T.noprompt)}`, dash: "2 3" }] });
     const share = r0(100 * (T.prompted - r.score) / Math.max(1e-9, T.prompted - T.noprompt));
-    $("pa-cap").textContent = `${MODELS[m].full}, system prompt for “${st.trait}”, trait direction erased on ${lc(cLabel(m, st.cond))}: trait ${r0(r.score)}, ` +
+    $("pa-cap").textContent = `${MODELS[m].full}, system prompt for “${st.trait}”, ${st.cond === "random_all" ? `a random direction erased on every ${every(m)} (a control)` : `trait direction erased on ${lc(cLabel(m, st.cond))}`}: trait ${r0(r.score)}, ` +
       `against ${r0(T.prompted)} with the prompt alone and ${r0(T.noprompt)} without it, so ${share}% of what the prompt added is gone.` +
       (T.prompted - T.noprompt < 15 ? " The prompt barely raises this trait, so that share is noisy." : "") + " 100 replies per bar (20 questions × 5).";
   }
@@ -2173,7 +2484,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     const coh = (c) => (P.rows.find((x) => x.cond === c) || {}).coherence;
     barChart(box, { title: MODELS[m].label, max: 100, fmt: (v) => `${r0(v)}%`,
       items: cs.map((c) => ({ label: cShort(m, c), value: P.removed[c], color: MODELS[m].color, faded: c === "ablate_all",
-        tip: `${MODELS[m].full}, erased on ${lc(cLabel(m, c))}: ${r0(P.removed[c])}% of the prompted trait gone (mean over ${P.removed_traits.length} traits); coherence ${r0(coh(c))} (prompted ${r0(coh("prompted"))})` })) });
+        tip: `${MODELS[m].full}, erased on ${lc(cLabel(m, c))}: ${r0(P.removed[c])}% of the points the prompt adds are gone (summed over ${P.removed_traits.length} traits); coherence ${r0(coh(c))} (prompted ${r0(coh("prompted"))})` })) });
   }
   const R = (m, c) => r0(A[m].removed[c]);
   const set = (id, v) => { $(id).textContent = v; };
@@ -2183,9 +2494,20 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
   set("pa-n-1", `${R("nanbeige", "ablate_1")}%`); set("pa-n-2", `${R("nanbeige", "ablate_2")}%`);
   set("pa-o-1", `${R("ouro", "ablate_1")}%`); set("pa-o-4", `${R("ouro", "ablate_4")}%`);
   const ot = (t, c) => rowOf(A.ouro.traits[t], c);
-  set("pa-o-opt", `${r0(ot("optimistic", "ablate_4").score)}`); set("pa-o-opt0", `${r0(A.ouro.traits.optimistic.noprompt)}`);
+  { /* optimism erased on loop 4: from the prompted score to where, against the score with no prompt */
+    const P = r0(A.ouro.traits.optimistic.prompted), X = r0(ot("optimistic", "ablate_4").score), Y = r0(A.ouro.traits.optimistic.noprompt);
+    $("pa-o-opt-clause").textContent = `Erasing optimism on loop 4 takes it from ${P} to ${X}, ` +
+      (X < Y - 1 ? `overshooting into gloom below the ${Y} it scores with no prompt` : X <= Y + 5 ? `close to the ${Y} it scores with no prompt` : `still above the ${Y} it scores with no prompt`);
+  }
   set("pa-o-apa", `${r0(ot("apathetic", "prompted").coh)} to ${r0(ot("apathetic", "ablate_4").coh)}`);
   set("pa-q-all", `${R("qwen", "ablate_all")}%`);
+  const ocoh = (c) => r0((A.ouro.rows.find((x) => x.cond === c) || {}).coherence);
+  set("pa-o-cohn", ocoh("noprompt")); set("pa-o-cohp", ocoh("prompted"));
+  { /* the other models' coherence, with and without the system prompt, as ranges */
+    const co = (m, c) => (A[m] && (A[m].rows.find((x) => x.cond === c) || {}).coherence);
+    const rng = (c) => { const v = ["nanbeige", "dory", "qwen"].map((m) => co(m, c)).filter((x) => x != null); return `${r0(Math.min(...v))} to ${r0(Math.max(...v))}`; };
+    set("pa-coh-others-n", rng("noprompt")); set("pa-coh-others-p", rng("prompted"));
+  }
 })();
 
 /* ================================================================== 5. kicks */
@@ -2194,7 +2516,18 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   const st = { m: "dory", unit: 1, every: false, eps: 2 };
   let tr, units = [];
   const board = new Board($("ki-board"), { title: "", color: "var(--ink)" });
-  const dots = new Split($("ki-dots"), { labels: ["Solved", "Wrong"], tipFn: (i, v) => `Problem ${i + 1}: ${v == null ? "not run" : v >= 0.5 ? "solved" : "wrong or unfinished"}` });
+  let cur = null, kiSeq = 0;
+  const outName = (i) => (cur && cur.out ? D.kicks.outcomes[cur.out[i]] : null);
+  const dots = new Split($("ki-dots"), { labels: ["Solved", "Not solved"], pickAll: true, onPick: (i) => { st.pick = i; showReply(); },
+    tipFn: (i, v) => `Problem ${i + 1}: ${v == null ? "not run" : outName(i) || (v >= 0.5 ? "solved" : "not solved")}<br><i>click to read the response</i>` });
+  st.pick = 0;
+  function showReply() {
+    dots.select(st.pick);
+    if (!cur) { clearEl($("ki-ex")); return; }
+    const M = MODELS[st.m], eps = EPS[st.eps];
+    const where = cur.site == null ? "no kick" : st.every ? `size-${eps} kick on every ${M.straight ? "quarter" : "loop"}` : `size-${eps} kick on ${unitName(st.m, st.unit)}`;
+    showKickReply($("ki-ex"), { run: st.m, cand: cur.cand, i: st.pick, code: cur.out ? cur.out[st.pick] : null, who: `${M.label} · ${where}`, seq: ++kiSeq, cur: () => kiSeq });
+  }
   chips($("ki-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: st.m, swatch: true,
     onChange: (m) => { st.m = m; st.unit = 1; st.every = false; build(); } });
   const epsEl = $("ki-eps");
@@ -2223,8 +2556,11 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
     const done = () => {
       board.set(r ? 100 * r.acc : null, { title: `${M.label} · <b>MATH-500 accuracy</b>`, right: `unkicked ${pct(100 * c.acc)}`,
         sub: r ? `95% CI ${pct(100 * r.lo)}–${pct(100 * r.hi)}` : "not run at this size", subRight: "100 problems" });
-      dots.set(r ? r.dots : null, "var(--kick)", r ? `${r0(100 * r.acc)} of 100 solved` : "not run");
+      cur = r;
+      dots.set(r ? r.dots : null, "var(--kick)", r ? `${r0(100 * r.acc)} of 100 solved` : "not run", r ? r.out : null);
+      kickKey($("ki-key"), r ? r.out : null);
       $("ki-kl").textContent = r && r.kl != null ? `Next-token KL ${r.kl.toFixed(3)}` : "";
+      showReply();
     };
     if (!plan) { tr.show({}); done(); return; }
     if (animate) { board.set(null, { sub: "kicking…", subRight: "" }); tr.play(plan, { onDone: done }); }
@@ -2239,27 +2575,59 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   $("ki-allmax").textContent = r0(100 * Math.max(...[1, 2, 3, 4].map((k) => oc - kickFind("ouro", k, 0.5).acc)));
   SOURCES.push("Kicks: data/runs/<model>/capability/math500/kickp* and analysis/kick_kl/kickp*.parquet via scripts/kick_summary.py");
 
-  /* heat strip for Dory x4 */
-  const cells = D.kicks.dory4_strip.cells;
-  const stages = [["in", null, "entry"], ["loop", 1, "loop 1"], ["loop", 2, "loop 2"], ["loop", 3, "loop 3"], ["loop", 4, "loop 4"], ["out", null, "exit"]];
-  const cw = 5, gapS = 10, W = cells.length * cw + gapS * 5 + 20, Hh = 96;
-  const svg = s("svg", { viewBox: `0 0 ${W} ${Hh}`, role: "img", "aria-label": "Damage from a kick at each sublayer of Dory run with four loops", style: `min-width:720px` }, $("strip-chart"));
-  const lv = (kl) => clamp((Math.log10(Math.max(kl, 1e-3)) + 3) / 4, 0, 1);
-  let x = 10;
-  for (const [stg, lp, lab] of stages) {
-    const cs = cells.filter((c) => c.stage === stg && (lp == null || c.loop === lp)).sort((a, b) => a.layer - b.layer);
-    const x0 = x;
-    for (const c of cs) {
-      const r = s("rect", { x, y: 18, width: cw - 0.6, height: 40, fill: "var(--kick)", "fill-opacity": (0.04 + 0.96 * lv(c.kl)).toFixed(3) }, svg);
-      addTip(r, `${lab}, sublayer ${c.layer}<br>KL ${c.kl.toFixed(3)}`);
-      x += cw;
-    }
-    s("text", { x: (x0 + x) / 2, y: 74, "text-anchor": "middle", class: "t-strong", text: lab, "font-size": 11 }, svg);
-    s("text", { x: (x0 + x) / 2, y: 88, "text-anchor": "middle", text: `${cs.length} sublayers`, "font-size": 9.5 }, svg);
-    x += gapS;
+  /* where each model feels a kick: one row per run, every layer (Dory: sublayer) a cell, darker = bigger change in the
+     next-token predictions (teacher-forced KL, size-1 kick). Each row spans the same width, so positions line up as a
+     share of the forward pass. */
+  const SR = D.kicks.strips || {}, rowsK = ORDER5.filter((m) => SR[m]);
+  /* median KL per loop (quarter, stack) of each run, for the labels and the paragraph above */
+  const kmed = (m, stg, lp) => {
+    const v = (SR[m]?.cells || []).filter((c) => c.stage === stg && (lp == null || c.loop === lp)).map((c) => c.kl).sort((a, b) => a - b);
+    return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null;
+  };
+  const fk = (v) => (v < 0.1 ? v.toPrecision(1) : v < 1 ? v.toFixed(2) : v.toFixed(1));
+  /* colour = log KL; "row": each run from its own 5th to 95th percentile (a few outlier cells, like the first layer of
+     a loop, would otherwise set the range), "shared": one range for every run, 0.001 to 10 */
+  const q = (a, p) => a[Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))))];
+  function drawStrip(mode) {
+    $("strip-chart").innerHTML = "";
+    const W = 900, mL = 112, mR = 8, rowH = 62, top = 22, Hh = top + rowH * rowsK.length + 6, gapS = 6;
+    const svg = s("svg", { viewBox: `0 0 ${W} ${Hh}`, role: "img", "aria-label": "Damage from a kick at each layer of each model", style: "min-width:680px" }, $("strip-chart"));
+    s("text", { x: mL, y: 12, text: mode === "row" ? "within each row: lighter = felt least in that run · darker = felt most" : "lighter: barely felt (KL 0.001) · darker: strong (KL 10)", "font-size": 10 }, svg);
+    rowsK.forEach((m, ri) => {
+      const cells = SR[m].cells, M = MODELS[m], y0 = top + ri * rowH;
+      const ks = cells.map((c) => Math.log10(Math.max(c.kl, 1e-3))).sort((a, b) => a - b);
+      const [lo, hi] = mode === "row" ? [q(ks, 0.05), q(ks, 0.95)] : [-3, 1];
+      const lv = (kl) => clamp((Math.log10(Math.max(kl, 1e-3)) - lo) / Math.max(1e-6, hi - lo), 0, 1);
+      const stages = m === "dory" || m === "dory4"
+        ? [["in", null, "entry"]].concat(Array.from({ length: M.loops }, (_, k) => ["loop", k + 1, `loop ${k + 1}`]), [["out", null, "exit"]])
+        : Array.from({ length: M.loops }, (_, k) => ["loop", k + 1, unitName(m, k + 1).toLowerCase().replace(/^q/, "Q")]);
+      const groups = stages.map(([stg, lp, lab]) => ({ lab, med: kmed(m, stg, lp), cs: cells.filter((c) => c.stage === stg && (lp == null || c.loop === lp)).sort((a, b) => a.layer - b.layer) })).filter((g) => g.cs.length);
+      const n = groups.reduce((a, g) => a + g.cs.length, 0), cw = (W - mL - mR - gapS * (groups.length - 1)) / n;
+      s("circle", { cx: 6, cy: y0 + 17, r: 4.5, fill: M.color }, svg);
+      s("text", { x: 15, y: y0 + 21, class: "t-strong", text: m === "dory4" ? "Dory × 4" : m === "qwen" ? "Qwen" : M.label, "font-size": 11.5 }, svg);
+      s("text", { x: 15, y: y0 + 34, text: m === "dory4" ? "trained with 2" : m === "qwen" ? "dense" : `${M.loops} loops`, "font-size": 9.5 }, svg);
+      if (mode === "row") s("text", { x: 15, y: y0 + 46, text: `KL ${fk(10 ** lo)}–${fk(10 ** hi)}`, "font-size": 9 }, svg);
+      let x = mL;
+      for (const g of groups) {
+        const x0 = x;
+        for (const c of g.cs) {
+          const r = s("rect", { x, y: y0 + 4, width: Math.max(0.6, cw - (cw > 3 ? 0.6 : 0.2)), height: 30, fill: "var(--kick)", "fill-opacity": (0.04 + 0.96 * lv(c.kl)).toFixed(3) }, svg);
+          addTip(r, `${M.full}, ${g.lab}, ${M.ramps ? "sublayer" : "layer"} ${c.layer}<br>KL ${c.kl.toFixed(3)}`);
+          x += cw;
+        }
+        s("text", { x: (x0 + x) / 2, y: y0 + 47, "text-anchor": "middle", text: g.lab, "font-size": 10 }, svg);
+        s("text", { x: (x0 + x) / 2, y: y0 + 58, "text-anchor": "middle", text: `median ${fk(g.med)}`, "font-size": 9, fill: "var(--ink-3)" }, svg);
+        x += gapS;
+      }
+    });
   }
-  s("text", { x: 10, y: 11, text: "lighter: barely felt (KL 0.001) · darker: strong (KL 10)", "font-size": 10 }, svg);
-  src(`Kick strip: ${D.kicks.dory4_strip.source}`);
+  chips($("strip-scale"), [{ id: "row", label: "Each row" }, { id: "shared", label: "Shared" }], { value: "row", onChange: (v) => drawStrip(v) });
+  drawStrip("row");
+  for (const m of rowsK) src(`Kick strip, ${MODELS[m].label}: ${SR[m].source}`);
+  if (["dory", "dory4", "nanbeige", "ouro", "qwen"].every((m) => SR[m])) {
+    const o13 = [1, 2, 3].map((l) => kmed("ouro", "loop", l)), q = [1, 2, 3, 4].map((l) => kmed("qwen", "loop", l));
+    $("strip-text").textContent = `Measured layer by layer, the looped models feel a kick most in their last loop. A kick on Dory's first loop moves its predictions by a median KL of ${fk(kmed("dory", "loop", 1))}, one on its second loop by ${fk(kmed("dory", "loop", 2))}. Run with four loops, Dory barely feels a kick on its first two (${fk(Math.max(kmed("dory4", "loop", 1), kmed("dory4", "loop", 2)))} or less). Ouro's first three loops sit between ${fk(Math.min(...o13))} and ${fk(Math.max(...o13))} and its fourth at ${fk(kmed("ouro", "loop", 4))}; Nanbeige's two loops at ${fk(kmed("nanbeige", "loop", 1))} and ${fk(kmed("nanbeige", "loop", 2))}. Qwen has no such slope: a kick hurts most in its middle quarters (${fk(q[1])} and ${fk(q[2])}) and least in its last (${fk(q[3])}). Dory's entry stack (${fk(kmed("dory", "in"))}) is felt more than its first loop because its output is fed into every loop.`;
+  }
 
   /* small multiples heat grids */
   for (const m of ORDER5) {
@@ -2736,5 +3104,145 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   }
 })();
 
-$("all-src").innerHTML = SOURCES.map((x) => `<div>· ${x.replace(/</g, "&lt;")}</div>`).join("") + `<div>· Generated by scripts/export_blog_data.py on ${D.generated}</div>`;
+/* ================================================================== addendum: a second judge */
+(function secondJudge() {
+  const J = D.judge2;
+  if (!J || !$("j2-table")) return;
+  const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => J.rows[m]), R = ms.map((m) => J.rows[m]);
+  const f1 = (x) => x.toFixed(1), f3 = (x) => x.toFixed(3), lo = (k) => Math.min(...R.map((r) => r[k])), hi = (k) => Math.max(...R.map((r) => r[k]));
+  const head = ["Model", "Answers", "Same verdict", "Refusal, gpt-oss-20b", "Refusal, luna", "Direction cosine, luna vs ours", "Held-out AUC, ours → luna"];
+  $("j2-table").append(h("thead", {}, h("tr", {}, head.map((t) => h("th", {}, t)))),
+    h("tbody", {}, ms.map((m) => { const r = J.rows[m];
+      return h("tr", {}, h("td", {}, MODELS[m].label + (m === "dory" ? " *" : "")), h("td", {}, r.answers.toLocaleString("en-US")), h("td", {}, `${f1(r.agree)}%`),
+        h("td", {}, `${f1(r.ref_a)}%`), h("td", {}, `${f1(r.ref_b)}%`), h("td", {}, f3(r.cos)), h("td", { style: "white-space:nowrap" }, `${f3(r.auc_cur)} → ${f3(r.auc_ref)}`)); })));
+  const o = J.rows.ouro;
+  $("j2-agree").textContent = `${r0(lo("agree"))}–${r0(hi("agree"))}%`;
+  $("j2-diff").textContent = r0(Math.max(...R.map((r) => Math.abs(r.ref_b - r.ref_a))));
+  $("j2-cos").textContent = (Math.floor(lo("cos") * 100) / 100).toFixed(2);
+  $("j2-cosmin").textContent = (Math.floor(lo("cos_min") * 100) / 100).toFixed(2);
+  $("j2-ouro-non").textContent = `${o.non_cur} complying traces → ${o.non_score}`;
+  $("j2-ouro-cos").textContent = o.cos_score.toFixed(2);
+  steered(J.steered);
+  personaVecs(J.persona);
+  { /* traits, coherence and cut-off labels under both judges */
+    const X = J.extra || {}, parts = [], fmtN = (n) => n.toLocaleString("en-US"), sg = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+    if (X.persona) parts.push(`On the ${fmtN(X.persona.n)} persona replies, the two judges' trait scores correlate at r = ${X.persona.trait_r.toFixed(2)} and their coherence scores at r = ${X.persona.coh_r.toFixed(2)} (luna ${sg(X.persona.trait_diff)} and ${sg(X.persona.coh_diff)} points on average).`);
+    if (X.flipcoh) parts.push(`On the ${fmtN(X.flipcoh.n)} flip-sign replies, coherence correlates at r = ${X.flipcoh.r.toFixed(2)} (luna ${sg(X.flipcoh.diff)} points on average).`);
+    if (X.cutoff) parts.push(`On the ${fmtN(X.cutoff.n)} cut-off kick responses, they give the same label ${X.cutoff.agree.toFixed(0)}% of the time; luna calls ${r0(X.cutoff.luna.coherent || 0)}% still reasoning, ${r0(X.cutoff.luna.repetitive || 0)}% repeating and ${r0(X.cutoff.luna.incoherent || 0)}% incoherent, against ${r0(X.cutoff.oss.coherent || 0)}%, ${r0(X.cutoff.oss.repetitive || 0)}% and ${r0(X.cutoff.oss.incoherent || 0)}% for gpt-oss-20b.`);
+    if (parts.length) { $("j2x-text").textContent = parts.join(" "); $("j2x").hidden = false; }
+  }
+  SOURCES.push("Second judge: generations/<tag>/[invalid/]luna/*.scored.parquet and generations/*.scored_luna.parquet (scripts/judge_api.py, gpt-6-luna), judge_compare.csv (scripts/judge_compare.py)");
+
+  /* persona vectors rebuilt from luna's ratings: cosine with ours at the site each trait steers with */
+  function personaVecs(P) {
+    if (!P || !$("j2p-table")) return;
+    const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => P[m]);
+    const traits = [...new Set(ms.flatMap((m) => Object.keys(P[m])))].sort();
+    const LOW = 0.95, lowOnes = [];
+    $("j2p-table").append(h("thead", {}, h("tr", {}, h("th", {}, "Trait"), ms.map((m) => h("th", {}, MODELS[m].label)))),
+      h("tbody", {}, traits.map((t) => h("tr", {}, h("td", {}, t), ms.map((m) => {
+        const x = P[m][t];
+        if (!x) return h("td", { style: "color:var(--ink-3)" }, "–");
+        if (x.cos < LOW) lowOnes.push([m, t, x]);
+        const td = h("td", { style: x.cos < LOW ? "font-weight:600;color:var(--ink)" : null }, x.cos.toFixed(2));
+        const k = x.kept;
+        addTip(td, `<b>${MODELS[m].label} · ${t}</b><br>${MODELS[m].straight ? "" : `loop ${x.loop}, `}layer ${x.layer}: cosine ${x.cos.toFixed(3)}` +
+          (k && k[0] != null ? `<br>replies kept (with / without the trait): gpt-oss-20b ${k[0]} / ${k[1]}, luna ${k[2]} / ${k[3]}` : ""));
+        return td;
+      })))));
+    const all = ms.flatMap((m) => Object.values(P[m]).map((x) => x.cos)), rest = all.filter((c) => c >= LOW);
+    $("j2p-same").textContent = `${rest.length} of the ${all.length} vectors on this page have cosine ${(Math.floor(Math.min(...rest) * 100) / 100).toFixed(2)} or more with ours; Dory's and Qwen's are effectively identical.`;
+    $("j2p-moved").textContent = lowOnes.map(([m, t, x]) => `${MODELS[m].label}'s ${t} vector (cosine ${x.cos.toFixed(2)}): luna keeps ${x.kept[2]} replies with the trait and ${x.kept[3]} without, where gpt-oss-20b kept ${x.kept[0]} and ${x.kept[1]}.`).join(" ");
+    SOURCES.push("Persona vectors under both judges: directions/persona.pt vs persona_luna.pt (persona_vectors.py --judge-tag luna), at each trait's tuned site (analysis/persona_tune.json)");
+  }
+
+  /* every refusal cell on the page under both judges: a scatter on the diagonal, and the headline cells as a table */
+  function steered(S) {
+    if (!S || !S.cells.length) { $("j2s-intro").textContent = "(Not run yet.)"; return; }
+    const C = S.cells.map((r) => Object.fromEntries(S.cols.map((k, i) => [k, r[i]])));
+    const find = (m, g, c) => C.find((x) => x.model === m && x.group === g && x.cand === c);
+    const fmtN = (n) => n.toLocaleString("en-US");
+    const gaps = C.map((x) => Math.abs(x.luna - x.oss)).sort((a, b) => a - b), med = gaps[Math.floor(gaps.length / 2)];
+    const worst = C.reduce((a, b) => (Math.abs(b.luna - b.oss) > Math.abs(a.luna - a.oss) ? b : a));
+    $("j2s-intro").textContent = `That is ${fmtN(S.answers)} answers across ${C.length} steering settings, on harmful prompts and, for the flip-sign runs, harmless ones.`;
+    /* legend: models, then filled vs ring */
+    const lg = $("j2s-legend");
+    const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => C.some((x) => x.model === m));
+    for (const m of ms) lg.append(h("span", { class: "row", style: "gap:.35rem;align-items:center" }, h("span", { style: `width:10px;height:10px;border-radius:50%;background:${MODELS[m].color};display:inline-block` }), MODELS[m].label));
+    lg.append(h("span", { class: "row", style: "gap:.35rem;align-items:center;color:var(--ink-2)" }, h("span", { style: "width:10px;height:10px;border-radius:50%;background:var(--ink-3);display:inline-block" }), "harmful prompts"),
+      h("span", { class: "row", style: "gap:.35rem;align-items:center;color:var(--ink-2)" }, h("span", { style: "width:10px;height:10px;border-radius:50%;border:1.5px solid var(--ink-3);box-sizing:border-box;display:inline-block" }), "harmless prompts (flip sign)"));
+    /* the scatter */
+    const W = 360, L = 46, B = 40, T = 10, R = 12, P = W - L - R, Hh = W - T - B;
+    const X = (v) => L + (v / 100) * P, Y = (v) => T + Hh - (v / 100) * Hh;
+    const svg = s("svg", { viewBox: `0 0 ${W} ${W}`, role: "img", "aria-label": `Refusal rate under gpt-oss-20b (x) against gpt-6-luna (y) for ${C.length} steering settings` });
+    for (const t of [0, 25, 50, 75, 100]) {
+      s("line", { x1: X(0), x2: X(100), y1: Y(t), y2: Y(t), class: "grid" }, svg);
+      s("line", { x1: X(t), x2: X(t), y1: Y(0), y2: Y(100), class: "grid" }, svg);
+      s("text", { x: L - 6, y: Y(t) + 4, "text-anchor": "end", class: "ax", text: `${t}%` }, svg);
+      s("text", { x: X(t), y: T + Hh + 16, "text-anchor": "middle", class: "ax", text: `${t}%` }, svg);
+    }
+    s("line", { x1: X(0), y1: Y(0), x2: X(100), y2: Y(100), stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "4 3" }, svg);
+    s("text", { x: X(50), y: W - 6, "text-anchor": "middle", class: "ax", text: "gpt-oss-20b refusal rate" }, svg);
+    s("text", { x: 12, y: Y(50), "text-anchor": "middle", class: "ax", transform: `rotate(-90 12 ${Y(50)})`, text: "gpt-6-luna refusal rate" }, svg);
+    const harmless = (x) => x.group.startsWith("plus");
+    for (const x of [...C].sort((a, b) => harmless(b) - harmless(a))) {
+      const g = s("g", {}, svg), cx = X(x.oss), cy = Y(x.luna);
+      s("circle", harmless(x) ? { cx, cy, r: 3.2, fill: "var(--bg)", stroke: MODELS[x.model].color, "stroke-width": 1.5 }
+        : { cx, cy, r: 3.4, fill: MODELS[x.model].color, stroke: "var(--bg)", "stroke-width": 1 }, g);
+      s("circle", { cx, cy, r: 7, fill: "transparent" }, g);
+      addTip(g, `<b>${MODELS[x.model].label}</b> · ${x.label}<br>gpt-oss-20b ${pct(x.oss, 1)} · gpt-6-luna ${pct(x.luna, 1)}<br>${x.n} prompts`);
+    }
+    $("j2s-chart").append(svg);
+    const pm = Object.entries(S.by_model).map(([m, v]) => `${MODELS[m].label} ${(100 * v.agree / v.answers).toFixed(1)}%`).join(", ");
+    $("j2s-cap").textContent = `Each dot is one steering setting; on the dashed line both judges give the same rate. They give the same verdict on ${(100 * S.agree / S.answers).toFixed(1)}% of answers (${pm}). The median gap between the two rates is ${med.toFixed(1)} points; the largest is ${Math.abs(worst.luna - worst.oss).toFixed(1)} (${MODELS[worst.model].label}, ${worst.label}).`;
+    $("j2-blocked-note").textContent = S.blocked ? `OpenAI's biology filter refused to score ${fmtN(S.blocked)} of the steered answers (and 1–4 training replies per model); those keep gpt-oss-20b's verdict.` : "";
+    /* the headline cells */
+    const rows = [
+      ["Dory · no steering", "dory", "grid", "none"], ["Dory · erase loop 1", "dory", "grid", "ablate_hh_eoi_t0.l26_apply0"],
+      ["Dory · erase loop 2", "dory", "grid", "ablate_hh_eoi_t0.l26_apply1"], ["Dory · erase both loops", "dory", "grid", "ablate_hh_eoi_t0.l26_apply0-1"],
+      ["Dory · erase both, run with 4 loops", "dory", "grid4", "ablate_hh_eoi_t0.l26_apply0-1"],
+      ["Nanbeige · no steering", "nanbeige", "grid", "none"], ["Nanbeige · erase loop 1", "nanbeige", "grid", "ablate_v4_baseline_t1.l15_apply0"],
+      ["Nanbeige · erase loop 2", "nanbeige", "grid", "ablate_v4_baseline_t1.l15_apply1"], ["Nanbeige · erase every loop", "nanbeige", "grid", "ablate_v4_baseline_t1.l15"],
+      ["Ouro · no steering", "ouro", "grid", "none"], ["Ouro · erase loop 1", "ouro", "grid", "ablate_v4_baseline_t3.l16_apply0"],
+      ["Ouro · erase loop 4", "ouro", "grid", "ablate_v4_baseline_t3.l16_apply3"], ["Ouro · erase every loop", "ouro", "grid", "ablate_v4_baseline_t3.l16"],
+      ["Ouro · erase loops 1–4, run with 6 loops", "ouro", "grid6", "ablate_v4_baseline_t3.l16_apply0-1-2-3"],
+      ["Qwen · no steering", "qwen", "grid", "none"], ["Qwen · erase every layer", "qwen", "grid", "ablate_v4_baseline_l21"],
+      ["Dory · weight edit", "dory", "ortho", "ortho_hh_eoi_t0.l26"], ["Nanbeige · weight edit", "nanbeige", "grid", "ortho_v4_baseline_t1.l15"],
+      ["Ouro · weight edit", "ouro", "grid", "ortho_v4_baseline_t3.l16"], ["Ouro · norm-aware weight edit", "ouro", "grid", "ortho_v4_baseline_t3.l16_na1"],
+    ];
+    const sg = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+    const body = rows.map(([lab, m, g, c]) => {
+      const x = find(m, g, c);
+      return h("tr", {}, h("td", {}, lab), h("td", {}, x ? String(x.n) : "–"), h("td", {}, x ? pct(x.oss, 1) : "pending"),
+        h("td", {}, x ? pct(x.luna, 1) : "pending"), h("td", {}, x ? sg(x.luna - x.oss) : ""));
+    });
+    for (const m of ["dory", "ouro"]) {
+      const gn = S.gains && S.gains[m];
+      body.push(h("tr", {}, h("td", {}, `${MODELS[m].label} · two extra loops, paired gain (points)`), h("td", {}, gn ? String(gn.n) : "–"),
+        h("td", {}, gn ? `${sg(gn.oss.d)} [${gn.oss.lo.toFixed(1)}, ${gn.oss.hi.toFixed(1)}]` : "pending"),
+        h("td", {}, gn ? `${sg(gn.luna.d)} [${gn.luna.lo.toFixed(1)}, ${gn.luna.hi.toFixed(1)}]` : "pending"), h("td", {}, gn ? sg(gn.luna.d - gn.oss.d) : "")));
+    }
+    $("j2s-table").append(h("thead", {}, h("tr", {}, ["Setting", "Prompts", "gpt-oss-20b", "gpt-6-luna", "Difference"].map((t) => h("th", {}, t)))), h("tbody", {}, body));
+    /* where the judges part: broken output, which the rubric's "no specific help" rule lets a judge call a refusal */
+    const oe = find("ouro", "grid", "ortho_v4_baseline_t3.l16"), on = find("ouro", "grid", "ortho_v4_baseline_t3.l16_na1"), nb = find("nanbeige", "grid4", "none");
+    const pp = (x) => `${r0(x.oss)}% to ${r0(x.luna)}%`;
+    if (oe && on && nb) $("j2s-note").textContent = `Every conclusion on this page holds under either judge, and most rates move by a few points, mostly down: luna calls slightly fewer steered answers refusals. The judges part ways on broken output. The rubric counts an answer with no specific help as a refusal, and luna applies that to garbled text far more often. Ouro after the weight edit, which can no longer do maths, goes from ${pp(oe)} refusal (the norm-aware edit, which halves its maths score: ${pp(on)}), and Nanbeige run with 4 loops, which produces gibberish, from ${pp(nb)}. Neither judge's refusal rate means much for a model that no longer works, which is why the weight-edit section reports capability beside it.`;
+  }
+})();
+
+/* the judge of record (export_blog_data.py --judge): v1 gpt-oss-20b, v2 gpt-6-luna for every reported score */
+{
+  const E = D.edits && D.edits.dory, fill = (id, v) => { if ($(id) && v != null) $(id).textContent = pct(v); };
+  if (E) { fill("lk-d-ortho", E.ortho.refusal.r); fill("lk-d-hooks", E.hooks.refusal.r); fill("lk-d-na", E.ortho_na.refusal.r); }
+  if (D.edits && D.edits.ouro) fill("ed-o-ref", D.edits.ouro.ortho.refusal.r);
+  document.querySelectorAll(".judge-name").forEach((e) => { e.textContent = D.judge ? D.judge.name : "gpt-oss-20b"; });
+}
+if (D.judge && D.judge.id === "v2") {
+  $("judge-lead").innerHTML = 'Every score on this page comes from one judge, gpt-6-luna (OpenAI API, low reasoning effort): refusal, traits, coherence and the labels on cut-off kick responses. Accuracy and kick damage need no judge. We built the project with an open judge first, gpt-oss-20b at a fixed snapshot with greedy decoding, and chose the refusal directions, the persona vectors and every steering strength with its scores; the <a href="#judge2">addendum</a> shows that luna\'s labels give the same directions and vectors.';
+  $("judge-limits").innerHTML = 'One judge scores every figure, with no human calibration; the directions, persona vectors and strengths were chosen with an earlier judge (<a href="#judge2">addendum</a>).';
+  $("plus-tune-judge").textContent = ", the judge that chose these strengths (everything else on the page is scored by gpt-6-luna)";
+  $("j2s-lead").textContent = "Would the earlier judge tell a different story? Every refusal answer on this page was scored by both gpt-6-luna, whose scores the page reports, and gpt-oss-20b, the open model we started with, using the same rubric, prompt and parser.";
+  $("j2-limits-a").textContent = "Only the tuning runs that chose the strengths (the “How hard to push” chart and the persona strength search) keep gpt-oss-20b's scores.";
+}
+$("all-src").innerHTML = SOURCES.map((x) => `<div>· ${x.replace(/</g, "&lt;")}</div>`).join("") + `<div>· Generated by scripts/export_blog_data.py on ${D.generated}; scores by ${D.judge ? `${D.judge.name} (judgment ${D.judge.id})` : "gpt-oss-20b"}</div>`;
 })();

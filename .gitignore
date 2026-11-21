@@ -25,4 +25,6 @@ checkpoints/
 
 # Machine-specific provisioning files (not part of the project)
 /lab_envs/
+# replies behind the blog's dots (scripts/export_blog_samples.py): derived model outputs, not committed
+docs/blog/samples/
 /.venv-inkling

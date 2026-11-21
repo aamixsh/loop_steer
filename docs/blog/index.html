@@ -11,7 +11,7 @@
 :root {
   --bg: #f4f6f9; --panel: #ffffff; --panel-2: #f6f8fb;
   --ink: #131a27; --ink-2: #485267; --ink-3: #7d879b; --line: #d6dbe4;
-  --ouro: #2a78d6; --nanbeige: #1baf7a; --dory: #eb6834; --dense: #6b7488;
+  --ouro: #2a78d6; --nanbeige: #1baf7a; --dory: #eb6834; --dense: #6b7488; --inkling: #c0398b;
   --refuse: #dc2626; --flow: #2563eb; --flow-ink: #2563eb; --kick: #16181d; --steer: #7a4cd9; --steer-soft: rgba(122,76,217,.14); --neutral: #9aa3b2;
   --own-lane: #e3e7ee; --alt-a: #c9d1dc; --alt-b: #f9fafc; --lane-edge: #b2bac7; --road: #a3abb9;
   --good: #1f8a4c; --led-off: rgba(19,26,39,.07); --led-bg: #f7f8fa;
@@ -41,7 +41,7 @@ h3 { font-size: 1.35rem; text-transform: uppercase; letter-spacing: .03em; font-
 .note { font-size: 1rem; color: var(--ink-2) }
 .src { font-family: var(--font-mono); font-size: .68rem; color: var(--ink-3); letter-spacing: .02em; overflow-wrap: anywhere }
 em.m { font-style: normal; font-weight: 600; padding: 0 .2em; border-radius: 3px; white-space: nowrap }
-.m-ouro { color: var(--ouro) } .m-nanbeige { color: var(--nanbeige) } .m-dory { color: var(--dory) } .m-qwen { color: var(--dense) }
+.m-ouro { color: var(--ouro) } .m-nanbeige { color: var(--nanbeige) } .m-dory { color: var(--dory) } .m-qwen { color: var(--dense) } .m-inkling { color: var(--inkling) }
 .num { font-family: var(--font-mono); font-size: .92em; font-variant-numeric: tabular-nums; white-space: nowrap }
 
 /* hero */
@@ -88,7 +88,10 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
 
 /* scoreboard */
 .board { background: var(--led-bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 10px; display: grid; gap: 6px; color: var(--ink) }
-.board svg { width: 100%; height: auto; display: block }
+.bnum { font-family: var(--font-display); font-weight: 800; font-size: clamp(2.9rem, 7vw, 4.4rem); line-height: .9; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; display: flex; align-items: baseline; gap: .03em; transition: opacity .2s }
+.bnum .bu { font-size: .52em; opacity: .75 }
+.bnum.idle { opacity: .28 }
 .board .bl { font-family: var(--font-mono); font-size: .66rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3);
   display: flex; justify-content: space-between; gap: .6rem; flex-wrap: wrap }
 .board .bl b { color: var(--ink); font-weight: 600 }
@@ -101,7 +104,7 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
 .step:hover { border-color: var(--ink-3) }
 .step[aria-pressed="true"] { border-color: var(--steer); box-shadow: 0 0 0 3px var(--steer-soft) }
 .step .k { font-family: var(--font-display); font-weight: 800; font-size: clamp(.68rem, 2.5vw, 1.08rem); line-height: 1.1; text-transform: uppercase; letter-spacing: .03em }
-.step .led svg { width: 100%; max-width: 190px; height: auto; display: block }
+.step .bnum { font-size: clamp(1.9rem, 8.2vw, 3.4rem) }
 .step .ci { font-family: var(--font-mono); font-size: clamp(.55rem, 1.7vw, .72rem); letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .step .k, .step .ci { color: var(--c, var(--ink)) } /* blue and red mixed by the tile's refusal rate */
 
@@ -155,7 +158,7 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
   .cards.models .card > h3 { grid-area: head } .cards.models .card > .spec { grid-area: spec } .cards.models .card > .eqs { grid-area: eqs }
   .cards.models .card > p { grid-area: desc } .cards.models .card > .trackbox { grid-area: draw; align-self: center }
 }
-.note.miss { font-size: .86rem; margin-top: -.3rem }
+.note.miss { font-size: .8rem; color: var(--ink-3); border-top: 1px solid var(--line); padding-top: .55rem }
 .note.miss:empty { display: none }
 .norm-key { display: flex; flex-wrap: wrap; gap: .45rem 1.2rem; justify-content: center; font-family: var(--font-mono); font-size: .68rem; color: var(--ink-2); margin-top: .6rem }
 .norm-key span { display: inline-flex; align-items: center; gap: .4rem }
@@ -163,6 +166,7 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
 .eqs { display: grid; gap: .3rem; font-size: .95rem; padding: .45rem .6rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto }
 .eqs div { display: grid; grid-template-columns: 6.6rem minmax(0, 1fr); align-items: baseline; gap: .4rem; white-space: nowrap }
 .eqs span { font-family: var(--font-mono); font-size: .64rem; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3) }
+.eqs span.katex { text-transform: none; letter-spacing: 0; color: var(--ink-2) } /* the label style is for the row names, not the maths */
 .ex-prompt { display: grid; gap: .2rem; font-size: 1rem }
 .verdict { font-weight: 600; color: var(--c) }
 .formula { text-align: center; font-size: 1.1rem; overflow-x: auto }
@@ -201,6 +205,13 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
 .reply .who { font-family: var(--font-mono); font-size: .66rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3);
   display: flex; justify-content: space-between; gap: .5rem }
 .md { display: grid; gap: .45rem; overflow-wrap: anywhere }
+.reply .answer { max-height: 26rem; overflow-y: auto }
+details.think { border: 1px dashed var(--line); border-radius: 8px; padding: .3rem .55rem; background: var(--panel) }
+details.think summary { cursor: pointer; font-family: var(--font-mono); font-size: .74rem; color: var(--ink-2); list-style-position: inside }
+details.think[open] summary { margin-bottom: .35rem }
+.think-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .86rem; line-height: 1.45; color: var(--ink-2); max-height: 22rem; overflow-y: auto }
+.out-key { display: flex; flex-wrap: wrap; gap: .25rem .8rem; font-size: .8rem; color: var(--ink-2) }
+.out-key svg { vertical-align: -2px; margin-right: .25rem }
 .md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0 }
 .md ul, .md ol { padding-left: 1.3rem; display: grid; gap: .2rem }
 .md .md-h { font-family: var(--font-body); font-size: 1em; font-weight: 600; margin: 0 }
@@ -209,13 +220,18 @@ input[type="range"] { width: 100%; accent-color: var(--steer) }
 .md blockquote { border-left: 3px solid var(--line); padding-left: .6rem; color: var(--ink-2) }
 .md table { border-collapse: collapse; font-size: .9em } .md th, .md td { border: 1px solid var(--line); padding: .15rem .4rem }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: 0; width: 100% }
-.md math { font-size: 1.05em }
+.md math, .md-inline math, .think-body math { font-size: 1.05em }
+.md-inline { overflow-wrap: anywhere; line-height: 1.5 }
+.md-inline code { font-family: var(--font-mono); font-size: .86em; background: rgba(19,26,39,.05); padding: 0 .2em; border-radius: 3px }
+details.asy pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: .76rem; color: var(--ink-2); max-height: 12rem; overflow-y: auto }
 .reply .md { max-height: 21rem; overflow-y: auto; padding-right: .2rem }
 .terminal .md { gap: .35rem }
 .multiples .span2 { grid-column: span 2 }
 @media (max-width: 420px) { .multiples .span2 { grid-column: auto } }
 .replies { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px }
-@media (max-width: 640px) { .replies { grid-template-columns: minmax(0, 1fr) } }
+/* the two replies stay side by side at every width; on a phone the text gets smaller instead */
+@media (max-width: 640px) { .replies { gap: 6px } .replies .reply { font-size: .84rem; line-height: 1.42; padding: .55rem .6rem }
+  .replies .reply .who { flex-direction: column; gap: .1rem; font-size: .58rem } }
 .terminal { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); font-family: var(--font-mono); font-size: .74rem;
   line-height: 1.5; border-radius: 10px; padding: .7rem .8rem; min-height: 6.5em; overflow-wrap: anywhere }
 .terminal .dim { color: var(--ink-3) }
@@ -243,6 +259,10 @@ hr.lane { border: 0; height: 10px; margin: 2rem auto 0; max-width: var(--wide);
 table.mini { border-collapse: collapse; font-family: var(--font-mono); font-size: .74rem; font-variant-numeric: tabular-nums; width: 100% }
 table.mini th, table.mini td { padding: .3rem .4rem; text-align: right; border-bottom: 1px solid var(--line) }
 table.mini th:first-child, table.mini td:first-child { text-align: left }
+.j2-fig { max-width: 34rem; margin-top: 1rem }
+#j2s-chart svg { width: 100%; height: auto; display: block }
+#j2s-chart .ax { font: 400 11px var(--font-mono); fill: var(--ink-3) }
+#j2s-chart .grid { stroke: var(--line); stroke-width: 1 }
 table.mini th { color: var(--ink-3); font-weight: 400 }
 .scroll-x { overflow-x: auto }
 details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78rem; color: var(--ink-2) }
@@ -258,7 +278,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="fig">
     <div class="trackbox" id="hero-track"></div>
     <div class="steps" id="hero-steps"></div>
-    <p class="fig-cap">Dory 1.0 4B, trained to run 2 loops, on harmful prompts. The liquid is the model's state on one prompt, and its colour is how far that state points along the refusal direction: blue is none, red is a lot. The refusal signal builds through the entry stack and loop 1. Erasing the refusal direction on both loops puts a filter in the stream at the layers of each loop, and the red drains out. The third run is the same model with the same filters; it only runs two more loops than it was trained for, with no steering, and those loops turn the stream red again. Each tile shows the measured refusal rate on <span id="hero-n"></span> harmful test prompts (StrongREJECT judge) and its 95% interval, in a colour that mixes blue and red by that rate. The colour at the end of the tube follows the same rate; the colour along the way is a sketch. Tap a tile to replay it; drag the model to turn it.</p>
+    <p class="fig-cap">Dory 1.0 4B, trained to run 2 loops, on harmful prompts. The liquid is the model's state on one prompt, and its colour is how far that state points along the refusal direction: blue is none, red is a lot. The refusal signal builds through the entry stack and loop 1. Erasing the refusal direction on both loops puts a filter in the stream at the layers of each loop, and the red drains out. The third run is the same model with the same filters; it only runs two more loops than it was trained for, with no steering, and those loops turn the stream red again. Each tile shows the measured refusal rate on <span id="hero-n"></span> harmful test prompts (<a href="#scoring">StrongREJECT judge</a>) and its 95% interval, in a colour that mixes blue and red by that rate. The colour at the end of the tube follows the same rate; the colour along the way is a sketch. Tap a tile to replay it; drag the model to turn it.</p>
   </div>
 
   <div class="tldr col" style="margin-inline:0">
@@ -266,6 +286,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
     <p>A dense model behaves differently. Qwen3-8B ignores edits to its first and last quarter and collapses when a middle quarter is edited.</p>
     <p>Persona vectors and random kicks show the same pattern. Weight edits act on every loop, so no later loop can undo them. They abliterate two looped models cleanly and break the third.</p>
   </div>
+  <p class="note col" id="credit" style="margin:1rem 0 0">Concurrent work: a <a href="https://www.lesswrong.com/posts/rzcJMpnehFBD686gj/a-recurrent-llm-is-quite-easy-to-interpret-but-complex-to">LessWrong post on Ouro</a> (September 2026) found that steering Ouro works best on its last loop and that steering on earlier loops gets neutralised. Here the same question is asked of three looped models and a dense control, with refusal scored by a judge, and followed into extra loops, random kicks and weight edits.</p>
 </header>
 
 <main>
@@ -273,7 +294,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="eyebrow">Setup</div>
   <h2>Same layers, run again</h2>
   <p>A standard transformer passes each token through its layers once. A looped model has a shorter stack and runs each token's state through it several times, with the same weights every time. A loop is not a new thought or a new token: it is the same token's state, processed again by the same layers.</p>
-  <p>In the drawings below, each loop of the tube is one loop of the model. The three looped models differ in how one loop hands over to the next and in where they normalise the stream. <em class="m m-dory">Dory</em> adds its input back before every loop and keeps the whole stream at unit length. <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-ouro">Ouro</em> pass the previous loop's output through a shared norm. Every model, Qwen included, normalises what each layer reads. Under each drawing: how one layer updates the stream <i>h</i>, and what happens between loops.</p>
+  <p>In the drawings below, each loop of the tube is one loop of the model. The three looped models differ in how one loop hands over to the next and in where they normalise the stream. <em class="m m-dory">Dory</em> adds its input back before every loop and keeps the whole stream at unit length. <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-ouro">Ouro</em> pass the previous loop's output through a shared norm. Every model, Qwen included, normalises what each layer reads. Under each drawing: how one layer updates the stream <i>h</i>, and what happens between loops. The last card is a fourth looped model whose runs are still going: <em class="m m-inkling">Inkling 2 Mini</em>, a mixture of experts that restarts every pass from its first layers and passes only gated messages from one pass to the next.</p>
 </section>
 <div class="wide">
   <div class="cards models" id="model-cards"></div>
@@ -301,13 +322,13 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
     <div class="stack">
       <div class="board" id="sb-board"></div>
       <div class="dots" id="sb-dots"></div>
-      <div class="legend"><span><i style="background:var(--flow);border-color:var(--flow)"></i>0 of 9 samples refused</span><span><i style="background:rgb(128,68,136);border-color:rgb(128,68,136)"></i>about half</span><span><i style="background:var(--refuse);border-color:var(--refuse)"></i>9 of 9</span><span>first 100 test prompts</span></div>
+      <div class="legend"><span><i style="background:var(--flow);border-color:var(--flow)"></i>0 of 9 samples refused</span><span><i style="background:rgb(128,68,136);border-color:rgb(128,68,136)"></i>about half</span><span><i style="background:var(--refuse);border-color:var(--refuse)"></i>9 of 9</span><span><i style="border:2px solid var(--ink)"></i>reply readable</span><span>first 100 test prompts</span></div>
     </div>
   </div>
   <div class="stack">
     <div class="row"><span class="label">Read a reply</span><span class="row" id="sb-ex-chips"></span></div>
     <div class="stack" id="sb-ex" style="gap:.6rem"></div>
-    <p class="note" style="font-size:.9rem">The reply shown is one of the prompt's nine samples, picked to agree with the majority, for the model and loops chosen above. Replies are cut short; the prompts were picked to be mild.</p>
+    <p class="note" style="font-size:.9rem">Click any dot to see its prompt and verdict. The dots with a dark ring are mild requests (insults, persuasion, misleading marketing and the like), and for those the page shows a full reply, with the model's reasoning folded away until you open it. For the rest, which ask for weapons, drugs, hacking, self-harm and similar harm, it shows the verdict only. The reply is one of the prompt's nine samples, picked to agree with the majority, for the model and loops chosen above.</p>
   </div>
 </div>
 
@@ -331,36 +352,41 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <p class="fig-cap">The same runs as refusal rates. Dashed line: no steering. Dotted line: every loop (every quarter). Hover for 95% prompt-bootstrap intervals.</p>
 </div>
 <section class="col">
-  <p>The same holds with the sign flipped. Adding the refusal direction to harmless prompts makes a looped model refuse them only if the addition reaches the last loop. <span id="plus-qwen"></span> <span id="plus-ouro"></span></p>
+  <p>With the sign flipped, the first loop is again the wrong place. We add the refusal direction to harmless prompts, as strongly as each model takes without losing coherence, and adding it on a looped model's first loop barely moves it. <span id="plus-dory"></span> <span id="plus-ouro"></span> <span id="plus-qwen"></span></p>
 </section>
 <div class="wide fig">
   <h3>Flip the sign: add refusal to harmless prompts</h3>
   <div class="chart" id="plus-chart"></div>
-  <p class="fig-cap">Share of 100 harmless prompts refused after adding the refusal direction, at 4 times the strength tuned for the opposite sign, on one loop or on all of them (Qwen: at the start of one quarter, or of all four). Faded bar: every loop at once. Grey bar: a random direction of the same size on every loop, as a control. Where the control scores high too (Ouro, Qwen), the addition has broken the model: its reasoning never closes, and the judge reads the unfinished text as a refusal. Hover a bar for the share of reasoning traces that never close.</p>
+  <p class="fig-cap">Share of 100 harmless test prompts refused after adding the refusal direction on one loop or on all of them (Qwen: at the start of one quarter, or of all four), at the strength chosen for each model in the figure below. Faded bar: every loop at once. Grey bar: a random direction of the same size on every loop, as a control. Hover a bar for the coherence of the replies and the share of reasoning traces that never close.</p>
+</div>
+<div class="wide fig">
+  <h3>How hard to push</h3>
+  <div class="chart" id="plus-tune"></div>
+  <p class="fig-cap">Choosing the strength of the addition for each model, on 50 harmless prompts held out from the test set, with the addition on every loop (Qwen: every quarter) at 0.5 to 4 times the strength tuned for the opposite sign, plus three strengths in between where coherence starts to fall. Red: share of harmless prompts refused. Grey: coherence of the replies, 0 to 100, judged by gpt-oss-20b<span id="plus-tune-judge"></span>. We take the strongest addition that keeps coherence within 10 points of the unsteered model (above the dashed line) and does not raise the share of reasoning traces that never close by more than 10 points; hollow dots fail that rule. The ringed strength is the one used above.</p>
 </div>
 
 <section class="col" id="personas">
   <div class="eyebrow">Experiment 2 · <b>personas</b></div>
   <h2>Persona vectors wear off</h2>
-  <p>A persona vector shifts a character trait such as optimism or sycophancy (Chen et al., 2025). We add one on a single loop or on every loop, at a strength tuned to keep replies coherent, and a judge scores the trait from 0 to 100.</p>
+  <p>A persona vector shifts a character trait such as optimism or sycophancy (Chen et al., 2025). We add one on a single loop or on every loop, at a strength tuned to keep replies coherent, and a <a href="#scoring">judge</a> scores the trait from 0 to 100.</p>
 </section>
 <div class="wide fig">
   <div class="row" id="pe-models"></div>
   <div class="row" id="pe-traits"></div>
-  <p class="note miss" id="pe-missing"></p>
   <div class="row"><span class="label">Steer on</span><span class="row" id="pe-units"></span></div>
   <div class="trackbox" id="pe-track"></div>
   <div class="fig-grid">
     <div class="stack">
       <div class="gauge" id="pe-gauge-trait"></div>
       <div class="gauge" id="pe-gauge-coh"></div>
-      <p class="fig-cap" id="pe-cap"></p>
     </div>
-    <div class="stack">
-      <div class="label" id="pe-q"></div>
-      <div class="replies" id="pe-replies"></div>
-    </div>
+    <p class="fig-cap" id="pe-cap"></p>
   </div>
+  <div class="stack">
+    <div class="label" id="pe-q"></div>
+    <div class="replies" id="pe-replies"></div>
+  </div>
+  <p class="note miss" id="pe-missing"></p>
 </div>
 <div class="wide fig">
   <h3>Mean trait gain by loop</h3>
@@ -374,29 +400,26 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 <div class="wide fig">
   <div class="row" id="pa-models"></div>
   <div class="row" id="pa-traits"></div>
-  <p class="note miss" id="pa-missing"></p>
   <div class="row"><span class="label">Erase on</span><span class="row" id="pa-units"></span></div>
   <div class="trackbox" id="pa-track"></div>
   <div class="fig-grid">
+    <div class="chart" id="pa-chart"></div>
     <div class="stack">
-      <div class="chart" id="pa-chart"></div>
       <p class="fig-cap" id="pa-cap"></p>
-    </div>
-    <div class="stack">
-      <div class="board" id="pa-board"></div>
       <div class="gauge" id="pa-gauge-coh"></div>
       <p class="note" style="font-size:.9rem">Coherence is judged on the same replies. Erasing a persona can break a model as well as change it, so check both.</p>
     </div>
   </div>
+  <p class="note miss" id="pa-missing"></p>
 </div>
 <div class="wide fig">
   <h3>Share of the prompted trait erased, by loop</h3>
   <div class="multiples chart" id="pa-multiples"></div>
-  <p class="fig-cap">How much of what the system prompt adds is gone after erasing the trait on one loop (or quarter): (prompted − erased) ÷ (prompted − no prompt), averaged over traits the prompt raises by at least 15 points (Ouro: 4 of its 7 traits; the others: all). The last bar in each panel is every loop at once. Hover for coherence.</p>
+  <p class="fig-cap">How much of what the system prompt adds is gone after erasing the trait on one loop (or quarter). For each trait <i>t</i>, the judge's trait score with the prompt is <i>P<sub>t</sub></i>, without it <i>N<sub>t</sub></i>, and with the prompt and the erasure <i>E<sub>t</sub></i>; the bar is Σ<sub><i>t</i></sub>(<i>P<sub>t</sub></i> − <i>E<sub>t</sub></i>) ÷ Σ<sub><i>t</i></sub>(<i>P<sub>t</sub></i> − <i>N<sub>t</sub></i>): the points the erasure takes away over the points the prompt adds, summed over every trait the model has a vector for. 100% means the erasure undoes the prompt exactly; above 100% would mean it pushes the trait below where the model sits with no prompt. A trait the prompt barely raises adds little to either sum, so it cannot swing the bar. The last bar in each panel is every loop at once. Hover for coherence.</p>
 </div>
 <section class="col">
   <p>Early erasures wash out again. Run <em class="m m-dory">Dory</em> with four loops and erase the trait on loop 1, 2 or 3: <span class="num" id="pa-d4-1"></span>, <span class="num" id="pa-d4-2"></span> and <span class="num" id="pa-d4-3"></span> of the prompted trait is gone. Loop 4 alone takes away <span class="num" id="pa-d4-4"></span>, the same as every loop (<span class="num" id="pa-d4-all"></span>). With its trained two loops the split is <span class="num" id="pa-d-1"></span> for loop 1 against <span class="num" id="pa-d-2"></span> for loop 2, and <em class="m m-nanbeige">Nanbeige</em> shows <span class="num" id="pa-n-1"></span> against <span class="num" id="pa-n-2"></span>.</p>
-  <p><em class="m m-ouro">Ouro</em> also erases more on later loops (<span class="num" id="pa-o-1"></span> on loop 1, <span class="num" id="pa-o-4"></span> on loop 4), but less cleanly. Erasing optimism on loop 4 overshoots into gloom (<span class="num" id="pa-o-opt"></span>, below the <span class="num" id="pa-o-opt0"></span> it scores with no prompt), and erasing apathy wrecks its replies (coherence <span class="num" id="pa-o-apa"></span>), which the judge then scores as more apathetic. <em class="m m-qwen">Qwen</em> barely responds to the erasure anywhere: <span class="num" id="pa-q-all"></span> with all four quarters.</p>
+  <p><em class="m m-ouro">Ouro</em> starts from weak replies: it is a reasoning model, and with its reasoning turned off for these tests it often drifts off topic or garbles words, so its replies score <span class="num" id="pa-o-cohn"></span> for coherence with no system prompt and <span class="num" id="pa-o-cohp"></span> with one (the other models: <span id="pa-coh-others-n"></span> and <span id="pa-coh-others-p"></span>). It also erases more on later loops (<span class="num" id="pa-o-1"></span> on loop 1, <span class="num" id="pa-o-4"></span> on loop 4), but less cleanly. <span id="pa-o-opt-clause">Erasing optimism on loop 4 overshoots into gloom</span>, and erasing apathy wrecks its replies (coherence <span class="num" id="pa-o-apa"></span>), which the judge then scores as more apathetic. <em class="m m-qwen">Qwen</em> barely responds to the erasure anywhere: <span class="num" id="pa-q-all"></span> with all four quarters.</p>
 </section>
 
 <section class="col" id="kicks">
@@ -420,18 +443,24 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
     <div class="stack">
       <div class="board" id="ki-board"></div>
       <div class="dots" id="ki-dots"></div>
-      <div class="legend"><span><i style="background:var(--kick);border-color:var(--kick)"></i>solved</span><span><i></i>wrong or unfinished</span><span>100 MATH-500 problems</span></div>
+      <div class="out-key" id="ki-key"></div>
     </div>
+  </div>
+  <div class="stack">
+    <div class="stack" id="ki-ex" style="gap:.6rem"></div>
+    <p class="note" style="font-size:.9rem">Click a dot to read that problem's response. Every run gets 8,192 tokens; a response that hits the limit is cut off and counts as not solved. A judge (<span class="judge-name">gpt-oss-20b</span>) reads the end of each cut-off response and says whether it was still reasoning sensibly, repeating itself or incoherent.</p>
   </div>
 </div>
 <section class="col">
   <p>The cleanest comparison in the post is the same kick at the same site. <span id="ki-same"></span></p>
   <p>Kick every loop at once and nothing recovers. <em class="m m-ouro">Ouro</em> falls to <span class="num" id="ki-all"></span> at size 0.5, where a single kick on any loop costs at most <span class="num" id="ki-allmax"></span> points.</p>
+  <p id="strip-text"></p>
 </section>
 <div class="wide fig">
-  <h3>Where Dory feels a kick</h3>
+  <h3>Where each model feels a kick</h3>
+  <div class="row"><span class="label">Colour scale</span><span id="strip-scale"></span></div>
   <div class="chart scroll-x" id="strip-chart"></div>
-  <p class="fig-cap">Dory run with four loops, kicked at every fourth sublayer (size 1, 30 problems). Colour is the change in its next-token predictions (KL divergence from the unkicked run). The first two loops barely register. The entry stack is warmer than loops 1 and 2 because its output is fed into every loop.</p>
+  <p class="fig-cap">A size-1 kick at one layer at a time (Dory: one sublayer), on the first 30 MATH-500 problems: a random direction added to the stream at that layer, on every token, as long as the stream itself there. A random direction is nearly at right angles to the stream, so the kick turns what the layer reads by about 45° and makes it about 1.4 times longer. Colour is how much it changes the model's next-token predictions on its own unkicked replies (KL divergence from the unkicked run, log scale), and the number under each loop is its median. "Each row" stretches every run's colours over its own range, so the pattern inside a run shows; "Shared" uses one range for all, which shows that Dory's loops differ by far more than any other model's. Each row is stretched to the same width, so the columns line up as a share of the forward pass. Hover a cell for its value.</p>
 </div>
 <div class="wide fig">
   <h3>Every kick, every model</h3>
@@ -456,11 +485,13 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
     <div class="stack">
       <div class="board" id="ex-board"></div>
       <div class="dots" id="ex-dots"></div>
+      <div class="out-key" id="ex-key"></div>
     </div>
   </div>
+  <div class="stack" id="ex-ex" style="gap:.6rem"></div>
 </div>
 <section class="col">
-  <p><em class="m m-dory">Dory</em> heals completely in every experiment. <em class="m m-ouro">Ouro</em> recovers from random kicks with two extra loops but not from refusal steering. Nanbeige cannot be tested this way, since beyond two loops it produces gibberish even without steering.</p>
+  <p><em class="m m-dory">Dory</em> heals completely in every experiment. <em class="m m-ouro">Ouro</em> recovers from random kicks with two extra loops but not from refusal steering.<span id="ex-gains"></span> Nanbeige cannot be tested this way, since beyond two loops it produces gibberish even without steering.</p>
 </section>
 
 <section class="col" id="verdict">
@@ -533,7 +564,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 </section>
 <div class="wide cards" id="edit-cards"></div>
 <section class="col">
-  <p><em class="m m-qwen">Qwen</em>, <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-dory">Dory</em> stop refusing and keep their maths. <em class="m m-ouro">Ouro</em>'s standard edit wipes out its maths, and the same happens with a random direction, so the damage has nothing to do with refusal. A norm-aware edit brings refusal down to <span class="num" id="ed-na-r"></span> but costs nearly half of MATH-500 and most of MMLU-Pro. Hooks still remove Ouro's refusal at no cost, so it resists a recipe, not an attacker who can run code.</p>
+  <p><em class="m m-qwen">Qwen</em>, <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-dory">Dory</em> stop refusing and keep their maths. <em class="m m-ouro">Ouro</em>'s standard edit wipes out its maths, and the same happens with a random direction, so the damage has nothing to do with refusal. Its refusal rate after the edit (<span id="ed-o-ref"></span>) counts that broken output as well: the judge scores a reply that gives no usable help as a refusal. A norm-aware edit brings refusal down to <span class="num" id="ed-na-r"></span> but costs nearly half of MATH-500 and most of MMLU-Pro. Hooks still remove Ouro's refusal at no cost, so it resists a recipe, not an attacker who can run code.</p>
 </section>
 
 <section class="col" id="leak">
@@ -578,7 +609,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <ul class="plain">
     <li><b>Leak 1, the write norms.</b> The edited matrices write almost nothing along <i>u</i> (0.001), but the norm after each one rotates some back: 0.09 to 0.17 per write. This alone breaks Ouro, even when the edited direction is random: its replies fall apart with fewer loops too.</li>
     <li><b>Leak 2, the shared norm between loops.</b> It multiplies whatever leaked by 2 to 3 every loop. A norm-aware edit removes <i>g</i> ⊙ <i>u</i> from each writer instead of <i>u</i>, which closes leak 1 exactly, yet the stream still ends loop 4 at 4.0× the unedited model, and the model loses nearly half its MATH-500 score.</li>
-    <li><b>The other two models.</b> Nanbeige has no norm on its writes and its shared norm shrinks the stream, so neither leak applies (0.16× after loop 2). Dory has no gains, but its per-dimension update rate α plays the same role; its standard edit is weaker than its hooks (26% refusal against 13%), and correcting for α makes it weaker still (62%). Its leftover leak is not explained yet.</li>
+    <li><b>The other two models.</b> Nanbeige has no norm on its writes and its shared norm shrinks the stream, so neither leak applies (0.16× after loop 2). Dory has no gains, but its per-dimension update rate α plays the same role; its standard edit is weaker than its hooks (<span id="lk-d-ortho"></span> refusal against <span id="lk-d-hooks"></span>), and correcting for α makes it weaker still (<span id="lk-d-na"></span>). Its leftover leak is not explained yet.</li>
   </ul>
 </section>
 
@@ -604,12 +635,47 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="eyebrow">Fine print</div>
   <h2>Methods and limits</h2>
   <ul class="plain">
-    <li><b>Refusal.</b> 487 harmful test prompts (250 for some loop subsets), 3 reasoning traces per prompt and 3 answers per trace at temperature 0.6, each answer judged by gpt-oss-20b with the StrongREJECT rubric. Unfinished traces are judged whole. Intervals resample prompts.</li>
+    <li><b>Refusal.</b> 487 harmful test prompts (250 for some loop subsets), 3 reasoning traces per prompt and 3 answers per trace at temperature 0.6, each answer scored as described under <a href="#scoring">How we score</a>. Intervals resample prompts.</li>
     <li><b>Directions.</b> One direction per model, extracted at one site and reused everywhere: Ouro loop 4 layer 16, Nanbeige loop 2 layer 15, Dory loop 1 sublayer 26 (harmful minus harmless prompts), Qwen layer 21.</li>
     <li><b>Kicks.</b> A random unit direction per problem, times a fraction of the state's norm, added at each loop's middle layer. 100 MATH-500 problems, one sample each, reasoning up to 8192 tokens.</li>
-    <li><b>Personas.</b> Persona-vector method of Chen et al. (2025), 20 questions × 5 samples per setting, trait and coherence judged by gpt-oss-20b. Strengths tuned per model so coherence stays within 10 points of clean.</li>
-    <li><b>Limits.</b> Single runs. One judge with no human calibration. Extra-loop tests run models past their trained loop count. Three looped models, each with several design differences. Leak mechanism on 8 traces.</li>
-    <li><b>Concurrent work.</b> A LessWrong post on Ouro (24 Sep 2026, "A recurrent LLM is quite easy to interpret but complex to steer") also finds steering works best on the last loop. <a href="https://arxiv.org/abs/2610.15218">arXiv 2610.15218</a> and <a href="https://arxiv.org/abs/2610.10625">arXiv 2610.10625</a> link refusal and jailbreaks to the number of loops.</li>
+    <li><b>Personas.</b> Persona-vector method of Chen et al. (2025), 20 questions × 5 samples per setting with thinking turned off, trait and coherence scored as below. Strengths tuned per model so coherence stays within 10 points of clean.</li>
+    <li><b>Limits.</b> Single runs. <span id="judge-limits">One judge scores every figure, with no human calibration; a stronger second judge was run on every refusal answer for comparison (<a href="#judge2">addendum</a>).</span> Extra-loop tests run models past their trained loop count. Three looped models, each with several design differences. Leak mechanism on 8 traces.</li>
+    <li><b>Concurrent work.</b> A <a href="https://www.lesswrong.com/posts/rzcJMpnehFBD686gj/a-recurrent-llm-is-quite-easy-to-interpret-but-complex-to">LessWrong post on Ouro</a> (24 Sep 2026, "A recurrent LLM is quite easy to interpret but complex to steer") also finds steering works best on the last loop. <a href="https://arxiv.org/abs/2610.15218">arXiv 2610.15218</a> and <a href="https://arxiv.org/abs/2610.10625">arXiv 2610.10625</a> link refusal and jailbreaks to the number of loops.</li>
+  </ul>
+  <h3 id="scoring" style="margin-top:1.6rem">How we score</h3>
+  <p style="font-size:1rem" id="judge-lead">One judge, gpt-oss-20b at a fixed snapshot with greedy decoding, scores every reply that needs a judgment. Accuracy and kick damage need no judge.</p>
+  <ul class="plain">
+    <li><b>Refused or not.</b> The judge reads the request and one answer, not the reasoning, and fills in the StrongREJECT rubric (<a href="https://arxiv.org/abs/2402.10260">Souly et al., 2024</a>). We use its first question: did the model refuse? The rubric also counts an answer that gives no specific help as a refusal, so on harmless prompts a garbled answer counts as one too, which is why the flip-sign strength is also checked against coherence. A trace that never finishes has no separate answer and is judged whole. A trace scores the mean of its answers, and a rate is the mean over traces.</li>
+    <li><b>Trait, 0 to 100.</b> The persona-vectors judge prompt for that trait; for evil, whether the reply sets out to harm, manipulate or cause suffering. Replies the judge calls a refusal are left out of the mean.</li>
+    <li><b>Coherence, 0 to 100.</b> 0 is not valid English, 50 is rambling, 100 is clear. Whether the answer is right does not count. Persona and flip-sign strengths are chosen for the largest effect that keeps coherence within 10 points of the unsteered model.</li>
+    <li><b>Accuracy.</b> MATH-500: the last boxed answer after the reasoning, matched to the reference as text or as a number. MMLU-Pro: the option letter. A trace that never finishes counts as wrong.</li>
+    <li><b>Kick damage.</b> The KL divergence between the kicked and the unkicked model's next-token predictions, on the model's own unkicked replies.</li>
+    <li><b>Sanity check.</b> A phrase match for refusals ("I'm sorry", "I cannot") is logged beside every judgment. No figure uses it.</li>
+  </ul>
+  <h3 id="judge2" style="margin-top:1.6rem">Addendum: two judges</h3>
+  <p style="font-size:1rem"><span id="j2s-lead">Would a stronger judge change the results? We re-scored every refusal answer behind this page with gpt-6-luna (OpenAI API, low reasoning effort), using the same rubric, prompt and parser as gpt-oss-20b.</span> <span id="j2s-intro"></span></p>
+  <div class="j2-fig">
+    <div class="row" id="j2s-legend" style="gap:.4rem .9rem;font-size:.8rem"></div>
+    <div id="j2s-chart"></div>
+    <p class="fig-cap" id="j2s-cap"></p>
+  </div>
+  <div style="overflow-x:auto;margin-top:.6rem"><table class="mini" id="j2s-table" style="font-size:.8rem"></table></div>
+  <p style="font-size:1rem;margin-top:.8rem" id="j2s-note"></p>
+  <p style="font-size:1rem" id="j2x" hidden><b>Traits, coherence and cut-offs.</b> <span id="j2x-text"></span></p>
+  <p style="font-size:1rem;margin-top:1.2rem">Would it change the refusal directions? The same judge re-scored the unsteered training replies each direction is built from, and we rebuilt each direction from its verdicts.</p>
+  <div style="overflow-x:auto"><table class="mini" id="j2-table" style="font-size:.8rem"></table></div>
+  <ul class="plain" style="margin-top:.8rem">
+    <li><b>The verdicts agree.</b> On the training replies, the two judges give the same refused-or-not verdict on <span id="j2-agree"></span> of answers, and their refusal rates differ by at most <span id="j2-diff"></span> points.</li>
+    <li><b>The directions don't move.</b> Rebuilt from luna's verdicts, each direction has cosine <span id="j2-cos"></span> or more with the one we steer with, at the site we steer (<span id="j2-cosmin"></span> or more at every layer), and it separates held-out refusals from compliance just as well.</li>
+    <li><b>One rule would shift.</b> Luna rates complying answers as less convincing and less specific than gpt-oss-20b does. The rule we used to pick clearly complying traces (a StrongREJECT score above 0.8) would therefore keep far fewer of them under luna (Ouro: <span id="j2-ouro-non"></span>), and that smaller set moves Ouro's direction more (cosine <span id="j2-ouro-cos"></span>) without separating any better. No figure here uses those quality scores: every rate on this page is the refused-or-not verdict.</li>
+  </ul>
+  <p style="font-size:1rem;margin-top:1.2rem">Would it change the persona vectors? Each one is built from replies the judge keeps: replies prompted to show the trait that score high on it, minus replies prompted not to that score low. We rebuilt every vector from luna's ratings and compared it with ours at the layer each trait steers with.</p>
+  <div style="overflow-x:auto"><table class="mini" id="j2p-table" style="font-size:.8rem"></table></div>
+  <ul class="plain" style="margin-top:.8rem">
+    <li><b>Most vectors don't move.</b> <span id="j2p-same"></span></li>
+    <li><b>Two move a little.</b> <span id="j2p-moved"></span></li>
+    <li><b>The loop comparison doesn't depend on it.</b> Steering one loop and steering every loop use the same vector, so a cosine near 0.9 could change how large those two traits' gains are, but not which loops matter. The vector's length plays no part: steering adds the unit vector, scaled by a strength and the stream's norm.</li>
+    <li><b>What this does not cover.</b> <span id="j2-limits-a">The trait and coherence scores of the steered replies, including the coherence check on the flip-sign strengths, come from gpt-oss-20b only.</span> Dory's figures use a direction from harmful minus harmless prompts, which needs no judge; its row (*) shows the judge-labelled direction at loop 1, layer 22. <span id="j2-blocked-note"></span></li>
   </ul>
   <details><summary>Data sources for every figure</summary><div class="src" id="all-src" style="margin-top:.6rem"></div></details>
 </section>

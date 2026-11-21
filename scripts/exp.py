@@ -164,6 +164,27 @@ def plus_cands(key, sets):
             + [f"actadd:{method}:{site}:c={c}:rel=1{u}" for c in (c1, c2) for u in units])
 
 
+def plus_tune_job(key, loops, also4=False):
+    """E15: tune +u's strength on 50 held-out harmless prompts (every loop; refusal vs judged coherence, see
+    scripts/plus_tune.py), then the E14 test runs (first / last / every loop, random) at the chosen c, with coherence."""
+    pt = f"{PY} scripts/plus_tune.py --model {key}"
+    test = lambda tag, n, nl="": (f"SPLIT=test OFFSET=0 NPROMPTS=100 KIND=harmless {nl}GPU=$GPU scripts/run_select.sh {key} {tag} "  # noqa: E731
+                                  f"$({pt} test-cands --loops {n})")
+    coh = lambda tag: f"{pt} --gpu $GPU coherence --tag {tag}"  # noqa: E731
+    steps = [f"SPLIT=train OFFSET=500 NPROMPTS=50 KIND=harmless GPU=$GPU scripts/run_select.sh {key} plus_tune $({pt} cands)",
+             coh("plus_tune"), f"{pt} summary", test("plus_harmless", loops), coh("plus_harmless")]
+    if also4:
+        steps += [test("plus_harmless4", 4, "N_LOOPS=4 "), coh("plus_harmless4")]
+    return " && ".join(steps)
+
+
+def plus_test_job(key, tag, loops, env=""):
+    """The flip-sign test runs at the tuned c only (every single loop, every loop, random; skip-existing), with coherence."""
+    pt = f"{PY} scripts/plus_tune.py --model {key}"
+    return (f"SPLIT=test OFFSET=0 NPROMPTS=100 KIND=harmless {env}GPU=$GPU scripts/run_select.sh {key} {tag} "
+            f"$({pt} test-cands --loops {loops}) && {pt} --gpu $GPU coherence --tag {tag}")
+
+
 ORTHO_CANDS = {"ouro": ortho_cands("ouro"), "nanbeige": ortho_cands("nanbeige", norm_aware=False),
                "dory": ortho_cands("dory"), "qwen": ortho_cands("qwen", norm_aware=False)}  # Nanbeige is pre-norm: plain orthogonalization is exact, na=1 the same
 
@@ -299,6 +320,48 @@ EXPERIMENTS = {
         "qwen": {"hours": 0.6, "cmd": select("qwen", "plus_harmless", plus_cands("qwen", None), n_prompts=100,
                                              kind="harmless")},
     }},
+    "E15": {"title": "Flip the sign, tuned: +u strength (0.5-4 x E2's |c|, every loop) chosen on 50 held-out harmless prompts "
+                     "for the most refusal with judged coherence >= clean - 10 and capped <= clean + 0.1; then E14's test "
+                     "runs at that strength, with coherence", "needs": ["E1", "E2"], "jobs": {
+        "ouro": {"hours": 1.5, "cmd": plus_tune_job("ouro", 4)},
+        "nanbeige": {"hours": 2.0, "cmd": plus_tune_job("nanbeige", 2)},
+        "dory": {"hours": 2.5, "cmd": plus_tune_job("dory", 2, also4=True)},
+        "qwen": {"hours": 1.5, "cmd": plus_tune_job("qwen", 4)},
+    }},
+    "E15b": {"title": "Flip the sign, finer: E15 plus three strengths inside each model's coherence cliff "
+                      "(plus_tune.py REFINE), same rule; the test runs again if the chosen strength moves", "needs": ["E15"],
+             "jobs": {
+        "ouro": {"hours": 1.0, "cmd": plus_tune_job("ouro", 4)},
+        "nanbeige": {"hours": 1.5, "cmd": plus_tune_job("nanbeige", 2)},
+        "dory": {"hours": 3.5, "cmd": plus_tune_job("dory", 2, also4=True)},
+        "qwen": {"hours": 1.2, "cmd": plus_tune_job("qwen", 4)},
+    }},
+    "E16": {"title": "Kick damage at every site, as E8's Dory x4 strip: teacher-forced KL of a size-1 random kick at every "
+                     "layer (Dory: sublayer) of the run, first 30 MATH-500 problems, on each model's clean kickp responses",
+            "needs": [], "jobs": {
+        k: {"hours": hr, "cmd": f"{PY} scripts/kick_kl.py --gpu $GPU --model {M[k][0]} --tag kickp_sites --resp-tag kickp "
+                                "--sites all --eps 1 --limit 30 --skip-existing"}
+        for k, hr in [("ouro", 0.4), ("nanbeige", 0.3), ("dory", 0.6), ("qwen", 0.4)]}},
+    "E17": {"title": "Flip the sign on the middle loops: +u on loop 2 and on loop 3 alone at the tuned strength (E15b), "
+                     "Ouro and Dory x4 (plus_tune.py test-cands now lists every loop; existing runs are skipped)",
+            "needs": ["E15b"], "jobs": {
+        "ouro": {"hours": 0.6, "cmd": plus_test_job("ouro", "plus_harmless", 4)},
+        "dory4": {"hours": 1.0, "cmd": plus_test_job("dory", "plus_harmless4", 4, "N_LOOPS=4 ")},
+    }},
+    "E18": {"title": "Why kicked MATH-500 runs do not finish: label every response that hit the token cap as coherent / "
+                     "repetitive / incoherent (gpt-oss-20b on its last 6000 characters) plus its tail's verbatim repetition",
+            "needs": [], "jobs": {
+        "all": {"hours": 0.4, "cmd": f"{PY} scripts/cutoff_judge.py --gpu $GPU"},
+    }},
+    "E19": {"title": "Extra-loop runs on the other 237 test prompts (offset 250), so the blog's 'run two more loops' "
+                     "pairs every run on all 487: Ouro 6 loops (grid_test6_b) and Dory's c=-1 push (grid_test_b, grid_test4_b)",
+            "needs": ["E3"], "jobs": {
+        "ouro6": {"hours": 2.5, "cmd": select("ouro", "grid_test6_b", [
+            "none", "ablate:v4_baseline:t3.l16:apply=0,1,2,3", "actadd:v4_baseline:t3.l16:c=-1.0:rel=1:apply=0,1,2,3"],
+            6, offset=TEST_B)},
+        "dory_push": {"hours": 0.7, "cmd": select("dory", "grid_test_b", ["actadd:hh_eoi:t0.l26:c=-1"], offset=TEST_B)
+                      + " && " + select("dory", "grid_test4_b", ["actadd:hh_eoi:t0.l26:c=-1:apply=0,1"], 4, offset=TEST_B)},
+    }},
 }
 
 OUTPUTS = {  # paths under data/runs pushed after each job (directories or files; missing ones are skipped)
@@ -375,6 +438,17 @@ OUTPUTS["E13"] = {k: out(m, *[f"capability/math500/{tag}/kick_randp0_{site}_eps{
 OUTPUTS["E14"] = {k: out(m, f"generations/{t}", f"analysis/{t}.csv") for k, m, t in [
     ("ouro", "ouro", "plus_harmless"), ("nanbeige", "nanbeige", "plus_harmless"), ("dory2", "dory", "plus_harmless"),
     ("dory4", "dory", "plus_harmless4"), ("qwen", "qwen", "plus_harmless")]}
+OUTPUTS["E15"] = {k: out(k, "generations/plus_tune", "analysis/plus_tune.csv", "analysis/plus_tune.json", "generations/plus_harmless",
+                         "analysis/plus_harmless.csv") + (out("dory", "generations/plus_harmless4", "analysis/plus_harmless4.csv")
+                                                          if k == "dory" else []) for k in ("ouro", "nanbeige", "dory", "qwen")}
+OUTPUTS["E15b"] = OUTPUTS["E15"]
+OUTPUTS["E17"] = {"ouro": out("ouro", "generations/plus_harmless", "analysis/plus_harmless.csv"),
+                  "dory4": out("dory", "generations/plus_harmless4", "analysis/plus_harmless4.csv")}
+OUTPUTS["E18"] = {"all": [f"{M[k][1]}/capability/math500" for k in ("ouro", "nanbeige", "dory", "qwen")]}
+OUTPUTS["E19"] = {"ouro6": out("ouro", "generations/grid_test6_b", "analysis/grid_test6_b.csv"),
+                  "dory_push": out("dory", "generations/grid_test_b", "analysis/grid_test_b.csv",
+                                   "generations/grid_test4_b", "analysis/grid_test4_b.csv")}
+OUTPUTS["E16"] = {k: out(k, "analysis/kick_kl/kickp_sites.parquet") for k in ("ouro", "nanbeige", "dory", "qwen")}
 # E2 depends on E1's norms only through files; E3's coefficients come from E2 (analysis/actadd_tune.json per model)
 NEEDS_FILES = {"E2": [f"{M[k][1]}/directions/stream_norms.pt" for k in M],
                "E3": [f"{M[k][1]}/analysis/actadd_tune.json" for k in M]
