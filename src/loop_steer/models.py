@@ -18,7 +18,7 @@ DORY_REVISION = "b366b87f762ea334ba3eb55912031baba1515810"
 INKLING_ID = "thinkingmachines/Inkling-2-Mini"
 INKLING_REVISION = "6e7c8248f75265bdd4fbab5273304243b5d8c2cb"
 INKLING_VARLOOP_ID = "thinkingmachines/TML-d24-varloop-research"  # trained for 1-3 passes (text_config.loop_num_passes)
-INKLING_VARLOOP_REVISION = "767c9d0250aa2938e289e50ca6db5f1b39ebae74"
+INKLING_VARLOOP_REVISION = "657b53ba5da7baefe9ff15dca5cd25f5bd3dbaa2"  # Nov 20 22:02Z (767c9d0 was rewritten; same weights)
 INKLING = {INKLING_ID: INKLING_REVISION, INKLING_VARLOOP_ID: INKLING_VARLOOP_REVISION}
 
 # Looped models: pinned (revision, loop-count config attribute). Custom code => trust_remote_code.
@@ -100,6 +100,34 @@ def model_sites(config) -> list[tuple[int, int]]:
     return [(t, l) for t in range(T) for l in range(L)]
 
 
+def hf_config(model_name: str):
+    """The model's HF config. Inkling (no config class in this transformers): its config.json at the pinned revision
+    as nested namespaces, enough for ``n_loops``, ``model_sites`` and ``loop_unit_layers``."""
+    if is_inkling(model_name):
+        import json
+        from types import SimpleNamespace
+
+        from huggingface_hub import hf_hub_download
+
+        d = json.load(open(hf_hub_download(model_name, "config.json", revision=INKLING[model_name])))
+        text = SimpleNamespace(**d["text_config"])
+        return SimpleNamespace(**{k: v for k, v in d.items() if k != "text_config"}, text_config=text,
+                               model_type=d["model_type"])
+    from transformers import AutoConfig
+
+    return AutoConfig.from_pretrained(model_name, **_remote_kwargs(model_name))
+
+
+def loop_unit_layers(cfg) -> list[int]:
+    """The layers that run once per loop: Dory's recurrent sublayers, Inkling's core, every layer otherwise."""
+    text = getattr(cfg, "text_config", None)
+    if text is not None and getattr(text, "loop_config", None) is not None:
+        return list(range(text.loop_config["core_start"], text.loop_config["core_end"]))
+    if getattr(cfg, "model_type", None) == "dory":
+        return list(range(cfg.n_input_layers, cfg.n_input_layers + cfg.n_recurrent_layers))
+    return list(range(cfg.num_hidden_layers))
+
+
 def _remote_kwargs(model_name: str) -> dict:
     if model_name == DORY_ID:  # no remote code: loop_steer.dory registers the classes
         return {"revision": DORY_REVISION}
@@ -164,8 +192,8 @@ def loop_overrides(model_name: str, n_loops_override=None) -> dict | None:
         return None
     if not is_looped(model_name):
         raise ValueError(f"{model_name} is not a looped model")
-    if is_inkling(model_name):  # the varloop checkpoint only (vLLM rejects it on the fixed-loop one)
-        return {"text_config": {"loop_num_passes": n_loops_override, "loop_share_cache": True}}
+    if is_inkling(model_name):  # the varloop checkpoint only (vLLM rejects it on the fixed-loop one); one KV cache
+        return {"text_config": {"loop_num_passes": n_loops_override}}  # per pass, as the HF reference (no share)
     attr = LOOPED[model_name][1] if model_name in LOOPED else "total_ut_steps"
     return {attr: n_loops_override}
 

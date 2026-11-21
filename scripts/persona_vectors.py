@@ -76,7 +76,18 @@ def parse_score(text):
 
 
 def answer_of(text):
+    if "<|content_text|>" in text:  # Inkling (generated with special tokens): the text message after its thinking
+        from loop_steer.cot import split_cot, strip_end
+
+        return strip_end(split_cot(text)[1]).strip()
     return text.split("</think>", 1)[1].strip() if "</think>" in text else text.strip()
+
+
+def keep_special(model_name):
+    """Inkling's thinking / answer boundary is a special-token header: keep special tokens in its generations."""
+    from loop_steer.models import is_inkling
+
+    return is_inkling(model_name)
 
 
 def main():
@@ -87,6 +98,9 @@ def main():
     ap.add_argument("--file", default=None, help="judge: extract_gen or steer_gen")
     ap.add_argument("--traits", default=",".join(TRAITS))
     ap.add_argument("--n-extract", type=int, default=2)
+    ap.add_argument("--judge-tag", default=None,
+                    help="extract: use another judge's scores (persona_judge_api.py, extract_gen.judged_<tag>.parquet) "
+                         "-> directions/persona_<tag>.pt")
     ap.add_argument("--min-kept", type=int, default=10, help="extract: skip a trait with fewer kept answers per side")
     ap.add_argument("--n-eval", type=int, default=3)
     ap.add_argument("--coeffs", default="0.05,0.1,0.2",
@@ -137,7 +151,8 @@ def main():
         from loop_steer.selfcorr import no_think_prompt
 
         ids = [{"prompt_token_ids": tok(no_think_prompt(tok, c), add_special_tokens=False).input_ids} for c in convs]
-        sp = SamplingParams(temperature=1.0, max_tokens=args.max_tokens, n=n, skip_special_tokens=True, seed=0)
+        sp = SamplingParams(temperature=1.0, max_tokens=args.max_tokens, n=n, seed=0,
+                            skip_special_tokens=not keep_special(args.model))
         return [[o.text for o in r.outputs] for r in llm.generate(ids, sp, use_tqdm=True)]
 
     if args.stage == "gen":
@@ -182,17 +197,21 @@ def main():
         print(f"-> {out}")
 
     elif args.stage == "extract":
-        out = rd / "directions" / "persona.pt"
+        out = rd / "directions" / (f"persona_{args.judge_tag}.pt" if args.judge_tag else "persona.pt")
         if out.exists():
             print(f"{out} exists; skipping")
             return
         from loop_steer.models import load_model, load_tokenizer, model_sites
         from loop_steer.selfcorr import no_think_prompt, pad_batch, stream_hooks
 
-        df = pd.read_parquet(wd / "extract_gen.judged.parquet")
+        df = pd.read_parquet(wd / (f"extract_gen.judged_{args.judge_tag}.parquet" if args.judge_tag else
+                                   "extract_gen.judged.parquet"))
         keep = ((df.polarity == "pos") & (df.trait_score >= 50)) | ((df.polarity == "neg") & (df.trait_score < 50))
         df = df[keep & df.trait_score.notna()]
         tok = load_tokenizer(args.model)
+        from loop_steer.models import is_inkling
+        if is_inkling(args.model):
+            return extract_inkling(args, df, traits, tok, out)
         model = load_model(args.model)
         sites = model_sites(model.config)
         dev = model.device
@@ -252,21 +271,16 @@ def main():
             return
         from loop_steer import vllm_hooks
         from loop_steer.models import load_tokenizer, model_sites, n_loops
-        from transformers import AutoConfig
-
-        from loop_steer.models import _remote_kwargs, DORY_ID
+        from loop_steer.models import DORY_ID, hf_config, loop_unit_layers
 
         if args.model == DORY_ID:
             from loop_steer.dory import register
             register()
-        cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
+        cfg = hf_config(args.model)
         T, sites = n_loops(cfg), model_sites(cfg)  # the trained loops: the sites of persona.pt
         T_run = args.n_loops or T
         vecs = torch.load(rd / "directions" / "persona.pt", weights_only=False)
-        if getattr(cfg, "model_type", None) == "dory":
-            unit = list(range(cfg.n_input_layers, cfg.n_input_layers + cfg.n_recurrent_layers))
-        else:
-            unit = list(range(cfg.num_hidden_layers))
+        unit = loop_unit_layers(cfg)  # the layers that run once per loop (Dory: recurrent; Inkling: core)
         layers = sorted({unit[min(int(round(f * len(unit))), len(unit) - 1)] for f in map(float, args.fracs.split(","))})
         loopsets = {"first": [0], "last": [T_run - 1], "all": None} if T > 1 else {"layer": None}
         if args.loop_sets:
@@ -323,6 +337,71 @@ def main():
         g.to_csv(rd / "analysis" / f"persona_loops{name.removeprefix('steer_gen')}.csv", index=False)
         with pd.option_context("display.width", 200, "display.max_rows", 300):
             print(g.round(1).to_string())
+
+
+def extract_inkling(args, df, traits, tok, out):
+    """``extract`` through vLLM for Inkling (NVFP4 as served; ``loop_steer.vllm_inkling`` capture): the same answer
+    windows (the tokens after the model's text-message header), means and median norms as the HF path."""
+    import functools
+
+    import torch
+    from vllm import LLM, SamplingParams
+
+    from loop_steer import vllm_inkling
+    from loop_steer.cot import split_cot
+    from loop_steer.models import model_sites, prepare_vllm, vllm_kwargs, vllm_model
+    from loop_steer.selfcorr import no_think_prompt
+
+    items = []  # (trait, polarity, ids, answer start)
+    skipped = set()
+    for t in traits:
+        kept = df[df.trait == t].polarity.value_counts()
+        if min(kept.get("pos", 0), kept.get("neg", 0)) < args.min_kept:
+            print(f"  {t}: skipped ({kept.get('pos', 0)} pos / {kept.get('neg', 0)} neg answers kept)", flush=True)
+            skipped.add(t)
+            continue
+        for r in df[df.trait == t].itertuples():
+            prompt = no_think_prompt(tok, [{"role": "system", "content": r.system}, {"role": "user", "content": r.question}])
+            cot, _, has = split_cot(r.response)
+            a0 = len(tok(prompt + (cot if has else ""), add_special_tokens=False).input_ids)
+            ids = tok(prompt + r.response, add_special_tokens=False).input_ids[:2048]
+            if len(ids) > a0 + 1:
+                items.append((t, r.polarity, ids, a0))
+    prepare_vllm(args.model)
+    llm = LLM(model=vllm_model(args.model), enforce_eager=True, enable_prefix_caching=False, seed=0,
+              max_model_len=2056, gpu_memory_utilization=args.gpu_memory_utilization, **vllm_kwargs(args.model))
+    sites = model_sites(llm.llm_engine.model_config.hf_config)
+    chunk = 512
+    llm.apply_model(functools.partial(vllm_inkling.install,
+                                      specs=[{"kind": "capture", "n_req": chunk, "n_windows": 1, "norms": True}]))
+    means = []
+    for b0 in range(0, len(items), chunk):
+        part = items[b0: b0 + chunk]
+        params = [SamplingParams(max_tokens=1, temperature=0.0, extra_args={"ls_cap": (k, [(a0, len(ids))])})
+                  for k, (_, _, ids, a0) in enumerate(part)]
+        llm.generate([{"prompt_token_ids": it[2]} for it in part], params, use_tqdm=False)
+        sums, counts = llm.apply_model(vllm_inkling.fetch_capture)[0]
+        n = len(part)
+        expect = torch.tensor([len(ids) - a0 for _, _, ids, a0 in part], dtype=torch.float64)
+        if not torch.equal(counts[:n, 0], expect):
+            raise RuntimeError("captured answer-token counts differ from the windows (prefix caching on?)")
+        means.append(sums[:n, 0] / counts[:n, 0, None, None].float())  # [n, S, D]
+    means = torch.cat(means)
+    med = llm.apply_model(vllm_inkling.fetch_capture_norms)[0]
+    res = {"sites": sites}
+    counts = {}
+    for t in traits:
+        if t in skipped:
+            continue
+        idx = {pol: [k for k, it in enumerate(items) if it[0] == t and it[1] == pol] for pol in ("pos", "neg")}
+        counts[t] = {pol: len(v) for pol, v in idx.items()}
+        res[t] = {"dirs": means[idx["pos"]].mean(0) - means[idx["neg"]].mean(0)}
+        print(f"  {t}: {counts[t]['pos']} pos / {counts[t]['neg']} neg answers", flush=True)
+    res["counts"] = counts
+    res["norms"] = torch.tensor([med[v] for v in range(len(sites))])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(res, out)
+    print(f"-> {out}")
 
 
 if __name__ == "__main__":

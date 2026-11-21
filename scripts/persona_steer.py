@@ -106,27 +106,25 @@ def main():
     n_eval = args.n_eval or (3 if args.mode == "tune" else 5)
 
     if "steer" in stages and not gen_path.exists():
-        from transformers import AutoConfig
         from vllm import LLM, SamplingParams
 
         from loop_steer import vllm_hooks
-        from loop_steer.models import (DORY_ID, _remote_kwargs, load_tokenizer, loop_overrides, n_loops,
+        from loop_steer.models import (DORY_ID, load_tokenizer, loop_overrides, n_loops,
                                        prepare_vllm, vllm_kwargs, vllm_model)
         from loop_steer.selfcorr import no_think_prompt
 
         if args.model == DORY_ID:
             from loop_steer.dory import register
             register()
-        cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
+        from loop_steer.models import hf_config, loop_unit_layers
+
+        cfg = hf_config(args.model)
         T = n_loops(cfg)  # trained loops: the sites of persona.pt
         looped = T > 1
         T_run = (args.n_loops or T) if looped else 4
         sites = vecs["sites"]
         norm = {tuple(s): float(x) for s, x in zip(sites, vecs["norms"])}
-        if getattr(cfg, "model_type", None) == "dory":
-            unit = list(range(cfg.n_input_layers, cfg.n_input_layers + cfg.n_recurrent_layers))
-        else:
-            unit = list(range(cfg.num_hidden_layers))
+        unit = loop_unit_layers(cfg)  # the layers that run once per loop (Dory: recurrent; Inkling: core)
 
         def specs_for(trait, layer, c, units):
             """Hook specs: trait vector from the site at ``layer`` added in loops / quarters ``units``."""
@@ -202,7 +200,10 @@ def main():
         llm = LLM(model=vllm_model(args.model), seed=0, gpu_memory_utilization=args.gpu_memory_utilization,
                   max_model_len=4096, enforce_eager=True, hf_overrides=loop_overrides(args.model, args.n_loops),
                   **vllm_kwargs(args.model))
-        sp = SamplingParams(temperature=1.0, max_tokens=args.max_tokens, n=n_eval, skip_special_tokens=True, seed=0)
+        from persona_vectors import keep_special
+
+        sp = SamplingParams(temperature=1.0, max_tokens=args.max_tokens, n=n_eval, seed=0,
+                            skip_special_tokens=not keep_special(args.model))
         rows = []
         for t, tconds in per_trait.items():
             qs = evalq[t]["questions"]

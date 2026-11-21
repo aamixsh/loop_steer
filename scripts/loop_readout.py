@@ -18,6 +18,11 @@ norm + LM head (logit lens) as the dense counterpart.
 Per sequence and k: ``nll`` of the actual CoT tokens, ``agree`` = top-1 agreement with the readout after loop T, and
 ``kl`` = KL(readout T || readout k) over readout T's top-64 tokens (``top_mass`` = their total probability under T).
 Writes analysis/loop_readout[_<tag>].csv. HF backend, one GPU.
+
+Inkling (fixed-loop and varloop checkpoints): vLLM as served (``loop_steer.vllm_inkling``), one engine at T passes
+(``--max-loops``, default the trained 3; varloop up to 5); the readout after pass k runs the coda on pass k's blocks
+(``coda_from``), which is the k-pass computation, then the model's own ``compute_logits``. Default traces:
+``train_clean.scored.parquet``.
 """
 
 import argparse
@@ -44,10 +49,8 @@ def main():
     setup_job_env()
     import pandas as pd
     import torch
-    from transformers import AutoConfig
-
     from loop_steer.cot import format_prompt
-    from loop_steer.models import _remote_kwargs, is_dory, is_ouro, load_model, load_tokenizer, n_loops
+    from loop_steer.models import hf_config, is_dory, is_inkling, is_ouro, load_model, load_tokenizer, n_loops
 
     rd = run_dir(args.model)
     tok = load_tokenizer(args.model)
@@ -55,6 +58,8 @@ def main():
         else (rd / "generations" / "clean_select" / "none.scored.parquet")
     if args.gen_path:
         gen_path = rd / "generations" / args.gen_path
+    elif is_inkling(args.model):
+        gen_path = rd / "generations" / "train_clean.scored.parquet"
     elif not gen_path.exists():
         gen_path = rd / "generations" / "select_clean.scored.parquet"
     df = pd.read_parquet(gen_path).dropna(subset=["sr_score"])
@@ -73,7 +78,7 @@ def main():
     if is_dory(args.model):  # registers the Dory config and model classes
         from loop_steer.dory import register
         register()
-    cfg = AutoConfig.from_pretrained(args.model, **_remote_kwargs(args.model))
+    cfg = hf_config(args.model)
     T = args.blocks or args.max_loops or n_loops(cfg)
 
     rows, ref = [], {}
@@ -95,7 +100,9 @@ def main():
         r = pd.DataFrame([x for x in rows if x["k"] == k])
         print(f"  k={k}: nll {r.nll.mean():.3f}  agree {r.agree.mean():.3f}  kl {r.kl.mean():.3f}", flush=True)
 
-    if args.blocks:  # one forward per sequence, every block end read out with the final norm + LM head
+    if is_inkling(args.model):
+        readout_inkling(args, seqs, T, record, report)
+    elif args.blocks:  # one forward per sequence, every block end read out with the final norm + LM head
         model = load_model(args.model)
         n_layers = model.config.num_hidden_layers
         ends = [round(n_layers * (b + 1) / T) for b in range(T)]
@@ -131,6 +138,42 @@ def main():
     summ = res.groupby(["k", "label"])[["nll", "agree", "kl"]].mean().unstack("label").round(3)
     print(summ.to_string())
     print(f"-> {rd / 'analysis' / name}.csv")
+
+
+def readout_inkling(args, seqs, T, record, report):
+    import functools
+
+    import torch
+    from vllm import LLM, SamplingParams
+
+    from loop_steer import vllm_inkling
+    from loop_steer.models import loop_overrides, prepare_vllm, vllm_kwargs, vllm_model
+
+    prepare_vllm(args.model)
+    llm = LLM(model=vllm_model(args.model), enforce_eager=True, enable_prefix_caching=False, seed=0,
+              max_model_len=max(s[0].shape[1] for s in seqs) + 8, gpu_memory_utilization=0.6,
+              hf_overrides=loop_overrides(args.model, args.max_loops), **vllm_kwargs(args.model))
+    text = llm.llm_engine.model_config.hf_config.text_config
+    vocab = getattr(text, "unpadded_vocab_size", None) or text.vocab_size
+    prompts = [{"prompt_token_ids": s[0][0].tolist()} for s in seqs]
+    params = [SamplingParams(max_tokens=1, temperature=0.0, extra_args={"ls_final": (i, start - 1, start - 1 + n)})
+              for i, (_, _, start, n) in enumerate(seqs)]
+
+    def score(model, h, vocab, k):  # in-process engine: record() runs here, one sequence at a time
+        with torch.inference_mode():
+            for i in range(len(seqs)):
+                record(k, i, torch.log_softmax(model.compute_logits(h[i])[:, :vocab].float(), -1))
+        return True
+
+    for k in [T, *range(1, T)]:
+        llm.apply_model(functools.partial(vllm_inkling.install,
+                                          specs=[{"kind": "final"}, {"kind": "coda_from", "pass": k - 1}]))
+        llm.generate(prompts, params, use_tqdm=False)
+        h = llm.apply_model(vllm_inkling.fetch_final)[0]
+        llm.apply_model(functools.partial(score, h=h, vocab=vocab, k=k))
+        del h
+        report(k)
+    llm.apply_model(vllm_inkling.clear)
 
 
 if __name__ == "__main__":

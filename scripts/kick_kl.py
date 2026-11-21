@@ -22,6 +22,13 @@ Writes ``analysis/kick_kl/<tag>.parquet``. Sites: ``t<loop>.l<layer>`` / ``l<lay
 layer and ``apply`` = its loops (``"0,1"``; dense: its layers, ``"l4,l13"``; empty for a single site). ``--indep``: the
 j-th site of a group gets its own direction, that of seed + j (as ``kick:...:indep=1``); ``apply`` then ends in
 ``/indep``. HF backend, one GPU.
+
+Inkling (``loop_steer.models.is_inkling``) runs through vLLM as served (NVFP4 experts; ``loop_steer.vllm_inkling``):
+the clean and kicked final hidden states at the response positions go through the model's own ``compute_logits``
+(LM head and logit soft-cap; the padded vocabulary rows are dropped). Sites: prelude and coda layers are loop 0 (unit
+-1 and T), core layers loop = pass; ``mid`` is layer 12 (the core's middle) in every pass. One difference from the HF
+path: attention sinks are tokens above ``--sink-ratio`` x the site's median stream norm over clean traces
+(``directions/stream_norms.pt``) instead of the sequence's own median.
 """
 
 import argparse
@@ -47,6 +54,7 @@ def main():
     ap.add_argument("--sink-ratio", type=float, default=10.0)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--gpu-memory-utilization", type=float, default=0.6, help="Inkling (vLLM) only")
     args = ap.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -80,6 +88,9 @@ def main():
         if len(r) >= 2:
             items.append((i, prompt + r, len(prompt), len(r)))
 
+    from loop_steer.models import is_inkling
+    if is_inkling(args.model):
+        return kick_kl_inkling(args, items, rd, out)
     model = load_model(args.model, n_loops_override=args.n_loops)
     st = structure(model)
     dev = model.device
@@ -153,6 +164,107 @@ def main():
     df = pd.DataFrame(rows)
     df["model"] = rd.name
     df["n_loops"] = st.T if st.looped else 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out)
+    summ = df.groupby(["unit", "loop", "layer", "apply", "eps"])[["kl", "agree"]].mean().unstack("eps").round(3)
+    with pd.option_context("display.width", 200, "display.max_rows", 400):
+        print(summ.to_string())
+    print(f"-> {out}")
+
+
+def _logit_stats(model, h0, h, vocab):
+    """{k: (mean KL(clean || kicked), top-1 agreement, KL at the last position)} from final hidden states."""
+    import torch
+
+    out = {}
+    with torch.inference_mode():
+        for k in h0:
+            lp0 = torch.log_softmax(model.compute_logits(h0[k])[:, :vocab].float(), -1)
+            lp = torch.log_softmax(model.compute_logits(h[k])[:, :vocab].float(), -1)
+            kl = (lp0.exp() * (lp0 - lp)).sum(-1)
+            agree = (lp.argmax(-1) == lp0.argmax(-1)).float()
+            out[k] = (float(kl.mean()), float(agree.mean()), float(kl[-1]))
+    return out
+
+
+def kick_kl_inkling(args, items, rd, out):
+    import functools
+
+    import pandas as pd
+    from vllm import LLM, SamplingParams
+
+    from loop_steer import vllm_inkling
+    from loop_steer.kicks import problem_directions
+    from loop_steer.models import loop_overrides, model_sites, prepare_vllm, vllm_kwargs, vllm_model
+
+    prepare_vllm(args.model)  # in-process engine with the instrumented layer visits
+    llm = LLM(model=vllm_model(args.model), enforce_eager=True, enable_prefix_caching=False, seed=0,
+              max_model_len=max(len(it[1]) for it in items) + 8, gpu_memory_utilization=args.gpu_memory_utilization,
+              hf_overrides=loop_overrides(args.model, args.n_loops), **vllm_kwargs(args.model))
+    cfg = llm.llm_engine.model_config.hf_config
+    text = cfg.text_config
+    lc = text.loop_config
+    core = range(lc["core_start"], lc["core_end"])
+    sites = model_sites(cfg)
+    T = max(t for t, _ in sites) + 1
+    unit = {s: (s[0] if s[1] in core else (-1 if s[1] < core.start else T)) for s in sites}
+    order = {s: i for i, s in enumerate(sites)}
+    if args.sites == "all":
+        groups = [(s,) for s in sites]
+    elif args.sites == "mid":
+        groups = [((t, core.start + len(core) // 2),) for t in range(T)]
+    else:
+        groups = []
+        for g in args.sites.split(","):
+            grp = []
+            for s in g.split("+"):
+                m = re.fullmatch(r"(?:t(\d+)\.)?l(\d+)", s.strip())
+                grp.append((int(m.group(1) or 0), int(m.group(2))))
+            groups.append(tuple(grp))
+        bad = [s for g in groups for s in g if s not in order]
+        if bad:
+            raise ValueError(f"sites {bad} are not sites of this run (prelude / coda layers are loop 0)")
+    eps_list = [float(e) for e in args.eps.split(",")]
+    D = text.hidden_size
+    V = problem_directions(args.seed, args.limit, D)
+    Vs = [problem_directions(args.seed + j, args.limit, D) for j in range(max(map(len, groups)))] if args.indep else []
+    vocab = getattr(text, "unpadded_vocab_size", None) or text.vocab_size
+    print(f"{len(items)} responses, {len(groups)} site groups x {len(eps_list)} eps (vLLM)", flush=True)
+
+    prompts = [{"prompt_token_ids": it[1]} for it in items]
+    params = [SamplingParams(max_tokens=1, temperature=0.0,
+                             extra_args={"ls_final": (k, a0 - 1, a0 - 1 + n), "ls_vec": i})
+              for k, (i, _, a0, n) in enumerate(items)]
+
+    def final_states(specs):
+        llm.apply_model(functools.partial(vllm_inkling.install, specs=specs + [{"kind": "final"}]))
+        llm.generate(prompts, params, use_tqdm=False)
+        h = llm.apply_model(vllm_inkling.fetch_final)[0]
+        bad = [k for k, (_, _, _, n) in enumerate(items) if k not in h or h[k].shape[0] != n]
+        if bad:
+            raise RuntimeError(f"final states missing or short for requests {bad[:5]}")
+        return h
+
+    h0 = final_states([])
+    rows = []
+    for grp in groups:
+        site = grp[0]
+        for eps in eps_list:
+            specs = [{"kind": "kick", "vecs": Vs[j] if args.indep else V, "layer": l, "eps": eps,
+                      "loops": [t] if l in core else None, "sink_ratio": args.sink_ratio}
+                     for j, (t, l) in enumerate(grp)]
+            stats = llm.apply_model(functools.partial(_logit_stats, h0=h0, h=final_states(specs), vocab=vocab))[0]
+            for k, (i, _, a0, n) in enumerate(items):
+                kl, agree, kl_last = stats[k]
+                rows.append({"problem_idx": i, "loop": site[0], "layer": site[1], "unit": unit[site],
+                             "apply": (",".join(str(x[0]) for x in grp) + ("/indep" if args.indep else ""))
+                             if len(grp) > 1 else "",
+                             "order": order[site], "eps": eps, "kl": kl, "agree": agree, "kl_last": kl_last,
+                             "n_tokens": n})
+            print(f"  {grp} eps {eps}: KL {sum(r['kl'] for r in rows[-len(items):]) / len(items):.3f}", flush=True)
+    df = pd.DataFrame(rows)
+    df["model"] = rd.name
+    df["n_loops"] = T
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out)
     summ = df.groupby(["unit", "loop", "layer", "apply", "eps"])[["kl", "agree"]].mean().unstack("eps").round(3)
