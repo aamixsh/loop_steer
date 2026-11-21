@@ -457,6 +457,38 @@ def install(model, specs):
         return _install(model, specs)
 
 
+def _actadd_slot(g, s, visits):
+    """(unit direction, per-visit coefficient) of an actadd spec: coeff * |vec| at the spec's sites, else 0."""
+    sel = s.get("loops")
+
+    def at_site(i, p):
+        if i != s["layer"]:
+            return False
+        if sel is None:
+            return True
+        return p in sel if i in g.core else (-1 in sel or 0 in sel)
+
+    vec = torch.as_tensor(s["vec"], dtype=torch.float32)
+    scale = float(vec.norm())
+    unit = vec / scale if scale > 0 else vec
+    coef = torch.tensor([float(s["coeff"]) * scale if at_site(i, p) else 0.0 for i, p in visits])
+    return unit.to(g.add_vec.device), coef.to(g.add_coef.device)
+
+
+def _merge_actadd(g, s, visits, used):
+    """Fold an actadd spec into a filled slot with the same direction and token-class row (summing coefficients).
+    intervene.py emits one spec per pass for relative strengths, so an all-pass actadd on a 5-pass run needs this."""
+    unit, coef = _actadd_slot(g, s, visits)
+    row = _cls_row(s.get("positions")).to(g.add_cls.device)
+    for j in range(used):
+        if torch.allclose(g.add_vec[j], unit, atol=1e-6) and torch.equal(g.add_cls[j], row):
+            g.add_coef[j] += coef
+            if s.get("positions") is not None:
+                g.need_tokens = True
+            return True
+    return False
+
+
 def _install(model, specs):
     lm = model.model
     if not getattr(type(lm), "_ls_patched", False):
@@ -496,6 +528,8 @@ def _install(model, specs):
             continue
         if k not in n:
             raise ValueError(f"unsupported spec kind {k!r} for Inkling")
+        if k == "actadd" and _merge_actadd(g, s, visits, n["actadd"]):
+            continue  # same direction and token classes as a filled slot (e.g. one spec per pass): coefs summed
         j = n[k]
         n[k] += 1
         if j >= {"ablate": N_ABL, "actadd": N_ADD, "kick": N_KICK}[k]:
@@ -518,9 +552,8 @@ def _install(model, specs):
                     return True
                 return p in sel if i in g.core else (-1 in sel or 0 in sel)
             if k == "actadd":
-                g.add_vec[j] = torch.as_tensor(s["vec"], dtype=torch.float32).to(g.add_vec.device)
-                g.add_coef[j] = torch.tensor([float(s["coeff"]) if at_site(i, p) else 0.0 for i, p in visits]
-                                             ).to(g.add_coef.device)
+                unit, coef = _actadd_slot(g, s, visits)
+                g.add_vec[j], g.add_coef[j] = unit, coef
                 g.add_cls[j] = row.to(g.add_cls.device)
             else:
                 if "vecs" in s and s["vecs"] is not None:

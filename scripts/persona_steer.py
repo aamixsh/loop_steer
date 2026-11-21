@@ -109,7 +109,7 @@ def main():
         from vllm import LLM, SamplingParams
 
         from loop_steer import vllm_hooks
-        from loop_steer.models import (DORY_ID, load_tokenizer, loop_overrides, n_loops,
+        from loop_steer.models import (DORY_ID, is_inkling, load_tokenizer, loop_overrides, n_loops,
                                        prepare_vllm, vllm_kwargs, vllm_model)
         from loop_steer.selfcorr import no_think_prompt
 
@@ -198,7 +198,8 @@ def main():
         tok = load_tokenizer(args.model)
         prepare_vllm(args.model)
         llm = LLM(model=vllm_model(args.model), seed=0, gpu_memory_utilization=args.gpu_memory_utilization,
-                  max_model_len=4096, enforce_eager=True, hf_overrides=loop_overrides(args.model, args.n_loops),
+                  max_model_len=4096, enforce_eager=not is_inkling(args.model),  # Inkling hooks are CUDA-graph safe
+                  hf_overrides=loop_overrides(args.model, args.n_loops),
                   **vllm_kwargs(args.model))
         from persona_vectors import keep_special
 

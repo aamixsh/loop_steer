@@ -111,8 +111,7 @@ def hf_config(model_name: str):
 
         d = json.load(open(hf_hub_download(model_name, "config.json", revision=INKLING[model_name])))
         text = SimpleNamespace(**d["text_config"])
-        return SimpleNamespace(**{k: v for k, v in d.items() if k != "text_config"}, text_config=text,
-                               model_type=d["model_type"])
+        return SimpleNamespace(**{**{k: v for k, v in d.items() if k != "text_config"}, "text_config": text})
     from transformers import AutoConfig
 
     return AutoConfig.from_pretrained(model_name, **_remote_kwargs(model_name))
