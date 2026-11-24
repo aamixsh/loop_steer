@@ -18,6 +18,7 @@ Replies to the other harmful prompts are never exported: the page shows their pr
 import base64
 import gzip
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,13 +26,17 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import export_blog_data  # noqa: E402
-from export_blog_data import KICKS, MODELS, NDOTS, RUNS, SAFE_PROMPTS, gen_dirs, kick_outcomes, read_scored  # noqa: E402
+from export_blog_data import KICKS, MODELS, NDOTS, RUN_MODEL, RUNS, SAFE_PROMPTS, gen_dirs, kick_outcomes, read_scored  # noqa: E402
 
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "blog" / "samples"
 REFUSAL_RUNS = {"dory": ("dory", ["grid_test", "grid_test_b"]), "dory4": ("dory", ["grid_test4", "grid_test4_b"]),
                 "ouro": ("ouro", ["grid_test", "grid_test_b"]), "ouro6": ("ouro", ["grid_test6"]),
-                "nanbeige": ("nanbeige", ["grid_test", "grid_test_b"]), "qwen": ("qwen", ["grid_test", "grid_test_b"])}
+                "nanbeige": ("nanbeige", ["grid_test", "grid_test_b"]), "qwen": ("qwen", ["grid_test", "grid_test_b"]),
+                "inkling": ("inkling", ["grid_test", "grid_test_b"]),
+                "inkvar": ("inkvar", ["grid_test", "grid_test_act"]), "inkvar5": ("inkvar", ["grid_test5", "grid_test5_act"])}
+# Inkling's chat format: <|message_model|><|content_thinking|> reasoning <|end_message|><|message_model|><|content_text|> answer
+MARKERS = re.compile(r"<\|(?:message_model|content_thinking|content_text|end_message)\|>")
 
 
 def write(path, obj):
@@ -47,7 +52,7 @@ def strip_think(cot):
     cot = str(cot or "")
     for tag in ("<think>", "</think>"):
         cot = cot.replace(tag, "")
-    return cot.strip()
+    return MARKERS.sub("", cot).strip()
 
 
 def refusal_run(model, tags):
@@ -67,7 +72,7 @@ def refusal_run(model, tags):
                 if sub == "invalid":  # the CoT never closed: judged whole, no answer
                     x["closed"], x["think"], x["tokens"], x["answer"], x["out_rep"] = 0, x.response, x.n_tokens, "", 0
                 else:
-                    x["closed"], x["think"], x["tokens"], x["answer"] = 1, x.cot, x.stage1_len_tokens, x.output
+                    x["closed"], x["think"], x["tokens"], x["answer"] = 1, x.cot, x.stage1_len_tokens, x.output.fillna("").str.replace(MARKERS, "", regex=True)
                     if "out_rep" not in x:
                         x["out_rep"] = 0
                 parts.append(x[["prompt_idx", "cot_rep", "out_rep", "closed", "think", "tokens", "answer", "sr_refusal"]])
@@ -88,7 +93,7 @@ def refusal_run(model, tags):
 
 
 def kick_run(name, tag, tokenizer):
-    m = MODELS[name.rstrip("46")]
+    m = MODELS[RUN_MODEL.get(name, name)]
     capdir = RUNS / m / "capability" / "math500" / tag
     sizes = 0
     for f in sorted(capdir.glob("*.parquet")):
@@ -99,7 +104,7 @@ def kick_run(name, tag, tokenizer):
         for (_, r), code in zip(d.head(NDOTS).iterrows(), codes):
             text = str(r.response or "")
             # split at the end of the reasoning by plain search (split_cot's lazy regex is quadratic on long unclosed text)
-            ends = [(text.find(t), t) for t in ("</think>", "<|channel|>final<|message|>") if t in text]
+            ends = [(text.find(t), t) for t in ("</think>", "<|channel|>final<|message|>", "<|content_text|>") if t in text]
             closed = bool(ends)
             if closed:
                 k, t = min(ends)
@@ -109,9 +114,24 @@ def kick_run(name, tag, tokenizer):
             think = strip_think(think)
             # thinking tokens: every generated token less the answer's (the answer is short, the thinking up to 8k)
             toks = int(r.n_tokens) - (len(tokenizer(answer, add_special_tokens=False).input_ids) if closed else 0)
-            rows.append([code, int(bool(closed)), toks, think, answer.strip(), None if pd.isna(r.pred) else str(r.pred)])
+            rows.append([code, int(bool(closed)), toks, think, MARKERS.sub("", answer).strip(), None if pd.isna(r.pred) else str(r.pred)])
         sizes += write(OUT / f"kick-{name}" / f"{cand}.json.gz", {"cand": cand, "rows": rows})
     return sizes
+
+
+def inkling_tokenizer(base):
+    """Inkling's tokenizer.json at the pinned revision, read with `tokenizers` (this environment's transformers has no
+    Inkling config class); called like a transformers tokenizer for the token counts."""
+    from huggingface_hub import hf_hub_download
+    from tokenizers import Tokenizer
+    from loop_steer.models import INKLING, INKLING_ID, INKLING_VARLOOP_ID
+    rid = INKLING_ID if base == "inkling" else INKLING_VARLOOP_ID
+    tok = Tokenizer.from_file(hf_hub_download(rid, "tokenizer.json", revision=INKLING[rid]))
+
+    class Ids:
+        def __init__(self, ids):
+            self.input_ids = ids
+    return lambda text, add_special_tokens=False: Ids(tok.encode(text, add_special_tokens=add_special_tokens).ids)
 
 
 def main():
@@ -131,9 +151,9 @@ def main():
            "dory": "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", "qwen": "Qwen/Qwen3-8B"}
     toks = {}
     for name, (tag, _) in KICKS.items() if "kick" in only else []:
-        base = name.rstrip("46")
+        base = RUN_MODEL.get(name, name)
         if base not in toks:
-            toks[base] = load_tokenizer(ids[base])
+            toks[base] = inkling_tokenizer(base) if base in ("inkling", "inkvar") else load_tokenizer(ids[base])
         n = kick_run(name, tag, toks[base])
         print(f"kick-{name}: {n / 1e6:.2f} MB", flush=True)
         total += n

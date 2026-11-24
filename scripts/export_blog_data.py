@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +30,24 @@ RNG = np.random.default_rng(0)
 NDOTS = 100
 
 MODELS = {"ouro": "Ouro-1.4B-Thinking", "nanbeige": "Nanbeige4.2-3B",
-          "dory": "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", "qwen": "Qwen3-8B"}
+          "dory": "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", "qwen": "Qwen3-8B",
+          # Inkling 2 Mini (3 passes, sampled at temperature 1.0 as released) and its variable-pass research checkpoint
+          # (trained with 1-3 passes; run with 3 and with 5)
+          "inkling": "Inkling-2-Mini", "inkvar": "TML-d24-varloop-research"}
+# a run name -> the model it belongs to (runs with extra loops carry the loop count)
+RUN_MODEL = {"dory4": "dory", "ouro6": "ouro", "inkvar5": "inkvar"}
+
+
+@contextmanager
+def own_rng(seed):
+    """Bootstraps added after the first export draw from their own generator, so every interval exported before them
+    (which share the global RNG stream) keeps its value."""
+    global RNG
+    old, RNG = RNG, np.random.default_rng(seed)
+    try:
+        yield
+    finally:
+        RNG = old
 
 
 # judge of record for every reported score: v2 = gpt-6-luna (the default since 2026-11-21), v1 = gpt-oss-20b. Under v2,
@@ -170,6 +188,66 @@ def grid_qwen():
             "layers": ["0-8", "9-17", "18-26", "27-35"]}
 
 
+def has_run(dirs, name):
+    return any((d / sub / f"{name}.scored.parquet").exists() for d in dirs for sub in (".", "invalid"))
+
+
+def apply_name(base, s):
+    return f"{base}_apply{'-'.join(map(str, s))}"
+
+
+def grid_inkling():
+    """Inkling 2 Mini, 3 core passes (loop = pass). Erase: ablation at every core layer of the selected passes; "123" is
+    the three passes (prelude and coda untouched; "everywhere" adds them). Add: the tuned c = -1 at core layer 11 of each
+    selected pass; the add grid has no passes 1+3 or 2+3 (null)."""
+    dirs = gen_dirs("inkling", ["grid_test", "grid_test_b"])
+    base, push = "ablate_v4_cot_t2.l11", "actadd_v4_cot_t2.l11_c-1.0_rel1"
+    erase, pushes = {}, {}
+    for s in subsets(3):
+        erase[key(s)] = refusal(dirs, apply_name(base, s))
+        p = apply_name(push, s)
+        pushes[key(s)] = refusal(dirs, p) if has_run(dirs, p) else None
+    return {"units": 3, "unit": "loop", "clean": refusal(dirs, "none"), "random": refusal(dirs, "ablate_random_t2.l11"),
+            "erase": erase, "push": pushes, "everywhere": refusal(dirs, base, dots=False),
+            "push_strong": refusal(dirs, apply_name("actadd_v4_cot_t2.l11_c-1.5_rel1", (0, 1, 2)), dots=False),
+            "push_note": "norm-matched vector at layer 11 of each selected loop, c = -1",
+            "note": "sampled at temperature 1.0, as released",
+            # the prelude, which every pass restarts from, erased as well as passes 1-2 (unit -2 = the prelude)
+            "closed": {"12": refusal(dirs, apply_name(base, (-2, 0, 1)), dots=False)}}
+
+
+def grid_inkvar():
+    """The variable-pass checkpoint at 3 passes (250 test prompts): what the extra-loops figure needs (the unsteered
+    rate, each single pass and all three). Add: c = -0.5, its tuned strength (grid_test_act)."""
+    d3, da = gen_dirs("inkvar", ["grid_test"]), gen_dirs("inkvar", ["grid_test_act"])
+    base, push = "ablate_hh_eoi_t2.l11", "actadd_hh_eoi_t2.l11_c-0.5_rel1"
+    erase, pushes = {}, {}
+    for s in subsets(3):
+        a, p = apply_name(base, s), apply_name(push, s)
+        erase[key(s)] = refusal(d3, a) if has_run(d3, a) else None
+        pushes[key(s)] = refusal(da, p) if has_run(da, p) else None
+    return {"units": 3, "unit": "loop", "clean": refusal(d3, "none"), "random": refusal(d3, "ablate_random_t2.l11"),
+            "erase": erase, "push": pushes, "push_note": "norm-matched vector at layer 11 of each selected loop, c = -0.5",
+            "note": "variable-pass checkpoint, trained with 1-3 passes; 250 prompts",
+            "closed": {"12": refusal(d3, apply_name(base, (-2, 0, 1)), dots=False)}}
+
+
+def grid_inkvar5():
+    """The variable-pass checkpoint run with 5 passes (250 test prompts): each pass alone, passes 1-3 (the three it was
+    trained with) and all five; ``closed``: the prelude erased as well as passes 1-3."""
+    d5, da = gen_dirs("inkvar", ["grid_test5"]), gen_dirs("inkvar", ["grid_test5_act"])
+    base, push = "ablate_hh_eoi_t2.l11", "actadd_hh_eoi_t2.l11_c-0.5_rel1"
+    erase, pushes = {}, {}
+    for s in subsets(5):
+        a, p = apply_name(base, s), apply_name(push, s)
+        erase[key(s)] = refusal(d5, a) if has_run(d5, a) else None
+        pushes[key(s)] = refusal(da, p) if has_run(da, p) else None
+    return {"units": 5, "unit": "loop", "clean": refusal(d5, "none"), "random": None, "erase": erase, "push": pushes,
+            "push_note": "norm-matched vector at layer 11 of each selected loop, c = -0.5",
+            "note": "variable-pass checkpoint, trained with 1-3 passes, run with 5; 250 prompts",
+            "closed": {"123": refusal(d5, apply_name(base, (-2, 0, 1, 2)), dots=False)}}
+
+
 def plus_harmless():
     """E14: adding the refusal direction on harmless prompts (first loop / last loop / every loop)."""
     out = {}
@@ -261,6 +339,70 @@ def plus_harmless():
             t.update({"c": c, "mult": round(float(c) / e2c[m], 3), "coh": {k: coh(d, v) for k, v in names.items()},
                       "unclosed": {k: unclosed(d, v) for k, v in names.items()}})
             out[key]["tuned"] = t
+    out.update(plus_inkling(rate))
+    return out
+
+
+def plus_inkling(rate):
+    """Inkling 2 Mini and its variable-pass checkpoint (E15/E15b): +u's strength tuned on held-out harmless prompts
+    (analysis/plus_tune.json, as the other models), then the test runs pooled over harmless prompts 0-99 and 100-249
+    (plus_harmless{,_b}; the checkpoint run with 5 passes: plus_harmless5{,_b}) at that strength on each pass and every
+    pass, a random direction at the same strength, and at 4x the tuned erasing |c| (``c4``)."""
+    out = {}
+    spec = {"inkling": ("v4_cot_t2.l11", 1.0, ["plus_harmless", "plus_harmless_b"], 3, 4),
+            "inkvar": ("hh_eoi_t2.l11", 0.5, ["plus_harmless", "plus_harmless_b"], 3, 2),
+            "inkvar5": ("hh_eoi_t2.l11", 0.5, ["plus_harmless5", "plus_harmless5_b"], 5, 2)}
+    for key, (site, e2c, tags, n, c4) in spec.items():
+        m = RUN_MODEL.get(key, key)
+        d = gen_dirs(m, tags)
+
+        def groups(name, sub):
+            return sum(pd.read_parquet(x / sub / f"{name}.scored.parquet", columns=["prompt_idx", "cot_rep"])
+                       .groupby(["prompt_idx", "cot_rep"]).ngroups for x in d if (x / sub / f"{name}.scored.parquet").exists())
+
+        def unclosed(name):
+            a, b = groups(name, "."), groups(name, "invalid")
+            return round(100 * b / max(1, a + b), 1)
+
+        def coh(name):
+            lun = "luna" if JUDGE == "v2" else "."
+            parts = [pd.read_parquet(x / sub / lun / f"{name}.coh.parquet") for x in d for sub in (".", "invalid")
+                     if (x / sub / lun / f"{name}.coh.parquet").exists()]
+            return round(float(pd.concat(parts).groupby(["prompt_idx", "cot_rep"]).coherence.mean().mean()), 1) if parts else None
+
+        def have(name):
+            return has_run(d, name)
+
+        tune = json.load(open(RUNS / MODELS[m] / "analysis" / "plus_tune.json"))
+        c, cl = tune["c"], next(r for r in tune["table"] if r["candidate"] == "none")
+        res = {"tune": {"c": c, "mult": round(float(c) / e2c, 3), "any_ok": tune["any_ok"],
+                        "clean": {"refusal": round(100 * cl["refusal"], 1), "coherence": cl["coherence"], "capped": round(100 * cl["capped_frac"], 1)},
+                        "rows": [{"mult": round(float(r["c"]) / e2c, 3), "c": r["c"], "refusal": round(100 * r["refusal"], 1),
+                                  "coherence": r["coherence"], "capped": round(100 * r["capped_frac"], 1), "ok": r["ok"]}
+                                 for r in tune["table"] if "c" in r]}} if key != "inkvar5" else {}
+
+        def at(cc):
+            stem = f"actadd_{site}_c{cc}_rel1"
+            units = {"first": "_apply0", "last": f"_apply{n - 1}", "all": "", "l123": "_apply0-1-2"}
+            units.update({f"l{k + 1}": f"_apply{k}" for k in range(1, n - 1)})
+            return {k: stem + u for k, u in units.items() if have(stem + u) and not (n == 3 and k == "l123")}
+
+        names = {**at(c), "clean": "none"}
+        rnd = f"actadd_random_{site.split('_')[-1]}_c{c}_rel1"
+        if have(rnd):
+            names["random"] = rnd
+        t = {k: rate(d, v) for k, v in names.items()}
+        t.update({"c": c, "mult": round(float(c) / e2c, 3), "coh": {k: coh(v) for k, v in names.items()},
+                  "unclosed": {k: unclosed(v) for k, v in names.items()}, "n": int(len(per_prompt(d, "none")[1]))})
+        strong = at(c4)
+        if strong:
+            t["c4"] = {"c": c4, "mult": round(c4 / e2c, 3), **{k: rate(d, v) for k, v in strong.items()},
+                       "coh": {k: coh(v) for k, v in strong.items()}}
+            rs = f"actadd_random_{site.split('_')[-1]}_c{c4}_rel1"
+            if have(rs):
+                t["c4"]["random"], t["c4"]["coh"]["random"] = rate(d, rs), coh(rs)
+        res["tuned"] = t
+        out[key] = res
     return out
 
 
@@ -293,7 +435,19 @@ def extra_loops():
                  "erase": paired((o4, "ablate_v4_baseline_t3.l16"), (o6, "ablate_v4_baseline_t3.l16_apply0-1-2-3"), (o6, "none")),
                  "push": paired((o4, "actadd_v4_baseline_t3.l16_c-1.0_rel1"),
                                 (o6, "actadd_v4_baseline_t3.l16_c-1.0_rel1_apply0-1-2-3"), (o6, "none"))},
+        "inkvar": extra_inkvar(),
     }
+
+
+def extra_inkvar():
+    """Inkling's variable-pass checkpoint (trained with 1-3 passes): every pass steered at 3 passes, and the same three
+    passes steered with 2 more unsteered passes after them (250 prompts; own RNG)."""
+    v3, v5 = gen_dirs("inkvar", ["grid_test"]), gen_dirs("inkvar", ["grid_test5"])
+    a3, a5 = gen_dirs("inkvar", ["grid_test_act"]), gen_dirs("inkvar", ["grid_test5_act"])
+    e, p = "ablate_hh_eoi_t2.l11_apply0-1-2", "actadd_hh_eoi_t2.l11_c-0.5_rel1_apply0-1-2"
+    with own_rng(3):
+        return {"trained": 3, "extra": 5, "erase": paired((v3, e), (v5, e), (v5, "none")),
+                "push": paired((a3, p), (a5, p), (v5, "none"))}
 
 
 # ---------------------------------------------------------------- personas
@@ -301,7 +455,11 @@ PERSONA_FILES = {"ouro": ("persona_loops.csv", "steer_loops.judged.parquet"),
                  "nanbeige": ("persona_loops.csv", "steer_loops.judged.parquet"),
                  "dory": ("persona_loops.csv", "steer_loops.judged.parquet"),
                  "dory4": ("persona_loops_loops4.csv", "steer_loops_loops4.judged.parquet"),
-                 "qwen": ("persona_loops.csv", "steer_loops.judged.parquet")}
+                 "qwen": ("persona_loops.csv", "steer_loops.judged.parquet"),
+                 "inkling": ("persona_loops.csv", "steer_loops.judged.parquet"),
+                 # the variable-depth checkpoint, with its trained 3 loops and run with 5
+                 "inkvar": ("persona_loops.csv", "steer_loops.judged.parquet"),
+                 "inkvar5": ("persona_loops_loops5.csv", "steer_loops_loops5.judged.parquet")}
 
 
 def clip(text, n=420):
@@ -360,9 +518,10 @@ def persona_table(m, csv):
 
 
 def personas():
+    from persona_vectors import answer_of
     out = {}
     for name, (csv, pq) in PERSONA_FILES.items():
-        m = "dory" if name == "dory4" else name
+        m = RUN_MODEL.get(name, name)
         d = persona_table(m, csv)
         r = persona_judged(m, pq)
         r["units"] = r["units"].fillna("").astype(str)
@@ -378,7 +537,9 @@ def personas():
             ex = {}
             for u, gg in rt[rt.q == q].groupby("units"):
                 row = gg.sort_values("sample").iloc[0]
-                ex[u or "clean"] = {"text": clip_md(row.response), "score": None if pd.isna(row.trait_score) else round(float(row.trait_score))}
+                # Inkling cannot turn its reasoning off: show the answer after it, the part the judge scored
+                text = answer_of(str(row.response)) if m in ("inkling", "inkvar") else row.response
+                ex[u or "clean"] = {"text": clip_md(text), "score": None if pd.isna(row.trait_score) else round(float(row.trait_score))}
             traits[t] = {"clean": round(float(g.trait_clean.iloc[0]), 1), "coh_clean": round(float(g.coherence_clean.iloc[0]), 1),
                          "by_units": {u: {"score": round(float(x.trait_score), 1), "gain": round(float(x.gain), 1),
                                           "coh": round(float(x.coherence), 1), "c": float(x.c), "layer": int(x.layer)}
@@ -403,29 +564,85 @@ def persona_coverage(m):
                      for t in PERSONA_TRAITS if t in tune}}
 
 
+# run name -> (model, file suffix): persona/steer_ablate{,_mean}<suffix>.judged{,_luna}.parquet
+PERSONA_ABLATE = {"ouro": ("ouro", ""), "nanbeige": ("nanbeige", ""), "dory": ("dory", ""), "dory4": ("dory", "_loops4"),
+                  "qwen": ("qwen", ""), "inkling": ("inkling", ""), "inkvar": ("inkvar", ""), "inkvar5": ("inkvar", "_loops5")}
+ERASE_METHODS = {"zero": "steer_ablate", "mean": "steer_ablate_mean"}
+
+
+def persona_cells(m, name, judge):
+    """Mean trait score and coherence per (trait, cond) of persona/<name> under one judge (v1 gpt-oss-20b, v2 luna)."""
+    f = RUNS / MODELS[m] / "persona" / f"{name}.judged{'_luna' if judge == 'v2' else ''}.parquet"
+    return pd.read_parquet(f).groupby(["trait", "cond"])[["trait_score", "coherence"]].mean()
+
+
 def persona_ablation():
+    """Persona erasure, zero and mean ablation (docs/blog_storyline.md section 10, appendix). Zero sets the component
+    along the trait vector to 0; mean sets it to the model's unprompted mean (scripts/persona_ablation_means.py, held-out
+    extraction questions). Per model and trait the rule picks, with gpt-oss-20b on the every-loop condition only, the
+    variant that removes the larger share of the prompted trait (prompted - erased over prompted - unprompted), among
+    variants that remove at least 15 points with coherence within 10 points of the prompted run; a trait neither passes
+    gets no method. ``recovery``: per loop (or loop set), the share of the every-loop effect it keeps on its own,
+    (prompted - erased there) / (prompted - erased everywhere), averaged over the traits with a method, under each judge;
+    ``other``: the same with the other variant on those traits (the robustness check)."""
     out = {}
-    for name, csv in [("ouro", "persona_ablate.csv"), ("nanbeige", "persona_ablate.csv"), ("dory", "persona_ablate.csv"),
-                      ("dory4", "persona_ablate_loops4.csv"), ("qwen", "persona_ablate.csv")]:
-        m = "dory" if name == "dory4" else name
-        d = persona_table(m, csv)
-        d["units"] = d["units"].astype(str)
-        g = d.groupby(["cond", "units"], sort=False)[["trait_score", "coherence"]].mean().round(1).reset_index()
-        traits = {}
-        for t, x in d.groupby("trait", sort=False):
-            traits[t] = {"prompted": round(float(x.trait_clean.iloc[0]), 1), "noprompt": round(float(x.trait_noprompt.iloc[0]), 1),
-                         "rows": [{"cond": r.cond, "units": r.units, "score": round(float(r.trait_score), 1),
-                                   "coh": round(float(r.coherence), 1)} for r in x.itertuples()]}
-        # share of the prompted trait removed, pooled over every trait: the points the erasure takes away, summed over
-        # traits, over the points the system prompt adds, summed over traits (a trait the prompt barely moves counts
-        # for little, instead of blowing up a per-trait ratio)
-        x = d[~d.cond.isin(["prompted", "noprompt"])]
-        pooled = (100 * (x.trait_clean - x.trait_score).groupby(x.cond).sum()
-                  / (x.trait_clean - x.trait_noprompt).groupby(x.cond).sum()).round(1)
-        out[name] = {"vector": persona_coverage(m)["vector"], "rows": g.to_dict("records"), "prompted": round(float(d.trait_clean.mean()), 1),
-                     "unprompted": round(float(d.trait_noprompt.mean()), 1) if "trait_noprompt" in d else None,
-                     "traits": traits, "removed": pooled.to_dict(),
-                     "removed_traits": sorted(d.trait.unique()), "source": f"analysis/{csv}"}
+    for name, (m, sfx) in PERSONA_ABLATE.items():
+        cells = {(meth, j): persona_cells(m, f"{stem}{sfx}", j) for meth, stem in ERASE_METHODS.items() for j in JUDGES}
+        base = cells[("zero", JUDGE)]
+        traits = list(dict.fromkeys(base.index.get_level_values("trait")))
+        conds = list(dict.fromkeys(base.index.get_level_values("cond")))
+        units = sorted([c for c in conds if c.startswith("ablate_") and c != "ablate_all"],
+                       key=lambda c: (len(c.removeprefix("ablate_").removeprefix("q")), c))
+        choice, per_trait = {}, {}
+        for t in traits:
+            cand = {}
+            for meth in ERASE_METHODS:
+                s, co = cells[(meth, "v1")].trait_score.loc[t], cells[(meth, "v1")].coherence.loc[t]
+                eff, span = s["prompted"] - s["ablate_all"], s["prompted"] - s["noprompt"]
+                cand[meth] = {"eff": round(float(eff), 1), "removed": round(float(eff / span), 3) if span > 0 else None,
+                              "coh_drop": round(float(co["prompted"] - co["ablate_all"]), 1),
+                              "ok": bool(eff >= 15 and co["ablate_all"] >= co["prompted"] - 10)}
+            valid = [k for k, v in cand.items() if v["ok"]]
+            chosen = max(valid, key=lambda k: cand[k]["removed"] if cand[k]["removed"] is not None else -np.inf) if valid else None
+            choice[t] = {"chosen": chosen, **cand}
+            if chosen is None:
+                continue
+            other = "mean" if chosen == "zero" else "zero"
+
+            def ratio(meth, j, u):
+                """share of the every-loop effect unit u keeps; undefined (None) when the every-loop erasure removes
+                under 15 points under judge j (the guard: no effect to share)"""
+                s = cells[(meth, j)].trait_score.loc[t]
+                eff = s["prompted"] - s["ablate_all"]
+                return round(float((s["prompted"] - s[u]) / eff), 3) if eff >= 15 and u in s else None
+            per_trait[t] = {j: {"chosen": {u: ratio(chosen, j, u) for u in units}, "method": chosen,
+                                **{meth: {u: ratio(meth, j, u) for u in units} for meth in ERASE_METHODS}} for j in JUDGES}
+        # averaged over the traits with a method: the chosen variant per trait, and each variant on every one of those
+        # traits where it has an effect to share (the robustness check; the appendix compares these two)
+        rec = {}
+        for j in JUDGES:
+            rec[j] = {}
+            for which in ("chosen", *ERASE_METHODS):
+                rec[j][which] = {}
+                for u in units:
+                    v = [per_trait[t][j][which][u] for t in per_trait if per_trait[t][j][which][u] is not None]
+                    rec[j][which][u] = round(100 * float(np.mean(v)), 1) if v else None
+                rec[j][which]["n"] = sum(per_trait[t][j][which][units[0]] is not None for t in per_trait)
+        methods = {}
+        for meth in ERASE_METHODS:
+            c = cells[(meth, JUDGE)]
+            methods[meth] = {"traits": {t: {"prompted": round(float(c.trait_score.loc[(t, "prompted")]), 1),
+                                            "noprompt": round(float(c.trait_score.loc[(t, "noprompt")]), 1),
+                                            "rows": [{"cond": k, "score": round(float(c.trait_score.loc[(t, k)]), 1),
+                                                      "coh": round(float(c.coherence.loc[(t, k)]), 1)}
+                                                     for k in conds if (t, k) in c.index]} for t in traits},
+                             "rows": c.groupby("cond").mean().round(1).reset_index().rename(columns={"trait_score": "score"}).to_dict("records")}
+        vec = RUNS / MODELS[m] / "directions" / "persona.pt"
+        out[name] = {"vector": persona_coverage(m)["vector"] if vec.exists() else traits, "traits": traits, "units": units,
+                     "methods": methods, "choice": choice, "recovery": rec[JUDGE],
+                     "recovery_alt": rec["v1" if JUDGE == "v2" else "v2"], "chosen_traits": list(per_trait),
+                     "per_trait": {t: v[JUDGE] for t, v in per_trait.items()},
+                     "source": f"persona/{ERASE_METHODS['zero']}{sfx}, {ERASE_METHODS['mean']}{sfx} (.judged{'_luna' if JUDGE == 'v2' else ''}.parquet)"}
     return out
 
 
@@ -459,11 +676,72 @@ def reinjection():
             "source": f"analysis/{', '.join(REINJECT_FILES)} (scripts/dory_reinject.py)"}
 
 
+# run -> (model, files (earlier ones win on overlap), loops, the window its refusal direction was built in)
+REBUILD = {"inkling": ("inkling", ["inkling_rebuild.csv", "inkling_rebuild_reinject.csv"], 3, "cot"),
+           "inkvar": ("inkvar", ["inkling_rebuild.csv", "inkling_rebuild_reinject.csv"], 3, "eoi"),
+           "inkvar5": ("inkvar", ["inkling_rebuild_reinject_loops5.csv"], 5, "eoi")}
+REBUILD_WINDOWS = {"cot": "reasoning tokens", "eoi": "end of the instruction"}
+
+
+def inkling_rebuild():
+    """scripts/inkling_rebuild.py on Inkling 2 Mini and its variable-depth checkpoint (teacher-forced, as
+    dory_reinject.py): refusing - complying separation along u at the last pass's layer 11 (the steering site), as a
+    share of the unsteered run's, with refusal erased on the earlier passes (``early``: all but the last pass of the 3
+    it was trained with, or passes 1-3 of 5). ``sep`` is in the window the direction was built in (reasoning tokens for
+    Inkling 2 Mini, the end of the instruction for the checkpoint); both windows are kept. Edits on top of the erase:
+    the cross-pass messages stripped of u (msgabl) or zeroed (msgzero); u erased in the prelude too (pre); the prelude
+    state every pass restarts from with its component in span(u, d_x) (ux) or in the span of the prelude's own refusal
+    directions (smean) set to its mean; that state replaced by its mean vector for the last pass(es), so they hear the
+    prompt only through the messages (flat), or dropped (drop); a random direction's mean (rand). nll: mean CoT
+    next-token loss."""
+    res = {}
+    for name, (m, files, n, main) in REBUILD.items():
+        a = RUNS / MODELS[m] / "analysis"
+        parts = []
+        for f in files:
+            x = pd.read_csv(a / f)
+            if "dir" in x:
+                x = x[(x.dir == "u") | (x.window == "nll")]
+            parts.append(x)
+        d = pd.concat(parts).drop_duplicates(subset=["condition", "window", "loop", "layer"])
+        early = "abl" + "".join(str(k) for k in range(1, 3 if n == 3 else 4))
+        late, allp = ("3", "123") if n == 3 else ("45", "12345")
+        conds = {"clean": "clean", "early": early, "all": "abl" + allp, "early+msgabl": early + "+msgabl",
+                 "early+msgzero": early + "+msgzero", "msgzero": "msgzero", "early+pre": early + "+pre",
+                 "early+pre+msgzero": early + "+pre+msgzero", "early+ux": f"{early}+uxmean{allp}",
+                 "early+smean": f"{early}+smean{allp}", "early+flat": f"{early}+flat{late}", "flat": "flat" + late,
+                 "early+drop": f"{early}+drop{late}", "early+rand": f"{early}+rand{late}"}
+
+        def sep(c, w):
+            x = d[(d.condition == c) & (d.window == w) & (d.loop == n - 1) & (d.layer == 11)]
+            return float(x.sep.iloc[0]) if len(x) else None
+
+        out = {}
+        for k, c in conds.items():
+            if sep(c, main) is None:
+                continue
+            out[k] = {"cond": c, "sep": round(100 * sep(c, main) / sep("clean", main), 1)}
+            for w in REBUILD_WINDOWS:
+                out[k]["sep_" + w] = round(100 * sep(c, w) / sep("clean", w), 1)
+            x = d[(d.condition == c) & (d.window == "nll")]
+            if len(x):
+                out[k]["nll"] = round(float(x.mean_ref.iloc[0] + x.mean_com.iloc[0]) / 2, 3)
+        res[name] = {"conds": out, "early": early, "window": REBUILD_WINDOWS[main],
+                     "site": f"pass {n}, layer 11, {REBUILD_WINDOWS[main]}",
+                     "source": "analysis/" + ", ".join(files) + " (scripts/inkling_rebuild.py)"}
+    return res
+
+
 # ---------------------------------------------------------------- kicks
 KICKS = {"ouro": ("kickp", ["kickp", "kickp_all", "kickp_all_indep"]), "ouro6": ("kickp_loops6", ["kickp_loops6"]),
          "nanbeige": ("kickp", ["kickp", "kickp_both"]), "dory": ("kickp", ["kickp", "kickp_all"]),
          "dory4": ("kickp_loops4", ["kickp_loops4", "kickp_loops4_all", "kickp_loops4_all_indep"]),
-         "qwen": ("kickp", ["kickp", "kickp_all", "kickp_all_indep"])}
+         "qwen": ("kickp", ["kickp", "kickp_all", "kickp_all_indep"]),
+         "inkling": ("kickp", ["kickp", "kickp_all", "kickp_all_indep"]),
+         "inkvar": ("kickp", ["kickp", "kickp_big"]), "inkvar5": ("kickp_loops5", ["kickp_loops5", "kickp_big_loops5"])}
+# Inkling's kicks run up to size 8 (its KL saturates; sizes 2-16 in kickp_big): a size-2 kick on its first pass moves
+# its predictions about as much as a size-1 kick on Ouro's or Dory's first loop
+KICKS["inkling"] = ("kickp", ["kickp", "kickp_all", "kickp_all_indep", "kickp_big"])
 
 
 KICK_OUT = ["solved", "wrong answer", "no answer", "cut off, still reasoning", "cut off, repeating itself",
@@ -495,7 +773,7 @@ def kicks():
     out = {"outcomes": KICK_OUT}
     with tempfile.TemporaryDirectory(dir=ROOT / "scratch") as tmp:
         for name, (tag, kl_tags) in KICKS.items():
-            m = MODELS[name.rstrip("46")]
+            m = MODELS[RUN_MODEL.get(name, name)]
             csv = Path(tmp) / f"{name}.csv"
             cmd = [sys.executable, str(ROOT / "scripts" / "kick_summary.py"), "--model", m, "--tag", tag,
                    "--n-boot", "500", "--csv", str(csv)]
@@ -526,7 +804,7 @@ def kicks():
     # entry stack ("in"), its loops, its exit stack ("out"); Qwen's 36 layers as four quarters of 9 (loop = quarter)
     strips = {}
     for name, m, f in [("dory", "dory", "kickp_sites"), ("dory4", "dory", "kickp_pilot_loops4"), ("nanbeige", "nanbeige", "kickp_sites"),
-                       ("ouro", "ouro", "kickp_sites"), ("qwen", "qwen", "kickp_sites")]:
+                       ("ouro", "ouro", "kickp_sites"), ("qwen", "qwen", "kickp_sites"), ("inkling", "inkling", "kickp_sites")]:
         path = RUNS / MODELS[m] / "analysis" / "kick_kl" / f"{f}.parquet"
         if not path.exists():
             continue
@@ -537,6 +815,9 @@ def kicks():
             loop, layer = int(r.loop), int(r.layer)
             if m == "dory":
                 stage = "in" if (loop == 0 and layer < 16) else ("out" if layer >= 56 else "loop")
+                lp = loop + 1 if stage == "loop" else None
+            elif m == "inkling":  # prelude 0-5 and coda 18-23 run once; core 6-17 once per pass
+                stage = "in" if layer < 6 else ("out" if layer >= 18 else "loop")
                 lp = loop + 1 if stage == "loop" else None
             elif m == "qwen":
                 stage, lp = "loop", layer // 9 + 1
@@ -554,7 +835,8 @@ def readouts():
     out = {}
     for name, (m, f) in {"ouro": ("ouro", "loop_readout_loops4.csv"), "nanbeige": ("nanbeige", "loop_readout_loops2.csv"),
                          "dory": ("dory", "loop_readout_loops2.csv"), "dory4": ("dory", "loop_readout_loops4.csv"),
-                         "qwen": ("qwen", "loop_readout_blocks4.csv")}.items():
+                         "qwen": ("qwen", "loop_readout_blocks4.csv"), "inkling": ("inkling", "loop_readout_loops3.csv"),
+                         "inkvar5": ("inkvar", "loop_readout_loops5.csv")}.items():
         d = pd.read_csv(RUNS / MODELS[m] / "analysis" / f)
         g = d.groupby("k")[["agree", "kl"]].mean()
         out[name] = {"agree": [round(float(v), 3) for v in g.agree], "kl": [round(float(v), 3) for v in g.kl],
@@ -635,16 +917,19 @@ SAFE_PROMPTS = [0, 9, 15, 20, 23, 24, 25, 29, 35, 40, 41, 45, 67, 70, 76, 78, 81
 def examples(grids):
     """For a few test prompts: the prompt, and one reply per switchboard setting (a sample whose verdict matches the
     prompt's majority over its 9 samples), with the share of samples refused."""
-    tags = {"dory4": ["grid_test4", "grid_test4_b"]}
+    # the variable-pass checkpoint's erase and add runs sit in separate tags (and its 5-pass runs in their own)
+    tags = {"dory4": ["grid_test4", "grid_test4_b"], "inkvar": ["grid_test", "grid_test_act"],
+            "inkvar5": ["grid_test5", "grid_test5_act"]}
     test = pd.read_csv(ROOT / "data" / "prompts" / "test_harmful_prompts.csv").prompt.tolist()[:NDOTS]
     out = {"prompts": {}, "models": {}, "safe": SAFE_PROMPTS, "all": [clip(p, 240) for p in test]}
     for m, g in grids.items():
-        model = "dory" if m == "dory4" else m
+        model = RUN_MODEL.get(m, m)
         dirs = gen_dirs(model, tags.get(m, ["grid_test", "grid_test_b"]))
         conds = {"none": g["clean"]["cand"]}
         for mode in ("erase", "push"):
             for k, rec in g[mode].items():
-                conds[f"{mode}:{k}"] = rec["cand"]
+                if rec is not None:  # a loop subset not run (Inkling's add on loops 1 + 3, 2 + 3)
+                    conds[f"{mode}:{k}"] = rec["cand"]
         res = {str(p): {} for p in EXAMPLE_PROMPTS}
         for ck, cand in conds.items():
             parts = []
@@ -672,7 +957,8 @@ def examples(grids):
 
 
 # ---------------------------------------------------------------- second judge
-LUNA_SCORED = {"dory": "train_clean", "nanbeige": "clean_train/none", "ouro": "train_clean", "qwen": "train_clean"}
+LUNA_SCORED = {"dory": "train_clean", "nanbeige": "clean_train/none", "ouro": "train_clean", "qwen": "train_clean",
+               "inkling": "train_clean"}
 
 
 def second_judge():
@@ -703,10 +989,13 @@ def second_judge():
 
 
 LUNA_GROUPS = {"grid": (["grid_test", "grid_test_b"], None, "harmful"), "grid4": (["grid_test4", "grid_test4_b"], 4, "harmful"),
-               "grid6": (["grid_test6", "grid_test6_b"], 6, "harmful"), "plus": (["plus_harmless"], None, "harmless"),
+               "grid6": (["grid_test6", "grid_test6_b"], 6, "harmful"), "plus": (["plus_harmless", "plus_harmless_b"], None, "harmless"),
                "plus4": (["plus_harmless4"], 4, "harmless"), "ortho": (["ortho_test"], None, "harmful"),
-               "ortho4": (["ortho_test4"], 4, "harmful")}
-TRAINED = {"ouro": 4, "nanbeige": 2, "dory": 2, "qwen": None}
+               "ortho4": (["ortho_test4"], 4, "harmful"),
+               # Inkling's variable-pass checkpoint: 5 passes, and its add runs (own tags)
+               "grid5": (["grid_test5"], 5, "harmful"), "gridact": (["grid_test_act"], None, "harmful"),
+               "grid5act": (["grid_test5_act"], 5, "harmful")}
+TRAINED = {"ouro": 4, "nanbeige": 2, "dory": 2, "qwen": None, "inkling": 3, "inkvar": 3}
 
 
 def luna_pp(dirs, name):
@@ -757,9 +1046,12 @@ def cell_label(m, cand, group):
             what += f" ×{abs(float(c.group(1))):g}"
         elif c:
             what += f" (c = {c.group(1)})"
-        a, lay, at = (re.search(p, cand) for p in (r"_apply([\d-]+)", r"_layers([\d-]+)", r"_at([\d-]+)"))
+        a, lay, at = (re.search(p, cand) for p in (r"_apply(-?[\d-]+)", r"_layers([\d-]+)", r"_at([\d-]+)"))
         if a:
-            what += " · loop" + ("s " if "-" in a.group(1) else " ") + ", ".join(str(int(x) + 1) for x in a.group(1).split("-"))
+            pre = a.group(1).startswith("-2-")  # unit -2: Inkling's prelude
+            xs = a.group(1).removeprefix("-2-").split("-")
+            what += (" · prelude +" if pre else "") + " · loop" + ("s " if len(xs) > 1 else " ") + ", ".join(str(int(x) + 1) for x in xs)
+            what = what.replace("+ · loop", "+ loop")
         elif lay:
             xs = list(map(int, lay.group(1).split("-")))
             what += " · " + ", ".join(f"Q{x // 9 + 1}" if x // 9 == y // 9 else f"Q{x // 9 + 1}–{y // 9 + 1}"
@@ -812,7 +1104,7 @@ def extra_second_judge():
     kick cut-off labels (judge_api_extra.py). Correlations on replies both judges scored; label agreement."""
     out = {}
     P = []
-    for m in ["dory", "nanbeige", "ouro", "qwen"]:
+    for m in ["dory", "nanbeige", "ouro", "qwen", "inkling"]:
         for name in ["steer_loops", "steer_loops_loops4", "steer_ablate", "steer_ablate_loops4"]:
             f = RUNS / MODELS[m] / "persona" / f"{name}.judged_luna.parquet"
             if f.exists():
@@ -826,7 +1118,7 @@ def extra_second_judge():
                           "coh_diff": round(float((c.coherence - c.gptoss_coherence).mean()), 1)}
     C = []
     for m in MODELS:
-        for tag in ["plus_harmless", "plus_harmless4"]:
+        for tag in ["plus_harmless", "plus_harmless_b", "plus_harmless4"]:
             for sub in (".", "invalid"):
                 d = RUNS / MODELS[m] / "generations" / tag / sub
                 for f in sorted((d / "luna").glob("*.coh.parquet")) if (d / "luna").exists() else []:
@@ -855,7 +1147,7 @@ def steered_second_judge():
     """gpt-6-luna vs gpt-oss-20b on every refusal run behind the page (cells as the page pools them)."""
     cells, tot = [], {"answers": 0, "blocked": 0, "agree": 0}
     by_model = {}
-    for m in ["dory", "nanbeige", "ouro", "qwen"]:
+    for m in ["dory", "nanbeige", "ouro", "qwen", "inkling", "inkvar"]:
         for group, (tags, _, _) in LUNA_GROUPS.items():
             dirs = [d for d in gen_dirs(m, tags) if d.exists()]
             if not dirs:
@@ -915,6 +1207,13 @@ def main():
         "edits": weight_edits(),
         "judge2": second_judge(),
     }
+    with own_rng(1):
+        data["grids"]["inkling"] = grid_inkling()
+    with own_rng(2):
+        data["grids"]["inkvar"] = grid_inkvar()
+    with own_rng(4):
+        data["grids"]["inkvar5"] = grid_inkvar5()
+    data["inkling_rebuild"] = inkling_rebuild()
     data["examples"] = examples(data["grids"])
     data["judge2"]["persona"] = persona_second_judge({m: list(v["traits"]) for m, v in data["persona"].items()})
     OUT.parent.mkdir(parents=True, exist_ok=True)

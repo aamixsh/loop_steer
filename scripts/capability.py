@@ -87,19 +87,57 @@ def extract_answer(answer: str, truth: str) -> str | None:
     return pred
 
 
+# a unit after the answer: "5\text{ cm}", "12\pi \text{ inches per second}", "65 \mbox{ cubic units}^2"
+UNIT_TAIL = re.compile(r"^(.*\S)\s*(?:\\(?:text|textnormal|mbox|mathrm)\{\s*[^{}]*\}\s*(?:\^\{?\d\}?)?)+$")
+
+
 def normalize(ans: str) -> str:
-    s = ans.strip()
-    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
-    for a, b in (("\\dfrac", "\\frac"), ("\\tfrac", "\\frac"), ("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""),
-                 ("\\;", ""), ("\\ ", ""), ("^\\circ", ""), ("^{\\circ}", ""), ("\\%", ""), ("%", ""), ("$", ""),
-                 ("\\$", ""), (" ", "")):
+    """Light LaTeX normalisation (grader v2, 2026-11-21). v1 kept unit text ("5\\text{ cm}"), stripped "$" before "\\$",
+    turned a matrix row break "\\\\ " into "\\" when removing "\\ ", and compared \\sqrt2 / \\sqrt{2}, x^5 / x^{5},
+    \\frac13 / 1/3 inside larger answers, "(C)" / "C" and "12^{th}" / "12" as different."""
+    s = ans.strip().replace("\\\\", "\x00")  # matrix row breaks survive the spacing commands below
+    m = UNIT_TAIL.match(s)
+    if m and re.search(r"[\d}]", m.group(1)):  # a trailing unit after a number or expression, never a text-only answer
+        s = m.group(1)
+    s = re.sub(r"\\(?:text|textnormal|textbf|mbox|mathrm)\{([^}]*)\}", r"\1", s)
+    for a, b in (("\\dfrac", "\\frac"), ("\\tfrac", "\\frac"), ("\\displaystyle", ""), ("\\left", ""), ("\\right", ""),
+                 ("\\!", ""), ("\\,", ""), ("\\;", ""), ("\\ ", ""), ("^\\circ", ""), ("^{\\circ}", ""), ("\\%", ""),
+                 ("%", ""), ("\\$", ""), ("$", "")):
         s = s.replace(a, b)
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"\x00\[[^\]]*\]", "\x00", s)  # matrix row spacing: \\[2pt] -> \\
     s = s.rstrip(".")
-    s = re.sub(r"^[a-zA-Z]\w*=", "", s)  # "x=3" -> "3"
-    m = re.fullmatch(r"(-?)\\frac\{?(-?\d+)\}?\{?(\d+)\}?", s)  # \frac12 / \frac{1}{2}
-    if m:
-        s = f"{m.group(1)}{m.group(2)}/{m.group(3)}"
-    return s
+    s = re.sub(r"^(?:[a-zA-Z]\w*|\\mathbf\{?\w+\}?)=", "", s)  # "x=3" -> "3", "\mathbf{v}=..." -> "..."
+    s = re.sub(r"^[a-zA-Z]\\in", "", s)  # "x \in [-2,7]" -> "[-2,7]"
+    s = re.sub(r"\^\{?(?:st|nd|rd|th)\}?$", "", s)  # "12^{th}" -> "12"
+    s = re.sub(r"^\(([A-Z])\)$", r"\1", s)  # "(C)" -> "C"
+    s = re.sub(r"\\sqrt(\w)", r"\\sqrt{\1}", s)  # \sqrt2 -> \sqrt{2}
+    s = re.sub(r"([\^_])\{(\w)\}", r"\1\2", s)  # x^{5} -> x^5
+    s = re.sub(r"\\frac(\d)(\d)", r"\\frac{\1}{\2}", s)  # \frac13 -> \frac{1}{3}
+    s = re.sub(r"\\frac(\d)\{", r"\\frac{\1}{", s)  # \frac9{19} -> \frac{9}{19}
+    s = re.sub(r"\\frac\{(\w+)\}(\d)", r"\\frac{\1}{\2}", s)  # \frac{3}5 -> \frac{3}{5}
+    s = re.sub(r"\\frac\{(-?\w+)\}\{(\w+)\}", r"\1/\2", s)  # \frac{1}{3} -> 1/3 (simple parts, anywhere)
+    return s.replace("\x00", "\\\\")
+
+
+def _top_split(s: str) -> list[str]:
+    """Split at commas outside brackets."""
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        depth += (ch in "([{") - (ch in ")]}")
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return out + [cur]
+
+
+def _same(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    x, y = _number(a), _number(b)
+    return x is not None and y is not None and abs(x - y) < 1e-9
 
 
 def _number(s: str) -> float | None:
@@ -120,10 +158,25 @@ def is_correct(pred: str | None, truth: str) -> bool:
         m = re.fullmatch(r"\(?([A-J])\)?(?:[.:)\s].*)?", re.sub(r"\\text(?:bf)?\{([^}]*)\}", r"\1", pred).strip(), re.S)
         return m is not None and m.group(1) == truth
     a, b = normalize(pred), normalize(truth)
-    if a == b:
+    if _same(a, b):
         return True
-    x, y = _number(a), _number(b)
-    return x is not None and y is not None and abs(x - y) < 1e-9
+    if re.fullmatch(r"[A-Za-z]+", a) and a.lower() == b.lower():  # a word answer: "East" for \text{east}
+        return True
+    base = re.fullmatch(r"([0-9A-Z]+)_\{?\d+\}?", b)  # "2516" for 2516_8: the digits, without the base subscript
+    if base and "_" not in a and a == base.group(1):
+        return True
+    # "1 \pm \sqrt{19}" stands for both roots
+    tb = [b.replace("\\pm", s, 1) for s in "+-"] if b.count("\\pm") == 1 and "," not in b else _top_split(b)
+    ta = [re.sub(r"^[a-zA-Z]\w*=", "", x) for x in _top_split(a)]  # "x=3,x=5,x=7"
+    if len(tb) > 1 and len(ta) == len(tb):  # a list of solutions, in any order
+        rest = list(tb)
+        for x in ta:
+            hit = next((y for y in rest if _same(x, y)), None)
+            if hit is None:
+                return False
+            rest.remove(hit)
+        return True
+    return False
 
 
 def main():

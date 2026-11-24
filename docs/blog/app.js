@@ -46,12 +46,22 @@ const MODELS = {
   dory: { label: "Dory", full: "Dory 1.0 4B", color: "var(--dory)", loops: 2, layers: 40, ramps: true, dir: "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", tags: "grid_test{,_b}" },
   dory4: { label: "Dory × 4 loops", full: "Dory 1.0 4B run with 4 loops", color: "var(--dory)", loops: 4, layers: 40, ramps: true, dir: "NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16", tags: "grid_test4{,_b}" },
   qwen: { label: "Qwen (dense)", full: "Qwen3-8B", color: "var(--dense)", loops: 4, layers: 36, straight: true, dir: "Qwen3-8B", tags: "grid_test{,_b}" },
-  /* a looped mixture of experts; on the setup cards only until its results are in */
-  inkling: { label: "Inkling", full: "Inkling 2 Mini", color: "var(--inkling)", loops: 3, layers: 12, dir: "Inkling-2-Mini", tags: "grid_test" },
+  /* Inkling: the variable-depth research checkpoint of Inkling 2 Mini, a looped mixture of experts trained to answer
+     after 1, 2 or 3 loops; run with 3 loops and with 5, sampled at temperature 1.0 (the others at 0.6) */
+  inkvar: { label: "Inkling", full: "Inkling variable-depth checkpoint", color: "var(--inkling)", loops: 3, layers: 12, dir: "TML-d24-varloop-research", tags: "grid_test" },
+  inkvar5: { label: "Inkling × 5 loops", full: "Inkling variable-depth checkpoint run with 5 loops", color: "var(--inkling)", loops: 5, layers: 12, dir: "TML-d24-varloop-research", tags: "grid_test5" },
+  /* the released Inkling 2 Mini, which always runs 3 loops: in the appendix only */
+  inkling: { label: "Inkling 2 Mini", full: "Inkling 2 Mini (fixed 3 loops)", color: "var(--inkling)", loops: 3, layers: 12, dir: "Inkling-2-Mini", tags: "grid_test{,_b}" },
 };
 const QLAYERS = ["0–8", "9–17", "18–26", "27–35"];
 /* the order models appear in everywhere: Dory first (and the default), then Nanbeige, Ouro and the dense Qwen */
-const ORDER4 = ["dory", "nanbeige", "ouro", "qwen"], ORDER5 = ["dory", "dory4", "nanbeige", "ouro", "qwen"];
+const ORDER4 = ["dory", "nanbeige", "ouro", "qwen"], ORDER6 = ["dory", "dory4", "nanbeige", "ouro", "inkvar", "qwen"];
+/* with Inkling run with 5 loops, where those runs exist */
+const ORDER7 = ["dory", "dory4", "nanbeige", "ouro", "inkvar", "inkvar5", "qwen"];
+/* runs with more loops than the model was trained with */
+const TRAINED_AT = { dory4: 2, inkvar5: 3 };
+const trainedLoops = (m, n = MODELS[m].loops) => TRAINED_AT[m] || n;
+const runNote = (m) => (TRAINED_AT[m] ? `trained with ${m === "inkvar5" ? "1–3" : TRAINED_AT[m]}` : null);
 const unitName = (m, k) => (MODELS[m].straight ? `Q${k}` : `Loop ${k}`);
 const unitShort = (m, k) => (MODELS[m].straight ? `Q${k}` : `L${k}`);
 const lc = (label) => label.replace(/\b(Loop|Every|All|Random)\b/g, (w) => w.toLowerCase()); /* lower-case words, keep Q1..Q4 */
@@ -420,10 +430,11 @@ const GEO = {
   dory: { loop: 40, pre: 16, post: 16, stacks: true, ends: ["entry stack · 16", "exit stack · 16"], site: { push: 26, kick: 36, persona: 36 } },
   /* Inkling: a prelude of 6 layers, a core of 12 run 3 times (passes), a coda of 6; its picked refusal site is layer 11
      (core layer 6 of 12), its kicks go in at layer 12 */
-  inkling: { loop: 12, pre: 6, post: 6, stacks: true, ends: ["prelude · 6", "coda · 6"], names: ["prelude", "coda", "core, 3 passes"], site: { push: 5, kick: 6, persona: 6 } },
+  inkling: { loop: 12, pre: 6, post: 6, stacks: true, restart: true, ends: ["prelude · 6", "coda · 6"], names: ["prelude", "coda", "core, run 3 times"], site: { push: 5, kick: 6, persona: 6 }, kickLayer: 12 },
   qwen: { straight: true, total: 36, site: { push: 3, kick: 4, persona: 4 } },
 };
 GEO.dory4 = GEO.dory;
+GEO.inkvar = GEO.inkling; GEO.inkvar5 = GEO.inkling;
 /* natural: the behaviour builds up without steering (the dot starts plain and drifts into the checkered lane) */
 const MEAN = {
   refusal: { natural: true, sig: RGB.red, sigCss: "var(--refuse)", sigText: "refusal signal", lanes: ["No-refusal lane", "Refusal lane"], ends: ["complies", "refuses"] },
@@ -711,6 +722,10 @@ class Track {
   bld(p) {
     const G = this.G;
     if (this.straight) return smooth((p - 3) / 24);
+    if (G.restart && p >= G.pre && p < G.pre + this.n * G.loop) { /* Inkling: every loop starts again from the prelude's output */
+      const k = Math.floor((p - G.pre) / G.loop);
+      return 0.35 + 0.65 * smooth((p - G.pre - k * G.loop) / (0.25 * G.loop));
+    }
     if (G.stacks) return p < G.pre ? 0.35 * smooth(p / G.pre) : 0.35 + 0.65 * smooth((p - G.pre) / (0.25 * G.loop));
     return smooth((p - G.pre) / (0.7 * G.loop));
   }
@@ -913,7 +928,7 @@ class Track {
    at the end is data, and the head (the bulb) shows it (or, with P.curve, a measured signal along the way). One WebGL renderer draws every figure into its own 2D canvas, and only while it is on screen.
    Without WebGL the page falls back to the flat Track above. */
 const T3 = window.THREE;
-const D3 = { d: 1, r: 0.3, a: 0.42, rt: 0.13, liq: 0.082, byY: -0.66, byR: 0.062, ms: 40, qLen: 10.5, nf: 6, dropH: 0.85 };
+const D3 = { gap: 0.75, d: 1, r: 0.3, a: 0.42, rt: 0.13, liq: 0.082, byY: -0.66, byR: 0.13, /* the shortcut carries a whole stream: as wide as the main tube */ ms: 40, qLen: 10.5, nf: 6, dropH: 0.85 };
 const LOOP3 = (() => { let L = 0, p = null;
   for (let i = 0; i <= 900; i++) { const t = (2 * Math.PI * i) / 900, q = [D3.r * t + D3.d * Math.sin(t), D3.d * (1 - Math.cos(t)), D3.a * Math.sin(t)]; if (p) L += Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]); p = q; }
   return L; })();
@@ -1102,28 +1117,38 @@ class Stream3D {
     } else {
       per = LOOP3 / G.loop;
       const pre = G.pre * per, post = G.post * per;
+      const lg = G.restart ? D3.gap : 0, step = 2 * Math.PI * r + lg; /* Inkling: an empty stretch between loops */
       for (let i = 0; i <= 40; i++) raw.push([-pre + (pre * i) / 40, 0, 0]);
-      for (let k = 0; k < n; k++) for (let i = 1; i <= 900; i++) { const t = (2 * Math.PI * i) / 900; raw.push([2 * Math.PI * r * k + r * t + d * Math.sin(t), d * (1 - Math.cos(t)), a * Math.sin(t)]); }
-      const xe = 2 * Math.PI * r * n;
+      for (let k = 0; k < n; k++) {
+        if (k && lg) for (let i = 1; i <= 30; i++) { const q = [step * k - lg + (lg * i) / 30, 0, 0]; q.gap = true; raw.push(q); }
+        for (let i = 1; i <= 900; i++) { const t = (2 * Math.PI * i) / 900; raw.push([step * k + r * t + d * Math.sin(t), d * (1 - Math.cos(t)), a * Math.sin(t)]); }
+      }
+      const xe = step * (n - 1) + 2 * Math.PI * r;
       for (let i = 1; i <= 40; i++) raw.push([xe + (post * i) / 40, 0, 0]);
     }
-    const cum = [0];
-    for (let i = 1; i < raw.length; i++) cum.push(cum[i - 1] + Math.hypot(raw[i][0] - raw[i - 1][0], raw[i][1] - raw[i - 1][1], raw[i][2] - raw[i - 1][2]));
+    /* cumP: the length that counts as layers (a gap between Inkling's loops adds tube but no layers: its points sit just
+       before the next loop's first layer, so the front jumps it) */
+    const cum = [0], cumP = [0];
+    for (let i = 1; i < raw.length; i++) {
+      const dl = Math.hypot(raw[i][0] - raw[i - 1][0], raw[i][1] - raw[i - 1][1], raw[i][2] - raw[i - 1][2]);
+      cum.push(cum[i - 1] + dl); cumP.push(cumP[i - 1] + (raw[i].gap ? 0 : dl));
+    }
     const L = cum[cum.length - 1], N = Math.ceil(L / 0.022) + 1, S = [];
     let j = 0;
     for (let i = 0; i < N; i++) {
       const l = (i * L) / (N - 1);
       while (j < raw.length - 2 && cum[j + 1] < l) j++;
-      const f = clamp((l - cum[j]) / Math.max(1e-9, cum[j + 1] - cum[j]), 0, 1);
-      S.push({ x: lerp(raw[j][0], raw[j + 1][0], f), y: lerp(raw[j][1], raw[j + 1][1], f), z: lerp(raw[j][2], raw[j + 1][2], f), p: l / per });
+      const f = clamp((l - cum[j]) / Math.max(1e-9, cum[j + 1] - cum[j]), 0, 1), gap = !!raw[j + 1].gap;
+      S.push({ x: lerp(raw[j][0], raw[j + 1][0], f), y: lerp(raw[j][1], raw[j + 1][1], f), z: lerp(raw[j][2], raw[j + 1][2], f),
+        p: (lerp(cumP[j], cumP[j + 1], f) - (gap ? 1e-4 * per : 0)) / per, gap });
     }
     let x0 = Infinity, x1 = -Infinity;
     for (const q of S) { x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); }
     const xc = (x0 + x1) / 2;
     for (const q of S) q.x -= xc;
-    return { S, per, T: L / per, xc, span: x1 - x0, L };
+    return { S, per, T: S[S.length - 1].p, xc, span: x1 - x0, L };
   }
-  spanFor(n) { return this.straight ? D3.qLen : (this.G.pre + this.G.post) * (LOOP3 / this.G.loop) + 2 * Math.PI * D3.r * n; }
+  spanFor(n) { return this.straight ? D3.qLen : (this.G.pre + this.G.post) * (LOOP3 / this.G.loop) + 2 * Math.PI * D3.r * n + (this.G.restart ? D3.gap * (n - 1) : 0); }
   build(n, trained) {
     const o = this.o, G = this.G, st = this.straight;
     ++this.token; this.runs = [];
@@ -1133,7 +1158,8 @@ class Stream3D {
     clearEl(this.labs); this.labels = []; this.loopEls = null;
     const P = this.pathFor(this.n);
     this.S = P.S; this.per = P.per; this.T = P.T; this.Lw = P.L;
-    this.Xs = Array.from({ length: this.n + 1 }, (_, k) => 2 * Math.PI * D3.r * k - P.xc);
+    this.Lg = G.restart && !st ? D3.gap : 0; /* Xs: where each loop starts, and the end of the last one */
+    this.Xs = Array.from({ length: this.n + 1 }, (_, k) => (2 * Math.PI * D3.r + this.Lg) * k - (k === this.n ? this.Lg : 0) - P.xc);
     this.pExit = st ? G.total : G.pre + this.n * G.loop;
     const nn = this.n;
     this.unitOf = (p) => (st ? Math.min(4, Math.floor(p / 9) + 1) : p < G.pre ? 0 : p >= G.pre + nn * G.loop ? nn + 1 : Math.min(nn, Math.floor((p - G.pre) / G.loop) + 1));
@@ -1149,6 +1175,17 @@ class Stream3D {
       uniforms: Object.assign({}, common, { uFront: this.mLiq.uniforms.uFront, uEdge: { value: this.col.edge }, uExtraCol: { value: this.col.steer }, uHaloCol: { value: this.col.refuse } }) });
     this.gGlass = this.tubeGeo(curve, segs, D3.rt, 18, () => [0, 0, 0]); /* extra loops get the same glass: it is the same model, run longer */
     this.gLiq = this.tubeGeo(curve, segs, D3.liq, 10, () => [0, 0, 0], true);
+    this.gaps = G.restart && !st ? Array.from({ length: this.n - 1 }, (_, i) => ({ k: i + 1, a: G.pre + (i + 1) * G.loop })) : null;
+    if (this.gaps) for (const geo of [this.gGlass, this.gLiq]) { /* no tube in the gaps: each ring collapses onto its centre */
+      const pos = geo.attributes.position, rad = geo.parameters.radialSegments + 1;
+      for (let i = 0; i <= segs; i++) {
+        if (!this.S[i].gap) continue;
+        let cx = 0, cy = 0, cz = 0;
+        for (let j = 0; j < rad; j++) { cx += pos.getX(i * rad + j); cy += pos.getY(i * rad + j); cz += pos.getZ(i * rad + j); }
+        for (let j = 0; j < rad; j++) pos.setXYZ(i * rad + j, cx / rad, cy / rad, cz / rad);
+      }
+      pos.needsUpdate = true;
+    }
     this.glass = new T3.Mesh(this.gGlass, this.mGlass); this.glass.renderOrder = 2;
     this.liquid = new T3.Mesh(this.gLiq, this.mLiq);
     this.root.add(this.liquid, this.glass);
@@ -1171,6 +1208,7 @@ class Stream3D {
     this.root.add(bulb);
     this.objs = [bulb]; /* objects that move or hide while loops are added */
     if (this.feed) this.bypass3();
+    if (this.gaps) this.restart3();
     if (o.arch) this.arch3();
     this.labels3();
     this.dev = new T3.Group(); this.root.add(this.dev);
@@ -1203,30 +1241,35 @@ class Stream3D {
   compute(P) { return Track.prototype.compute.call(this, P); }
   /* Dory: a pipe forks off the end of the entry stack, runs under the loops, and rises into the start of every later loop */
   bypass3() {
-    const X = this.Xs, n = this.n, y = D3.byY, F = X[0] - 0.62, H0 = X[0] + 0.04, end = X[n - 1], raw = [];
+    /* the copy leaves the main tube where the first stack ends (F), drops to the rail, and the rail runs on to the last
+       riser; each riser curves up out of the rail and into the start of its loop, tangent to both */
+    const X = this.Xs, n = this.n, G = this.G, y = D3.byY, raw = [];
+    if (n < 2) return;
+    const W = G.restart ? this.Lg : 0.62, F = X[0], H0 = F + 0.62, end = X[n - 1] - W;
     const bz = (t, a, b, c, d) => { const u = 1 - t; return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d; };
-    for (let i = 0; i <= 40; i++) { const t = i / 40; raw.push({ x: bz(t, F, F + 0.36, H0 - 0.36, H0), y: bz(t, 0, 0, y, y), z: 0 }); }
+    for (let i = 0; i <= 40; i++) { const t = i / 40; raw.push({ x: bz(t, F, F + 0.34, H0 - 0.34, H0), y: bz(t, 0, 0, y, y), z: 0 }); }
     for (let i = 1; i <= 60; i++) raw.push({ x: H0 + ((end - H0) * i) / 60, y, z: 0 });
     const curve = new PathCurve(raw), segs = raw.length - 1;
-    const gG = this.tubeGeo(curve, segs, D3.byR, 12, () => [0, 0, 0]), gL = this.tubeGeo(curve, segs, D3.byR * 0.7, 8, () => [0, 0, 0], true);
-    this.mByLiq = new T3.ShaderMaterial({ vertexShader: VS3, fragmentShader: FS_LIQ, vertexColors: true,
-      uniforms: Object.assign({}, this.common, { uFront: { value: -1 }, uBands: { value: 6 } }) });
+    const gG = this.tubeGeo(curve, segs, D3.byR, 18, () => [0, 0, 0]), gL = this.tubeGeo(curve, segs, D3.liq, 10, () => [0, 0, 0], true);
+    const liqMat = (bands) => new T3.ShaderMaterial({ vertexShader: VS3, fragmentShader: FS_LIQ, vertexColors: true,
+      uniforms: Object.assign({}, this.common, { uFront: { value: -1 }, uBands: { value: bands } }) });
+    this.mByLiq = liqMat(6);
     const glass = new T3.Mesh(gG, this.mGlass); glass.renderOrder = 2;
     this.root.add(new T3.Mesh(gL, this.mByLiq), glass);
-    this.zoned.push({ geo: gG, radial: 12, ring: (i) => ({ x: raw[i].x, p: -1 }) }, { geo: gL, radial: 8, ring: (i) => ({ x: raw[i].x, p: -1 }) });
-    const elbow = new T3.Mesh(new T3.SphereGeometry(D3.byR * 1.25, 16, 12), this.byGlassMat());
-    elbow.position.set(end, y, 0); elbow.userData = { x: end, p: -1 }; this.root.add(elbow); this.objs.push(elbow);
-    this.byp = { raw, gL, F, H0, end, pF: this.G.pre - (X[0] - F) / this.per, risers: [] };
+    this.zoned.push({ geo: gG, radial: 18, ring: (i) => ({ x: raw[i].x, p: -1 }) }, { geo: gL, radial: 10, ring: (i) => ({ x: raw[i].x, p: -1 }) });
+    this.byp = { raw, gL, end, risers: [] };
     for (let k = 1; k < n; k++) {
-      const x = X[k], g = new T3.Group(), len = -y - D3.rt * 0.55;
-      g.position.set(x, y, 0); g.userData = { x, p: -1 };
-      const tube = new T3.Mesh(new T3.CylinderGeometry(D3.byR, D3.byR, len, 16, 1, true), this.byGlassMat());
-      tube.position.y = len / 2; tube.renderOrder = 2;
-      const lo = new T3.Mesh(new T3.CylinderGeometry(D3.byR * 0.7, D3.byR * 0.7, len / 2, 10), new T3.MeshStandardMaterial({ color: 0x9aa3b2, roughness: 0.4 }));
-      const hi = new T3.Mesh(new T3.CylinderGeometry(D3.byR * 0.7, D3.byR * 0.7, len / 2, 10), new T3.MeshStandardMaterial({ color: 0x9aa3b2, roughness: 0.4 }));
-      lo.geometry.translate(0, len / 4, 0); hi.geometry.translate(0, len / 4, 0); hi.position.y = len / 2;
-      g.add(tube, lo, hi); this.root.add(g); this.objs.push(g);
-      this.byp.risers.push({ k, g, lo, hi, len, p: this.G.pre + k * this.G.loop, mode: "usual" });
+      const A = new T3.Vector3(X[k] - W, y, 0), B = new T3.Vector3(X[k], 0, 0), tb = this.tanAt(G.pre + k * G.loop + 0.05);
+      const A1 = A.clone().add(new T3.Vector3(0.55 * W, 0, 0)), B1 = B.clone().addScaledVector(tb, -0.55 * W);
+      const pts = Array.from({ length: 31 }, (_, i) => { const t = i / 30, u = 1 - t;
+        return A.clone().multiplyScalar(u * u * u).addScaledVector(A1, 3 * u * u * t).addScaledVector(B1, 3 * u * t * t).addScaledVector(B, t * t * t); });
+      const rc = new PathCurve(pts.map((q) => ({ x: q.x, y: q.y, z: q.z })));
+      const rg = this.tubeGeo(rc, 30, D3.byR, 18, () => [0, 0, 0]), rl = this.tubeGeo(rc, 30, D3.liq, 10, () => [0, 0, 0], true), mat = liqMat(2);
+      const g = new T3.Group(); g.userData = { x: X[k], p: -1 };
+      const rglass = new T3.Mesh(rg, this.mGlass); rglass.renderOrder = 2;
+      g.add(new T3.Mesh(rl, mat), rglass); this.root.add(g); this.objs.push(g);
+      const mid = pts[15], midTan = pts[16].clone().sub(pts[14]).normalize();
+      this.byp.risers.push({ k, g, gL: rl, mat, mid, midTan, p: G.pre + k * G.loop, mode: "usual" });
     }
   }
   byGlassMat() { return new T3.MeshStandardMaterial({ color: this.col.edge, transparent: true, opacity: 0.32, roughness: 0.2, depthWrite: false }); }
@@ -1251,8 +1294,6 @@ class Stream3D {
     }
     if (A.exits && !this.straight) this.exits3();
     if (A.moe) this.moe3();
-    if (A.plugs && !this.straight) this.plugs3();
-    if (A.msgs && !this.straight) this.msgs3();
   }
   /* Inkling's mixture of experts: a ring of 16 beads around every layer visit, each bead standing for 8 of the layer's
      128 experts, one of them lit (the token goes to 8). The lit bead is a sketch; it moves between passes because the
@@ -1288,42 +1329,53 @@ class Stream3D {
     this.moeLit.forEach((b, j) => { const f = 1 + 0.9 * Math.exp(-(((b.p - pb) / 0.45) ** 2)); sc.set(f, f, f); m.compose(b.pos, b.q, sc); this.moeMesh.setMatrixAt(j, m); });
     this.moeMesh.instanceMatrix.needsUpdate = true;
   }
-  /* Inkling: every pass restarts from the prelude's state, so the stream of the pass before stops at a plug just before
-     the shortcut rises into the next pass */
-  plugs3() {
-    const G = this.G, mat = new T3.MeshStandardMaterial({ color: this.col.ink, roughness: 0.5 });
-    for (let k = 1; k < this.n; k++) {
-      const p = G.pre + k * G.loop - 0.32, disc = new T3.Mesh(new T3.CylinderGeometry(D3.rt * 1.22, D3.rt * 1.22, 0.045, 30), mat);
-      disc.position.copy(this.ptAt(p)); disc.quaternion.setFromUnitVectors(UP, this.tanAt(p));
-      this.root.add(disc);
+  /* Inkling (G.restart): every loop starts again from the prelude's output, so the tube of each loop but the last ends in
+     a bank, an empty stretch opens before the next loop, and the shortcut from the prelude rises into that loop's start.
+     The only link from one loop to the next is its messages. A loop leaves two stored halves: the summed outputs of its
+     first six layers (complete at the top of the loop, a bead) and of its last six (complete at its end, the bank). Every
+     attention and MLP input of the next loop reads both, mixed with its own weights, through a gate: two threads into
+     each of the next loop's 12 layers, one from each half, lighting up as the stream reaches that layer. */
+  restart3() {
+    const G = this.G, X = this.Xs, ink = this.col.ink, lit = new T3.Color(cssHex("--inkling"));
+    this.msgs = [];
+    const capMat = new T3.MeshStandardMaterial({ color: ink, roughness: 0.5 });
+    const C = (k) => new T3.Vector3(X[k - 1] + Math.PI * D3.r, D3.d, 0); /* the middle of loop k */
+    for (const g of this.gaps) {
+      const k = g.k; /* loop k leaves the halves; loop k + 1 reads them */
+      const end = this.ptAt(g.a - 0.03), tan = this.tanAt(g.a - 0.03);
+      const bank = new T3.Group(); bank.userData = { x: X[k] - this.Lg + 0.05, p: -1 };
+      const disc = new T3.Mesh(new T3.CylinderGeometry(D3.rt * 1.18, D3.rt * 1.18, 0.05, 30), capMat);
+      disc.position.copy(end); disc.quaternion.setFromUnitVectors(UP, tan);
+      const hubB = new T3.Mesh(new T3.SphereGeometry(D3.rt * 0.62, 18, 14), capMat);
+      hubB.position.copy(end).addScaledVector(tan, 0.07);
+      bank.add(disc, hubB); this.root.add(bank); this.objs.push(bank);
+      const pA = g.a - G.loop / 2, top = this.ptAt(pA); /* the first half is complete at the top of the loop */
+      const hubA = new T3.Mesh(new T3.SphereGeometry(D3.rt * 0.5, 18, 14), capMat);
+      hubA.position.set(top.x, top.y + D3.rt + 0.07, top.z);
+      const fan = new T3.Group(); fan.userData = { x: X[k + 1] - 0.15, p: -1 };
+      const stem = new T3.Mesh(new T3.CylinderGeometry(0.012, 0.012, 0.08, 8), capMat); stem.position.set(top.x, top.y + D3.rt + 0.025, top.z);
+      fan.add(hubA, stem);
+      const c = C(k + 1);
+      for (const [hub, src] of [[hubA, this.idxAt(pA)], [hubB, this.idxAt(g.a - 0.03)]]) {
+        for (let j = 0; j < G.loop; j++) {
+          const pt = g.a + j + 0.5, on = this.ptAt(pt), tip = on.clone().lerp(c, 0.17), from = hub.position.clone();
+          const len = from.distanceTo(tip), mat = new T3.MeshBasicMaterial({ color: this.col.ink2, transparent: true, opacity: 0.42, depthWrite: false });
+          const rod = new T3.Mesh(new T3.CylinderGeometry(0.0065, 0.0065, len, 6, 1, true), mat);
+          rod.position.copy(from).lerp(tip, 0.5); rod.quaternion.setFromUnitVectors(UP, tip.clone().sub(from).normalize());
+          fan.add(rod);
+          if (hub === hubB) { const dot = new T3.Mesh(new T3.SphereGeometry(0.028, 10, 8), new T3.MeshBasicMaterial({ color: this.col.ink2 })); dot.position.copy(tip); fan.add(dot); }
+          this.msgs.push({ p: pt, mat, base: this.col.ink2.clone(), lit, bankIdx: src });
+        }
+      }
+      this.root.add(fan); this.objs.push(fan);
     }
   }
-  /* Inkling: the passes talk through gated messages, read from the previous pass into every core sublayer: a dashed
-     bridge from the top of each pass to the top of the next, with a valve (the gate) at its peak */
-  msgYs() { const y0 = 2 * D3.d + D3.rt + 0.06; return { y0, peak: y0 + 0.36 }; }
-  msgs3() {
-    const G = this.G, ink = new T3.MeshStandardMaterial({ color: this.col.ink2, roughness: 0.5 }), { y0, peak } = this.msgYs();
-    const rod = new T3.CylinderGeometry(0.016, 0.016, 1, 8);
-    for (let k = 1; k < this.n; k++) {
-      const a = this.ptAt(G.pre + (k - 0.5) * G.loop), b = this.ptAt(G.pre + (k + 0.5) * G.loop);
-      const P0 = new T3.Vector3(a.x + 0.05, y0, a.z), P2 = new T3.Vector3(b.x - 0.05, y0, b.z), P1 = new T3.Vector3((a.x + b.x) / 2, 2 * peak - y0, (a.z + b.z) / 2);
-      const bz = (t) => P0.clone().multiplyScalar((1 - t) ** 2).addScaledVector(P1, 2 * t * (1 - t)).addScaledVector(P2, t * t);
-      const pts = Array.from({ length: 61 }, (_, i) => bz(i / 60)), cum = [0];
-      for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
-      const L = cum[cum.length - 1], at = (l) => { let i = 1; while (i < cum.length - 1 && cum[i] < l) i++; const f = (l - cum[i - 1]) / Math.max(1e-9, cum[i] - cum[i - 1]); return pts[i - 1].clone().lerp(pts[i], f); };
-      const on = 0.07, off = 0.045, gap = 0.13; /* no dashes under the valve */
-      for (let l = 0.02; l + on < L - 0.06; l += on + off) {
-        if (Math.abs(l + on / 2 - L / 2) < gap) continue;
-        const u = at(l), v = at(l + on), d = new T3.Mesh(rod, ink);
-        d.position.copy(u).lerp(v, 0.5); d.scale.set(1, u.distanceTo(v), 1); d.quaternion.setFromUnitVectors(UP, v.clone().sub(u).normalize());
-        this.root.add(d);
-      }
-      const tip = new T3.Mesh(new T3.ConeGeometry(0.042, 0.09, 14), ink), e = at(L - 0.04), e0 = at(L - 0.12);
-      tip.position.copy(e); tip.quaternion.setFromUnitVectors(UP, e.clone().sub(e0).normalize()); this.root.add(tip);
-      const mid = at(L / 2), wheel = new T3.Mesh(new T3.TorusGeometry(0.075, 0.016, 8, 28), ink); wheel.position.copy(mid);
-      const bar = new T3.Mesh(new T3.BoxGeometry(0.15, 0.016, 0.016), ink); bar.position.copy(mid);
-      const bar2 = bar.clone(); bar2.rotation.z = Math.PI / 2;
-      this.root.add(wheel, bar, bar2);
+  /* a thread brightens while the stream passes its layer */
+  msgPulse(pb) {
+    if (!this.msgs) return;
+    for (const m of this.msgs) {
+      const f = pb == null ? 0 : Math.exp(-(((m.p - pb) / 0.55) ** 2));
+      m.mat.opacity = (this.o.meaning ? 0.55 : 0.42) + (this.o.meaning ? 0.45 : 0.58) * f; m.mat.color.copy(m.base).lerp(m.lit, f);
     }
   }
   /* Ouro: after every loop an exit gate can stop and send the stream to the LM head (trained that way; we always run
@@ -1367,7 +1419,6 @@ class Stream3D {
   topY() {
     const G = this.G, st = this.straight, d = D3.d;
     let y = (st ? 0 : 2 * d) + D3.rt;
-    if (!st && this.o.arch && this.o.arch.msgs) y = this.msgYs().peak + 0.08;
     for (const t of (this.o.types || []).filter((t) => t !== "erase")) {
       const ys = st ? 0 : d * (1 - Math.cos((2 * Math.PI * G.site[t]) / G.loop));
       y = Math.max(y, this.dropTop(ys) + 0.33);
@@ -1385,12 +1436,11 @@ class Stream3D {
     }
     const X = this.Xs, per = this.per;
     const NM = G.names || ["entry stack", "exit stack", "looped stack"];
-    this.label(NM[2], V((X[0] + X[this.n]) / 2, top), "s3-small", { mid: true });
+    this.label(G.restart ? `core, run ${this.n} times` : NM[2], V((X[0] + X[this.n]) / 2, top), "s3-small", { mid: true });
     if (G.stacks && (mini || !this.narrow)) {
       this.label(NM[0], V(X[0] - (G.pre * per) * 0.62, mini ? -0.52 : -0.4), "s3-small", { p: G.pre / 2 });
       this.label(NM[1], V(X[this.n] + (G.post * per) * 0.6, mini ? -0.52 : -0.4), "s3-small", { p: this.T - G.post / 2 });
     }
-    if (o.arch && o.arch.msgs && this.n > 1) this.label("messages", V(X[this.n - 1] + Math.PI * D3.r + 0.62, this.msgYs().peak - 0.12), "s3-small");
     if (o.arch && o.arch.exits) this.label("exit gates", V((X[1] + X[this.n]) / 2, this.exitDepth(1) - 0.2), "s3-small");
     if (mini && o.arch && !G.stacks) { /* Ouro and Nanbeige: the two ends of the tube */
       this.label("embedding", V(this.S[0].x - 0.05, -0.46), "s3-small");
@@ -1408,7 +1458,7 @@ class Stream3D {
       const top = this.topY() + (mini ? 0.36 : 0.44); /* the "looped stack" line */
       if (this.straight) { if (!mini) pts.push(V(S[0].x, -0.36), V(S[S.length - 1].x, -0.36), V(0, top)); else pts.push(V(0, -0.66)); }
       else {
-        const x0 = S[0].x + G.pre * (LOOP3 / G.loop), xe = x0 + 2 * Math.PI * D3.r * nF;
+        const x0 = S[0].x + G.pre * (LOOP3 / G.loop), xe = x0 + 2 * Math.PI * D3.r * nF + (G.restart ? D3.gap * (nF - 1) : 0);
         pts.push(V((x0 + xe) / 2, top));
         if (G.stacks) pts.push(V(S[0].x + 0.3, mini ? -0.6 : -0.5), V(S[S.length - 1].x - 0.3, mini ? -0.6 : -0.5));
         if (this.feed) pts.push(V(x0 - 0.7, D3.byY - D3.byR - 0.06), V(xe, D3.byY - D3.byR - 0.06));
@@ -1483,12 +1533,20 @@ class Stream3D {
       for (let v = 0; v < bc.length; v += 3) { bc[v] = cc[0]; bc[v + 1] = cc[1]; bc[v + 2] = cc[2]; }
       this.byp.gL.attributes.color.needsUpdate = true;
       const fe = P.feed || {}, ch = new Set(fe.style && fe.style !== "usual" ? fe.loops || [] : []);
+      const fl = RGB.flow.map((v) => v / 255);
       for (const r of this.byp.risers) {
         r.mode = ch.has(r.k + 1) ? fe.style : "usual";
-        r.lo.material.color.setRGB(...cc);
-        if (r.mode === "usual") r.hi.material.color.setRGB(...cc); else r.hi.material.color.setRGB(RGB.flow[0] / 255, RGB.flow[1] / 255, RGB.flow[2] / 255);
+        const a = r.gL.attributes.color.array, ring = 11; /* 10 radial segments + 1 */
+        for (let i = 0; i <= 30; i++) { const c = r.mode !== "usual" && i > 15 ? fl : cc; for (let j = 0; j < ring; j++) { const v = 3 * (i * ring + j); a[v] = c[0]; a[v + 1] = c[1]; a[v + 2] = c[2]; } }
+        r.gL.attributes.color.needsUpdate = true;
       }
     }
+    /* Inkling's messages carry what the loop before held when it ended: each thread takes its bank's colour */
+    if (this.msgs && this.o.meaning) for (const mg of this.msgs) {
+      const k = mg.bankIdx, c = new T3.Color(this.C3[3 * k], this.C3[3 * k + 1], this.C3[3 * k + 2]);
+      mg.lit = c.clone(); mg.base = c.clone().lerp(this.col.ink2, 0.35);
+    }
+    this.msgPulse(null);
   }
   /* filters for erased loops, droppers for added vectors, devices on the shortcut */
   devices() {
@@ -1543,15 +1601,15 @@ class Stream3D {
     if (this.byp) {
       for (const r of this.byp.risers) {
         if (r.mode === "usual") continue;
-        const yy = r.len / 2, at = new T3.Vector3(r.g.position.x, D3.byY + yy, 0);
+        const at = r.mid.clone();
         if (r.mode === "cut") {
-          const capM = new T3.Mesh(new T3.CylinderGeometry(D3.byR * 1.9, D3.byR * 1.9, 0.05, 24), new T3.MeshStandardMaterial({ color: this.col.ink, roughness: 0.5 }));
-          capM.position.copy(at); this.dev.add(capM); this.devs.push({ g: capM, base: at, lift: 0.5 });
+          const capM = new T3.Mesh(new T3.CylinderGeometry(D3.byR * 1.22, D3.byR * 1.22, 0.05, 24), new T3.MeshStandardMaterial({ color: this.col.ink, roughness: 0.5 }));
+          capM.quaternion.setFromUnitVectors(UP, r.midTan); capM.position.copy(at); this.dev.add(capM); this.devs.push({ g: capM, base: at, lift: 0.5 });
         } else {
-          const g = new T3.Group(), R = D3.byR * 2.4;
+          const g = new T3.Group(), R = D3.byR * 1.9;
           const disc = new T3.Mesh(new T3.CircleGeometry(R, 32), new T3.MeshBasicMaterial({ map: filterTex(), transparent: true, side: T3.DoubleSide, depthWrite: false, color: this.col.ink2 }));
           const frame = new T3.Mesh(new T3.TorusGeometry(R, 0.016, 8, 36), new T3.MeshStandardMaterial({ color: this.col.ink2, roughness: 0.45 }));
-          g.add(disc, frame); g.quaternion.setFromUnitVectors(ZA, UP); g.position.copy(at); disc.renderOrder = 3;
+          g.add(disc, frame); g.quaternion.setFromUnitVectors(ZA, r.midTan); g.position.copy(at); disc.renderOrder = 3;
           this.dev.add(g); this.devs.push({ g, base: at, lift: 0.5 });
         }
       }
@@ -1591,6 +1649,7 @@ class Stream3D {
     if (live && p > 0 && p < this.T) this.placeBead(p); else this.bead.visible = false;
     this.bulb.liq.visible = p >= this.T - 0.2;
     if (this.byp) this.fillBypass(p);
+    this.msgPulse(live && p < this.T ? p : null);
     for (const f of this.filters || []) {
       const k = clamp((p - f.p) / 1.2, 0, 1) * f.level;
       f.disc.material.color.copy(f.baseCol).lerp(f.caught, 0.95 * k);
@@ -1607,12 +1666,11 @@ class Stream3D {
   }
   fillBypass(p) {
     const B = this.byp, G = this.G, nn = this.n;
-    const idx = p <= B.pF ? -1 : p < G.pre ? (40 * (p - B.pF)) / (G.pre - B.pF) : 40 + (60 * (p - G.pre)) / Math.max(1, (nn - 1) * G.loop);
-    this.mByLiq.uniforms.uFront.value = idx < 0 ? -1 : Math.min(1, idx / 100) + 1e-6;
+    const lead = Math.min(4, 0.3 * G.loop), fr = clamp((p - G.pre) / Math.max(1, (nn - 1) * G.loop - lead), 0, 1);
+    this.mByLiq.uniforms.uFront.value = p <= G.pre ? -1 : fr + 1e-6;
     for (const r of B.risers) {
-      const f = clamp((p - (r.p - 4)) / 4, 0, 1), lo = clamp(f * 2, 0, 1), hi = clamp(f * 2 - 1, 0, 1);
-      r.lo.visible = lo > 0.01; r.lo.scale.y = Math.max(0.01, lo);
-      r.hi.visible = hi > 0.01 && r.mode !== "cut"; r.hi.scale.y = Math.max(0.01, hi);
+      const f = clamp((p - (r.p - lead)) / lead, 0, 1), cap = r.mode === "cut" ? 0.5 : 1;
+      r.mat.uniforms.uFront.value = f <= 0 ? -1 : Math.min(f, cap) + 1e-6;
     }
   }
   dropAt(dp, p, live) {
@@ -1666,12 +1724,12 @@ class Stream3D {
     this.show({});
     if (RM) return;
     const t0 = performance.now(), ms = this.T * this.per * MSU; /* the cards' bead moves at the same speed as every run */
-    const f = (now) => { const p = (((now - t0) / ms) % 1) * this.T; this.placeBead(p); this.moePulse(p); this.dirty = true; return true; };
+    const f = (now) => { const p = (((now - t0) / ms) % 1) * this.T; this.placeBead(p); this.moePulse(p); this.msgPulse(p); this.dirty = true; return true; };
     f.visOnly = true; this.runs.push(f); glKick();
   }
   /* add loops in place: the run with fromN loops grows into this one, or shrinks back with reverse */
   morph(fromN, { reverse = false, dur = 1300, onDone } = {}) {
-    const tok = ++this.token, xs = this.Xs[fromN], dX = this.Xs[this.n] - xs, pX = this.pExit;
+    const tok = ++this.token, xs = this.Xs[fromN] - (fromN < this.n ? this.Lg : 0), dX = this.Xs[this.n] - xs, pX = this.pExit; /* xs: where loop fromN ends */
     const zoneOf = (x, p) => (p >= pX - 1e-6 ? 2 : x > xs + 1e-3 ? 1 : 0), zoneObj = (x, p) => (p >= pX - 1e-6 ? 2 : x > xs - 1e-3 ? 1 : 0);
     for (const z of this.zoned) {
       const a = z.geo.attributes.aZone.array, rings = a.length / (z.radial + 1);
@@ -1777,6 +1835,9 @@ class Stream3D {
     if (this.o.arch && this.o.arch.ticks === "sandwich" && !this.o.mini) items.push(
       it(`<svg class="sw-svg wide" viewBox="0 0 30 16" aria-hidden="true"><rect x=".5" y="4" width="29" height="8" rx="4" style="fill:var(--panel-2);stroke:var(--ink-3)" stroke-width=".8"/><ellipse cx="10" cy="8" rx="1.4" ry="4.3" style="fill:none;stroke:var(--ink-2)" stroke-width=".8"/><ellipse cx="13" cy="8" rx="1.4" ry="4.3" style="fill:none;stroke:var(--ink-2)" stroke-width=".8"/><ellipse cx="20" cy="8" rx="1.4" ry="4.3" style="fill:none;stroke:var(--ink-2)" stroke-width=".8"/><ellipse cx="23" cy="8" rx="1.4" ry="4.3" style="fill:none;stroke:var(--ink-2)" stroke-width=".8"/></svg>`, "double rings: a norm on what each layer reads and on what it writes"),
       it(`<svg class="sw-svg wide" viewBox="0 0 30 16" aria-hidden="true"><rect x=".5" y="4" width="29" height="8" rx="4" style="fill:var(--panel-2);stroke:var(--ink-3)" stroke-width=".8"/><ellipse cx="15" cy="8" rx="2.1" ry="6.6" style="fill:none;stroke:var(--ink)" stroke-width="2.4"/></svg>`, "collar: the shared norm between loops"));
+    if (this.msgs && this.msgs.length) items.push(
+      it(`<svg class="sw-svg wide" viewBox="0 0 30 16" aria-hidden="true"><path d="M3 13L27 3M3 13L28 8M3 13L25 14M11 2L27 3M11 2L28 8M11 2L25 14" style="fill:none;stroke:var(--ink-2)" stroke-width=".8"/><circle cx="3" cy="13" r="2.2" style="fill:var(--ink)"/><circle cx="11" cy="2" r="1.8" style="fill:var(--ink)"/></svg>`,
+        "messages: each layer of a loop reads the two halves of the loop before (the dark beads), in that loop's colour; every loop starts from the prelude's output"));
     clearEl(this.leg);
     this.leg.append(...items);
   }
@@ -1935,7 +1996,7 @@ function kickFind(m, unit, eps, every = false) {
       onDone: () => { bd.set(to, { animate: false }); last = i; if (then) setTimeout(() => auto && then(), 1600); } });
     if (st.loops > tr.n) { /* the same model, run for 2 more loops: the filters drop in while the tube grows */
       tr.build(st.loops, 2); tr.apply(st.plan); tr.morph(2, { onDone: () => go(true) });
-      if (!RM) tr.insertDevices();
+      if (!RM && tr.insertDevices) tr.insertDevices();
     }
     else if (st.loops < tr.n) { tr.apply({ peak }); tr.morph(st.loops, { reverse: true, dur: 800, onDone: () => { tr.build(st.loops, 2); go(); } }); }
     else go(false);
@@ -1962,13 +2023,13 @@ function kickFind(m, unit, eps, every = false) {
     ["ouro", "Ouro-1.4B-Thinking", "ByteDance · 1.4B · 24 layers × 4 loops", { ticks: "sandwich", gates: true, exits: true },
       [["each layer", "h \\leftarrow h + \\mathrm{N}_{\\text{out}}\\big(f(\\mathrm{N}_{\\text{in}}(h))\\big)"], ["between loops", "h \\leftarrow \\mathrm{N}(h)"], ["exit gate", "\\lambda_t = \\sigma(w^{\\top} h_t)"]],
       "Sandwich norms: every layer normalises what it reads and also what it writes (the double rings), so each write passes through a learned gain before it reaches the stream. The shared final norm runs after every loop (the collars). After each loop an exit gate (the valves) can stop and send the stream down its own route to the LM head; training scores every loop's prediction, weighted by the gate. We always run all four loops, so the dashed routes stay empty, and after loop 4 the stream goes straight into the head."],
+    ["inkvar", "Inkling (variable depth)", "Thinking Machines · 26B MoE · 6 in, 12 × 1 to 3 loops, 6 out", { moe: true },
+      [["each layer", "b \\leftarrow b + f\\big(\\mathrm{N}(\\textstyle\\sum_j a_j\\, \\mathrm{N}(b_j))\\big)"], ["MoE layer", "f(x) = \\textstyle\\sum_{e \\in \\mathrm{top}\\,8} g_e(x)\\, E_e(x)"],
+        ["loop start", "b \\leftarrow b_{\\text{prelude}}"], ["message", "m = c_1 \\mathrm{N}(B^{k-1}_1) + c_2 \\mathrm{N}(B^{k-1}_2),\\ c = \\mathrm{softmax}_j\\, q \\cdot \\mathrm{N}(B^{k-1}_j)"], ["gate", "x \\leftarrow (1 - \\tanh \\phi) \\odot x + \\tanh \\gamma \\odot m"]],
+      "A looped mixture of experts: each layer's MLP has 128 experts, and a router sends every token to 8 of them (3.4B of 26B weights active; each bead on the rings stands for 8 experts). There is no single residual stream: every sublayer reads a learned mix a of the finished 6-layer blocks b_j and the running block b. The prelude runs once. The core then runs up to three times (this checkpoint was trained to answer after one, two or three loops; we run three), and each loop starts again from the prelude's output (the shortcut), not from the loop before, with its own memory of earlier tokens. The loops are linked only by messages (the threads). A loop leaves two halves: B₁, the summed outputs of its first six layers (complete at the top of the loop, the bead), and B₂, those of its last six (complete at its end, the bank). Every attention input (query, key and value separately) and MLP input x of the next loop reads both: a softmax over the two, scored by that input's own learned query q against the token's state, gives the mix m, and a gate computed from x and m (φ and γ) decides how much of m to blend in. The queries and gates belong to the layer, so loops 2 and 3 share them. The message only changes what the layer reads; the layer's output still goes into its own loop's stream, which ends at its bank. The coda continues from the last loop alone. The router sees a new state on each loop, so a layer can pick other experts each time; which bead lights is a sketch. Its makers call the loops passes. This is the variable-depth research checkpoint of Inkling 2 Mini; the released model has the same layers but always runs three loops, and its results are in the appendix. Both run with their weights as shipped (4-bit experts) and sample at temperature 1.0; the other models sample at 0.6."],
     ["qwen", "Qwen3-8B", "Alibaba · 8B · 36 layers, once", { ticks: "pre" },
       [["each layer", "h \\leftarrow h + f(\\mathrm{N}(h))"]],
       "The dense control: 36 different layers, each run once, with the same pre-norm layers as Nanbeige. We cut it into four quarters of 9 layers to line it up with a four-loop model."],
-    ["inkling", "Inkling 2 Mini", "Thinking Machines · 26B MoE · 6 in, 12 × 3 passes, 6 out", { moe: true, plugs: true, msgs: true },
-      [["each layer", "b \\leftarrow b + f\\big(\\mathrm{N}(\\textstyle\\sum_j a_j\\, \\mathrm{N}(b_j))\\big)"], ["MoE layer", "f(x) = \\textstyle\\sum_{e \\in \\mathrm{top}\\,8} g_e(x)\\, E_e(x)"],
-        ["pass start", "b \\leftarrow b_{\\text{prelude}}"], ["message", "u \\leftarrow (1 - \\tanh \\phi) \\odot u + \\tanh \\gamma \\odot m"]],
-      "A looped mixture of experts: each layer's MLP has 128 experts, and a router sends every token to 8 of them (3.4B of 26B weights active; the rings, where each bead stands for 8 experts). There is no single residual stream: every sublayer reads a learned mix a of the finished 6-layer blocks b_j and the running block b. The prelude runs once, the core three times, the coda once. Each pass restarts from the prelude's state (the shortcut; the plug is where the pass before stops) and hears that pass only through gated messages m blended into every core sublayer's input u (the bridges). The router sees a new state on each pass, so a layer can pick other experts each time; which bead lights is a sketch. Its results are not in the figures yet."],
   ];
   for (const [m, name, spec, arch, eqs, desc] of info) {
     const box = h("div", { class: "trackbox mini" });
@@ -1978,7 +2039,7 @@ function kickFind(m, unit, eps, every = false) {
       h("div", { class: "spec" }, spec), box, eq, h("p", {}, desc));
     $("model-cards").append(card);
     const t = new Track3(box, { model: m, loops: MODELS[m].loops, mini: true, meaning: null, arch,
-      label: `${name}: ${m === "qwen" ? "one straight pass" : arch.msgs ? `${MODELS[m].loops} passes, each restarting from the prelude and reading the pass before through gated messages; 8 of 128 experts per layer` : `${MODELS[m].loops} loops`}${arch.reinject ? ", input re-added before every loop" : arch.gates ? ", a shared norm between loops" : ""}` });
+      label: `${name}: ${m === "qwen" ? "one straight pass" : m === "inkvar" ? `${MODELS[m].loops} loops, each starting again from the prelude's output; every layer of a loop reads the finished loop before it through gated messages; 8 of 128 experts per layer` : `${MODELS[m].loops} loops`}${arch.reinject ? ", input re-added before every loop" : arch.gates ? ", a shared norm between loops" : ""}` });
     t.idle();
   }
   /* key to the marks on the cards */
@@ -1990,13 +2051,13 @@ function kickFind(m, unit, eps, every = false) {
     [(v) => { tube(v); for (const x of [8, 17, 26]) for (const dx of [-1.3, 1.3]) ring(v, x + dx, 4.3, "var(--ink-2)", 0.8); }, "double ring: reads and writes are normalised"],
     [(v) => { tube(v); for (const x of [8, 17, 26]) ring(v, x, 5.6, "var(--ink)", 1.1); }, "dark ring: the stream itself is renormalised"],
     [(v) => { tube(v); ring(v, 17, 6.6, "var(--ink)", 2.6); }, "collar: a norm between loops"],
-    [(v) => { s("path", { d: "M1 4H33M5 4C9 4 8 13 12 13H26V5", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.2 }, v); }, "shortcut: the first stack's output, added back each loop (Dory) or restarting each pass (Inkling)"],
+    [(v) => { s("path", { d: "M1 4H33M5 4C9 4 8 13 12 13H26V5", fill: "none", stroke: "var(--ink-3)", "stroke-width": 2.2 }, v); }, "shortcut: the first stack's output, added back before each loop (Dory) or the start of every loop (Inkling)"],
     [(v) => { s("rect", { x: 0.5, y: 0.5, width: 26, height: 5, rx: 2.5, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 0.8 }, v); s("circle", { cx: 30, cy: 3, r: 3, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 1 }, v);
       s("line", { x1: 9, x2: 9, y1: 5.5, y2: 7.2, stroke: "var(--ink-2)", "stroke-width": 1.4 }, v); s("circle", { cx: 9, cy: 9, r: 1.9, fill: "none", stroke: "var(--ink-2)", "stroke-width": 1 }, v);
       s("path", { d: "M9 11.2V14.5H30V6.5", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.1, "stroke-dasharray": "2 1.4" }, v); }, "exit gate: a valve that can send a loop's output on its own route to the LM head"],
     [(v) => { tube(v); for (let k = 0; k < 8; k++) { const a = (2 * Math.PI * k) / 8; s("circle", { cx: 17 + 3.2 * Math.cos(a), cy: 8 + 6.6 * Math.sin(a), r: k === 2 ? 1.7 : 1.05, fill: k === 2 ? "var(--inkling)" : "var(--ink-3)", "fill-opacity": k === 2 ? 1 : 0.6 }, v); } }, "expert ring: each bead is 8 of a layer's 128 experts; the lit one is where the token goes"],
-    [(v) => { tube(v); s("rect", { x: 15.6, y: 1.5, width: 2.8, height: 13, rx: 1.2, fill: "var(--ink)" }, v); }, "plug: the stream stops here, and the next pass restarts from the prelude"],
-    [(v) => { s("path", { d: "M3 14Q17 -4 31 14", fill: "none", stroke: "var(--ink-2)", "stroke-width": 1.2, "stroke-dasharray": "2.4 1.6" }, v); s("circle", { cx: 17, cy: 5, r: 2.6, fill: "var(--panel)", stroke: "var(--ink-2)", "stroke-width": 1 }, v); }, "bridge: a gated message from one pass into the next"],
+    [(v) => { s("rect", { x: 0.5, y: 4, width: 16, height: 8, rx: 4, fill: "var(--panel-2)", stroke: "var(--ink-3)", "stroke-width": 0.8 }, v); s("rect", { x: 15.2, y: 1.8, width: 2.6, height: 12.4, rx: 1.1, fill: "var(--ink)" }, v); s("circle", { cx: 21, cy: 8, r: 2.6, fill: "var(--ink)" }, v); }, "bank: a loop's stream ends here (its second half is stored); the next loop starts from the prelude's output"],
+    [(v) => { for (const [hx, hy] of [[3, 13], [11, 2.5]]) for (const [x, y] of [[33, 3], [32, 8], [30, 14]]) s("line", { x1: hx, y1: hy, x2: x, y2: y, stroke: "var(--ink-2)", "stroke-width": 0.8, opacity: 0.7 }, v); s("circle", { cx: 3, cy: 13, r: 2.4, fill: "var(--ink)" }, v); s("circle", { cx: 11, cy: 2.5, r: 2, fill: "var(--ink)" }, v); }, "messages: every layer of the next loop reads the loop's two halves (the bead at its top and the bank), through a gate"],
   ];
   for (const [draw, text] of items) key.append(h("span", {}, sw(draw), text));
   const def = h("p", { class: "norm-def" });
@@ -2015,7 +2076,7 @@ function kickFind(m, unit, eps, every = false) {
   const SAFE = new Set(EX.safe);
   const dots = new Split($("sb-dots"), { marks: EX.safe, pickAll: true, onPick: (i) => { st.ex = i; exChips.forEach((b, j) => b.setAttribute("aria-pressed", String(exIds[j] === i))); showEx(); },
     tipFn: (i, v) => (v == null ? `Prompt ${i + 1}: no data` : `${SAFE.has(i) ? `<b>“${escHtml(EX.all[i])}”</b><br>` : `Prompt ${i + 1}<br>`}refused in ${Math.round(9 * v)} of its 9 samples<br><i>click to ${SAFE.has(i) ? "read the reply" : "see the prompt"}</i>`) });
-  chips($("sb-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })),
+  chips($("sb-models"), ORDER7.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })),
     { value: st.m, swatch: true, onChange: (m) => { st.m = m; st.sel = new Set([1]); build(); } });
   chips($("sb-mode"), [{ id: "erase", label: "Erase" }, { id: "push", label: "Add" }], { value: "erase", onChange: (v) => { st.mode = v; update(true); } });
   /* one reply per setting for a few prompts (a sample that agrees with the prompt's majority verdict) */
@@ -2025,6 +2086,7 @@ function kickFind(m, unit, eps, every = false) {
     const sel = [...st.sel].sort(), r = sel.length ? rec(st.m, st.mode, sel) : grid(st.m).clean;
     const where = sel.length ? `${st.mode === "erase" ? "erased" : "added"} on ${sel.map((k) => unitName(st.m, k)).join(" + ")}` : "no steering";
     dots.select(st.ex);
+    if (!r) { ++exSeq; clearEl($("sb-ex")); $("sb-ex").append(h("p", { class: "note" }, `No replies: ${MODELS[st.m].label} was not run with the addition on ${sel.map((k) => unitName(st.m, k)).join(" + ")}.`)); return; }
     showRefusalReply($("sb-ex"), { run: st.m, cand: r.cand, i: st.ex, v: r.dots ? r.dots[st.ex] : null, who: `${MODELS[st.m].label} · ${where}`, seq: ++exSeq, cur: () => exSeq });
   }
   chips($("sb-presets"), [{ id: "first", label: "First" }, { id: "last", label: "Last" }, { id: "all", label: "All" }, { id: "none", label: "None" }],
@@ -2036,12 +2098,12 @@ function kickFind(m, unit, eps, every = false) {
   function syncUnits() { units.forEach((b, i) => b.setAttribute("aria-pressed", String(st.sel.has(i + 1)))); }
   function build() {
     const M = MODELS[st.m], g = grid(st.m);
-    tr = new Track3($("sb-track"), { model: st.m, loops: g.units, trained: st.m === "dory4" ? 2 : g.units, meaning: MEAN.refusal, types: ["erase", "push"], label: `${M.full}: one harmful prompt through the model` });
+    tr = new Track3($("sb-track"), { model: st.m, loops: g.units, trained: trainedLoops(st.m, g.units), meaning: MEAN.refusal, types: ["erase", "push"], label: `${M.full}: one harmful prompt through the model` });
     $("sb-units-label").textContent = `Steer on these ${M.straight ? "quarters" : "loops"}`;
     const seg = $("sb-units"); seg.innerHTML = "";
     units = Array.from({ length: g.units }, (_, i) => {
       const k = i + 1;
-      const small = M.straight ? `layers ${QLAYERS[i]}` : (st.m === "dory4" && k > 2 ? "extra loop" : `${M.layers} ${M.ramps ? "sublayers" : "layers"}`);
+      const small = M.straight ? `layers ${QLAYERS[i]}` : (k > trainedLoops(st.m, g.units) ? "extra loop" : `${M.layers} ${M.ramps ? "sublayers" : "layers"}`);
       const b = h("button", { type: "button", "aria-pressed": "false" }, h("span", {}, unitName(st.m, k)), h("small", {}, small));
       b.addEventListener("click", () => { st.sel.has(k) ? st.sel.delete(k) : st.sel.add(k); syncUnits(); update(true); });
       seg.append(b);
@@ -2052,6 +2114,15 @@ function kickFind(m, unit, eps, every = false) {
   function update(animate) {
     const M = MODELS[st.m], g = grid(st.m), sel = [...st.sel].sort();
     const r = rec(st.m, st.mode, sel), all = g[st.mode][allKey(g.units)], c = g.clean;
+    if (!r) { /* a loop subset this model was not run with (Inkling: loops 1 + 3 and 2 + 3; most subsets of its 5-loop run) */
+      tr.show({ peak: c.r / 100 });
+      board.set(null, { title: `${M.label} · <b>refusal rate</b>`, right: `unsteered ${pct(c.r)}`, sub: "not run", subRight: "" });
+      dots.set(null, [RGB.flow, RGB.red], "not run");
+      showEx();
+      const have = Object.keys(g[st.mode]).filter((k) => g[st.mode][k]).map((k) => k.split("").map((x) => unitName(st.m, +x)).join(" + "));
+      $("sb-cap").textContent = `${M.full}: ${st.mode === "erase" ? "erasing" : "the addition"} was not run on ${sel.map((k) => unitName(st.m, k)).join(" + ")}. It was run on ${andList(have)}.`;
+      return;
+    }
     const done = () => {
       board.set(r.r, { title: `${M.label} · <b>refusal rate</b>`, right: `unsteered ${pct(c.r)}`,
         sub: `95% CI ${pct(r.lo)}–${pct(r.hi)}`, subRight: `${r.n} prompts` });
@@ -2066,17 +2137,20 @@ function kickFind(m, unit, eps, every = false) {
     const late = M.straight && sel.length === 1 && (sel[0] === "4" || sel[0] === 4) ? " Steering Qwen's last quarter barely moves it: the answer is already set." : "";
     $("sb-cap").textContent = `${M.full}, ${where}: ${pct(r.r, 1)} refusal.${kept}${late}` + (st.mode === "push" ? ` Add: ${g.push_note}.` : "") +
       (st.m === "dory4" ? " Dory was trained with 2 loops; this run uses 4." : "") +
-      (st.mode === "push" && (st.m === "ouro" || st.m === "nanbeige") ? " In Ouro and Nanbeige an addition on one loop is weak wherever it lands; additions add up across loops." : "");
+      (st.m === "inkvar5" ? " Inkling was trained to run 1 to 3 loops; this run uses 5." : "") +
+      (st.mode === "push" && ["ouro", "nanbeige"].includes(st.m) ? " In Ouro and Nanbeige an addition on one loop is weak wherever it lands; additions add up across loops." : "") +
+      (st.m.startsWith("ink") ? " Inkling samples at temperature 1.0." : "") +
+      (g.closed && st.mode === "erase" && g.closed[sel.join("")] ? ` With the prelude erased as well, which every loop restarts from: ${pct(g.closed[sel.join("")].r, 1)}.` : "");
   }
   build();
-  SOURCES.push("Switchboard: data/runs/<model>/generations/grid_test{,_b} (Dory ×4: grid_test4{,_b}), one file per loop subset");
+  SOURCES.push("Switchboard: data/runs/<model>/generations/grid_test{,_b} (Dory ×4: grid_test4{,_b}), one file per loop subset; Inkling (variable-depth checkpoint): grid_test, grid_test_act (5 loops: grid_test5, grid_test5_act), ablate_hh_eoi_t2.l11_apply*, actadd_hh_eoi_t2.l11_c-0.5_rel1_apply* (apply-2-…: the prelude erased too)");
 
   /* looped vs dense: where in the forward pass one stretch of erasing does the most */
   contrastChart($("contrast-chart"));
-  for (const m of ORDER5) {
+  for (const m of ORDER7) {
     const g = grid(m), box = h("div");
     $("single-multiples").append(box);
-    barChart(box, { title: MODELS[m].label, subtitle: m === "dory4" ? "trained with 2 loops" : (m === "qwen" ? "quarters of 9 layers" : null),
+    barChart(box, { title: MODELS[m].label, subtitle: runNote(m) ? `${runNote(m)} loops` : (m === "qwen" ? "quarters of 9 layers" : null), padR: g.units >= 5 ? 60 : 46,
       items: Array.from({ length: g.units }, (_, i) => {
         const r = g.erase[String(i + 1)];
         return { label: unitShort(m, i + 1), value: r.r, lo: r.lo, hi: r.hi, color: MODELS[m].color,
@@ -2086,6 +2160,7 @@ function kickFind(m, unit, eps, every = false) {
   }
   $("d4-123").textContent = pct(grid("dory4").erase["123"].r);
   $("d4-4").textContent = pct(grid("dory4").erase["4"].r);
+  { const gv = grid("inkvar"); $("ink-clean").textContent = pct(gv.clean.r); $("ink-l3").textContent = pct(gv.erase["3"].r); $("ink-all").textContent = pct(gv.erase["123"].r); }
 
   /* flip the sign: add the refusal direction on harmless prompts; every quarter of Qwen */
   const P = D.plus_harmless;
@@ -2096,6 +2171,7 @@ function kickFind(m, unit, eps, every = false) {
     dory4: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["l3", "L3", "loop 3"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
     nanbeige: [["first", "L1", "loop 1"], ["last", "L2", "loop 2"], ["all", "all", "both loops"]],
     ouro: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["l3", "L3", "loop 3"], ["last", "L4", "loop 4"], ["all", "all", "every loop"]],
+    inkvar: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["last", "L3", "loop 3"], ["all", "all", "every loop"]],
     qwen: [["first", "Q1", "Q1"], ["q2", "Q2", "Q2"], ["q3", "Q3", "Q3"], ["last", "Q4", "Q4"], ["all", "all", "all four quarters"]],
   };
   /* each model at the strength tuned for refusal vs coherence (E15) where those runs exist, else E14's 4x */
@@ -2112,16 +2188,17 @@ function kickFind(m, unit, eps, every = false) {
   for (const [m, us] of Object.entries(plusUnits)) {
     const b = h("div", { class: m === "qwen" ? "span2" : null }); pbox.append(b);
     const T = TP(m), every = m === "qwen" ? "all four quarters" : "every loop";
-    const sub = [m === "dory4" ? "trained with 2" : m === "qwen" ? "start of each quarter" : null, T.mult ? `strength ${T.mult}×` : null].filter(Boolean).join(" · ");
+    const sub = [runNote(m) || (m === "qwen" ? "start of each quarter" : null), T.mult ? `strength ${T.mult}×${T.untuned ? ", not tuned" : ""}` : null].filter(Boolean).join(" · ");
     /* Qwen spans two columns on wide screens; on a phone (one column) a 470-wide panel would shrink to half size */
     barChart(b, { title: MODELS[m].label, subtitle: sub || null, w: m === "qwen" ? (window.innerWidth < 640 ? 300 : 470) : 230, max: PMAX, padR: us.length >= 5 && m !== "qwen" ? 60 : 46,
       items: us.map(([k, lab, name]) => ({ label: lab, value: T[k], color: MODELS[m].color, faded: k === "all",
         tip: T[k] == null ? `${MODELS[m].full}: addition on ${name} not run yet` : `${MODELS[m].full}: refusal direction added on ${name} → ${pct(T[k], 1)} of harmless prompts refused${extra(m, k)}` }))
         .concat([{ label: "rand", value: T.random, color: "var(--neutral)",
-          tip: `${MODELS[m].full}: a random direction of the same size added on ${every} → ${pct(T.random, 1)} of harmless prompts “refused”${extra(m, "random")}` }]),
+          tip: `${MODELS[m].full}: a random direction ${T.random_mult ? `at ${T.random_mult}× (twice the bars' strength)` : "of the same size"} added on ${every} → ${pct(T.random, 1)} of harmless prompts “refused”${extra(m, "random")}` }]),
       refs: [{ value: T.clean, label: `none ${pct(T.clean)}` }] });
   }
   src("Flip the sign: data/runs/<model>/generations/plus_harmless (Dory ×4: plus_harmless4), 100 harmless test prompts, at the strength tuned per model on 50 held-out harmless prompts (analysis/plus_tune.json, scripts/plus_tune.py; coherence judged by gpt-oss-20b); random direction at the same strength on every loop / quarter");
+  src("Flip the sign, Inkling: generations/plus_harmless{,_b} (250 harmless test prompts; run with 5 loops: plus_harmless5{,_b}), strength tuned the same way (analysis/plus_tune.json), and 4× the erasing strength");
   plusTune($("plus-tune"), P);
   plusText(P, TP);
 })();
@@ -2143,6 +2220,10 @@ function plusText(P, TP) {
     + (!mid(o) ? "" : Math.max(o.l2, o.l3) <= o.first + 2 ? ` Ouro's middle loops on their own do no more than its first (${pct(o.l2)} and ${pct(o.l3)}).` : ` With it on loop 2 or loop 3 alone, Ouro refuses ${pct(o.l2)} and ${pct(o.l3)}.`);
   const qs = [q.first, q.q2, q.q3, q.last], top = Math.max(...qs), bi = qs.indexOf(top), ends = Math.max(q.first, q.last);
   const midTop = (bi === 1 || bi === 2) && top >= ends + 3;
+  /* Inkling: little refusal at a coherent strength; at 4x the "refusals" are mostly broken replies, which the rubric counts */
+  const v = TP("inkvar"), v4 = v && v.c4;
+  if (v && $("plus-inkling")) $("plus-inkling").textContent = `Inkling hardly refuses harmless prompts at its tuned strength: ${pct(v.all, 1)} with the addition on every loop, against ${pct(v.clean, 1)} unsteered, and even that costs some coherence (${r0(v.coh.all)} against ${r0(v.coh.clean)}; its runs use 250 prompts).` +
+    (v4 ? ` Four times stronger, the addition breaks its replies instead of making it refuse: coherence falls from ${r0(v.coh.clean)} to ${r0(v4.coh.all)} with it on every loop and to ${r0(v4.coh.last)} with it on loop 3 alone. The judge's rubric counts a reply that gives no help as a refusal, so the ${pct(v4.all)} and ${pct(v4.last)} it scores there are mostly broken output. On loop 1 alone the same addition changes nothing: ${pct(v4.first, 1)} refused, coherence ${r0(v4.coh.first)}.` : "");
   $("plus-qwen").textContent = q.q2 == null ? ""
     : top < 3
       ? `Qwen hardly moves at a strength that keeps it coherent: ${pct(q.all)} with the addition in all four quarters, at most ${pct(top)} with one.`
@@ -2152,10 +2233,10 @@ function plusText(P, TP) {
 
 /* choosing the strength of +u: refusal of harmless prompts and judged coherence at each strength tried (every loop at once,
    50 held-out prompts); the chosen strength is ringed, strengths that break the rule are hollow */
-function plusTune(el, P) {
+function plusTune(el, P, models = ["dory", "nanbeige", "ouro", "inkvar", "qwen"]) {
   if (!el) return;
   el.innerHTML = "";
-  const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => P[m].tune);
+  const ms = models.filter((m) => P[m] && P[m].tune);
   if (!ms.length) { el.closest(".fig").hidden = true; return; }
   const box = h("div", { class: "multiples" }); el.append(box);
   for (const m of ms) {
@@ -2242,44 +2323,58 @@ function contrastChart(el) {
   const board = new Board($("ex-board"), { title: "" });
   let dots = null;
   const pa = D.persona_ablate;
-  const paRow = (m, cond) => pa[m].rows.find((r) => r.cond === cond);
-  const trainedOf = (m) => (m === "dory" ? 2 : 4);
+  /* a persona erased by the variant the rule picks for each trait (the trained-depth run's choice for both runs),
+     averaged over those traits: mean score of run `run` under condition `cond` */
+  const paTraits = (m) => pa[m].chosen_traits;
+  const paT = (m, run, t) => pa[run].methods[pa[m].choice[t].chosen].traits[t];
+  const paRow = (m, run, cond) => meanOf(paTraits(m).map((t) => paT(m, run, t).rows.find((r) => r.cond === cond).score));
+  const paPrompted = (m, run) => meanOf(paTraits(m).map((t) => paT(m, run, t).prompted));
+  const trainedOf = (m) => ({ dory: 2, inkvar: 3 })[m] || 4;
+  const EXTRA_RUN = { dory: "dory4", ouro: "ouro6", inkvar: "inkvar5" }; /* the same model with 2 extra loops */
+  /* Inkling shrugs off a size-1 kick, so its kick test uses the largest size run */
+  const KICK_SIZE = { inkvar: 8 };
+  const loopsText = (n) => (n === 2 ? "loops 1 and 2" : `loops 1 to ${n}`);
+  const off = (e, m) => !!e.only && !e.only.includes(m);
   const refusalExp = (mode) => (m) => {
     const e = D.extra[m][mode], n = trainedOf(m), c = grid(m).clean.r, bite = vRef(m, mode, String(n));
     const ev = Array.from({ length: n }, (_, i) => ({ k: i + 1, type: mode }));
-    return { a: { ...e.at_trained, run: m }, b: { ...e.at_extra, run: m === "dory" ? "dory4" : "ouro6" }, c: e.clean.r, gain: e.gain, unit: "%", dots: true, what: "refusal rate", steered: "every trained loop", color: "var(--refuse)",
+    return { a: { ...e.at_trained, run: m }, b: { ...e.at_extra, run: EXTRA_RUN[m] }, c: e.clean.r, gain: e.gain, unit: "%", dots: true, what: "refusal rate", steered: "every trained loop", color: "var(--refuse)",
       plan: (x) => ({ events: ev, vExit: vOf(c, (x ? e.at_extra : e.at_trained).r), bite, peak: c / 100 }) };
   };
   const EXPS = {
     erase: { label: "Erase refusal", mean: MEAN.refusal, type: "erase", get: refusalExp("erase") },
     push: { label: "Add against refusal", mean: MEAN.refusal, type: "push", get: refusalExp("push") },
-    persona: { label: "Add a persona", only: "dory", mean: MEAN.persona, type: "persona", get: () => {
-      const ga = personaGain("dory", "0,1"), gb = personaGain("dory4", "0,1");
-      return { a: { r: ga }, b: { r: gb }, c: 0, unit: "", sign: true, what: "trait gain", steered: "loops 1 and 2", color: "var(--steer)",
-        plan: (x) => ({ events: [1, 2].map((k) => ({ k, type: "persona" })), vExit: x ? gb / ga : 1, bite: personaGain("dory", "1") / ga }) };
+    persona: { label: "Add a persona", only: ["dory", "inkvar"], mean: MEAN.persona, type: "persona", get: (m) => {
+      const n = trainedOf(m), u = Array.from({ length: n }, (_, i) => i).join(","), ga = personaGain(m, u), gb = personaGain(EXTRA_RUN[m], u);
+      return { a: { r: ga }, b: { r: gb }, c: 0, unit: "", sign: true, what: "trait gain", steered: loopsText(n), color: "var(--steer)",
+        plan: (x) => ({ events: Array.from({ length: n }, (_, i) => ({ k: i + 1, type: "persona" })), vExit: x ? clamp(gb / ga, 0, 1) : 1, bite: clamp(personaGain(m, String(n - 1)) / ga, 0, 1) }) };
     } },
-    perase: { label: "Erase a persona", only: "dory", mean: MEAN.perase, type: "erase", get: () => {
-      const A = paRow("dory", "ablate_all").trait_score, B = paRow("dory4", "ablate_12").trait_score, span = pa.dory.prompted - A;
-      return { a: { r: A }, b: { r: B }, c: pa.dory.prompted, unit: "", what: "trait score", steered: "loops 1 and 2", lowerWorks: true, color: "var(--steer)",
-        plan: (x) => ({ events: [1, 2].map((k) => ({ k, type: "erase" })), vExit: x ? (pa.dory4.prompted - B) / span : 1, bite: (pa.dory.prompted - paRow("dory", "ablate_2").trait_score) / span }) };
+    /* the same single loop is erased at both depths (the last one the model was trained with). Erasing "every loop" also
+       covers the layers outside the loops (Dory's entry and exit stacks, Inkling's prelude and coda), which erasing named
+       loops of the longer run does not, so the two would differ in more than depth. */
+    perase: { label: "Erase a persona", only: ["dory", "inkvar"], mean: MEAN.perase, type: "erase", get: (m) => {
+      const n = trainedOf(m), run = EXTRA_RUN[m], cond = `ablate_${n}`;
+      const A = paRow(m, m, cond), B = paRow(m, run, cond), Pa = paPrompted(m, m), Pb = paPrompted(m, run), left = (Pb - B) / (Pa - A);
+      return { a: { r: A }, b: { r: B }, c: Pb, cA: Pa, unit: "", what: "trait score", steered: `loop ${n}`, lowerWorks: true, color: "var(--steer)", undone: 1 - left, ref: "prompted",
+        plan: (x) => ({ events: [{ k: n, type: "erase" }], vExit: x ? clamp(left, 0, 1) : 1, bite: 1 }) };
     } },
     kick: { label: "Random kick", mean: MEAN.kick, type: "kick", get: (m) => {
-      const loop = trainedOf(m), A = m === "dory" ? "dory" : "ouro", B = m === "dory" ? "dory4" : "ouro6";
-      const ra = kickFind(A, loop, 1.0), rb = kickRows(B).find((r) => r.site && r.site.loop === loop - 1 && r.site.eps === 1.0 && !r.every);
+      const loop = trainedOf(m), A = m, B = EXTRA_RUN[m], eps = KICK_SIZE[m] || 1.0;
+      const ra = kickFind(A, loop, eps), rb = kickRows(B).find((r) => r.site && r.site.loop === loop - 1 && r.site.eps === eps && !r.every);
       const cA = kickClean(A).acc, cB = kickClean(B).acc;
       /* darkness = accuracy lost: the kick darkens the stream as much as it costs when nothing follows, and the extra
          loops wash out as much of that as they win back */
       const dA = clamp(1 - ra.acc / cA, 0, 1), dB = clamp(1 - rb.acc / cB, 0, 1);
       return { a: { r: 100 * ra.acc, dots: ra.dots, out: ra.out, cand: ra.cand, run: A }, b: { r: 100 * rb.acc, dots: rb.dots, out: rb.out, cand: rb.cand, run: B },
         c: 100 * cB, cA: 100 * cA, unit: "%", dots: true, what: "MATH-500 accuracy",
-        steered: `loop ${loop} (kick size 1)`, kickLap: loop, color: "var(--kick)",
+        steered: `loop ${loop} (kick size ${eps})`, kickLap: loop, color: "var(--kick)",
         plan: (x) => ({ events: [{ k: loop, type: "kick" }], vExit: x ? dB : dA, bite: dA }) };
     } },
   };
-  chips($("ex-models"), ["dory", "ouro"].map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
-    onChange: (m) => { st.m = m; if (EXPS[st.exp].only && EXPS[st.exp].only !== m) st.exp = "erase"; drawExps(); update(true); } });
+  chips($("ex-models"), ["dory", "ouro", "inkvar"].map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
+    onChange: (m) => { st.m = m; if (off(EXPS[st.exp], m)) st.exp = "erase"; drawExps(); update(true); } });
   function drawExps() {
-    chips($("ex-exps"), Object.entries(EXPS).map(([id, e]) => ({ id, label: e.label, disabled: e.only && e.only !== st.m, title: e.only && e.only !== st.m ? "Not run for this model" : null })),
+    chips($("ex-exps"), Object.entries(EXPS).map(([id, e]) => ({ id, label: e.label, disabled: off(e, st.m), title: off(e, st.m) ? "Not run for this model" : null })),
       { value: st.exp, onChange: (v) => { st.exp = v; update(true); } });
   }
   const togg = chips($("ex-toggle"), [{ id: false, label: "Trained loops" }, { id: true, label: "+2 extra loops" }], { value: false,
@@ -2304,7 +2399,7 @@ function contrastChart(el) {
     const v = st.extra ? x.b : x.a, plan = x.plan(st.extra);
     const done = () => {
       board.set(v.r, { title: `${M.label} · <b>${x.what}</b>`, suffix: x.unit, sign: !!x.sign, color: x.color,
-        right: st.exp === "persona" ? "unsteered +0" : `unsteered ${x.unit === "%" ? pct(st.extra || !x.cA ? x.c : x.cA) : r0(x.c)}`,
+        right: st.exp === "persona" ? "unsteered +0" : `${x.ref || "unsteered"} ${(x.unit === "%" ? pct : r0)(st.extra || x.cA == null ? x.c : x.cA)}`,
         sub: v.lo != null ? `95% CI ${pct(v.lo)}–${pct(v.hi)}` : (st.exp === "kick" ? "100 problems" : "mean over traits"),
         subRight: v.n ? `${v.n} prompts` : "" });
       if (x.dots) {
@@ -2334,19 +2429,35 @@ function contrastChart(el) {
       board.set(null, { sub: "removing the extra loops…", subRight: "" }); tr.apply({});
       tr.morph(trained, { reverse: true, dur: 800, onDone: () => { tr = make(n); go(); } });
     } else { tr = make(n); go(); }
-    const rcv = st.exp === "persona" ? (x.a.r - x.b.r) / x.a.r : (x.b.r - x.a.r) / (x.c - x.a.r);
+    const rcv = x.undone != null ? x.undone : st.exp === "persona" ? (x.a.r - x.b.r) / x.a.r : (x.b.r - x.a.r) / (x.c - x.a.r);
     const unitFmt = (val) => (x.unit === "%" ? pct(val, 1) : (x.sign ? `${val > 0 ? "+" : ""}${val.toFixed(1)}` : val.toFixed(1)));
     $("ex-cap").textContent = `${M.full}, ${E.label.toLowerCase()} on ${x.steered}. With ${trained} loops: ${unitFmt(x.a.r)}. With ${trained + 2} loops: ${unitFmt(x.b.r)}` +
-      (st.exp === "persona" ? " (unsteered: +0)." : ` (unsteered: ${unitFmt(x.c)}).`) + ` The extra loops undo ${r0(100 * clamp(rcv, -1, 2))}% of the effect.` +
+      (st.exp === "persona" ? " (unsteered: +0)." : st.exp === "perase" ? ` (with the prompt and no erasing: ${unitFmt(x.cA)} and ${unitFmt(x.c)}).` : ` (unsteered: ${unitFmt(x.c)}).`) + ` The extra loops undo ${r0(100 * clamp(rcv, -1, 2))}% of the effect.` +
       (x.gain ? ` On the same ${x.gain.n} prompts, they add ${x.gain.d > 0 ? "+" : ""}${x.gain.d.toFixed(1)} points of refusal (95% CI ${x.gain.lo.toFixed(1)} to ${x.gain.hi.toFixed(1)}).` : "") +
-      (st.exp === "perase" ? ` The persona is set by a system prompt; erasing a random direction leaves ${paRow("dory4", "random_all").trait_score}.` : "");
+      (st.exp === "kick" && (x.cA ?? x.c) - x.a.r < 5 ? " The kick barely hurts this model in the first place, so that share is noise." : "") +
+      (st.exp === "kick" && KICK_SIZE[st.m] ? ` A size-1 kick barely hurts Inkling (${pct(100 * kickFind(st.m, trained, 1.0).acc)}), so this is the largest size we ran.` : "") +
+      (st.exp === "perase" ? ` The persona is set by a system prompt; erasing a random direction on every loop leaves ${r0(paRow(st.m, EXTRA_RUN[st.m], "random_all"))}. Averaged over ${andList(paTraits(st.m))}, each erased with the variant the rule picks. The same loop is erased in both runs, so the two differ only in how many loops follow it.` : "");
   }
   drawExps(); update(false);
   { /* the paired refusal gains, in the text under the figure */
     const g = (m) => D.extra[m].erase.gain, f = (x) => `${x.d > 0 ? "+" : ""}${x.d.toFixed(1)} points (95% CI ${x.lo.toFixed(1)} to ${x.hi.toFixed(1)})`;
-    $("ex-gains").textContent = ` With refusal erased on every trained loop, two extra loops add ${f(g("dory"))} of refusal for Dory and ${f(g("ouro"))} for Ouro, each measured on the same prompts with and without the extra loops (${g("dory").n === g("ouro").n ? `${g("dory").n} prompts each` : `${g("dory").n} prompts for Dory, ${g("ouro").n} for Ouro`}).`;
+    const ns = ["dory", "ouro", "inkvar"].map((m) => g(m).n), ip = D.extra.inkvar.push;
+    $("ex-i-push3").textContent = pct(ip.at_trained.r); $("ex-i-push5").textContent = pct(ip.at_extra.r);
+    { /* Inkling's persona and kick tests */
+      const pe = EXPS.persona.get("inkvar"), pr = EXPS.perase.get("inkvar"), ki = EXPS.kick.get("inkvar");
+      $("ex-i-pers3").textContent = sgn(pe.a.r); $("ex-i-pers5").textContent = sgn(pe.b.r);
+      $("ex-i-pe3").textContent = r0(pr.cA - pr.a.r); $("ex-i-pe5").textContent = r0(pr.c - pr.b.r);
+      $("ex-i-kick1").textContent = pct(100 * kickFind("inkvar", 3, 1.0).acc); $("ex-i-kick0").textContent = pct(100 * kickClean("inkvar").acc);
+      $("ex-i-kick").textContent = pct(ki.a.r); $("ex-i-kick5").textContent = pct(ki.b.r);
+    }
+    { /* the addition toward refusal on harmless prompts at 4x, every trained loop, with and without two extra loops: at
+         this strength the 3-loop replies are broken (the rubric counts them as refusals), so what comes back is usable output */
+      const a3 = D.plus_harmless.inkvar.tuned.c4, a5 = D.plus_harmless.inkvar5.tuned.c4;
+      $("ex-i-plus").textContent = ` The addition toward refusal on harmless prompts, at four times its tuned strength, breaks Inkling's replies when the run stops after loop 3 (coherence ${r0(a3.coh.all)}; the judge counts ${pct(a3.all, a3.all >= 10 ? 0 : 1)} of them as refusals). With two more loops, coherence is back at ${r0(a5.coh.l123)} and ${pct(a5.l123, 1)} of the prompts are refused. What the extra loops restore there is a usable answer.`; }
+    $("ex-gains").textContent = ` With refusal erased on every trained loop, two extra loops add ${f(g("dory"))} of refusal for Dory, ${f(g("ouro"))} for Ouro and ${f(g("inkvar"))} for Inkling, each measured on the same prompts with and without the extra loops (${new Set(ns).size === 1 ? `${ns[0]} prompts each` : `${ns[0]} prompts for Dory, ${ns[1]} for Ouro, ${ns[2]} for Inkling`}).`;
   }
   SOURCES.push("Extra loops: grid_test4{,_b} (Dory), grid_test6{,_b} (Ouro), each pair on the prompts both runs and the unsteered run share; persona_*_loops4.csv, capability/math500/kickp_loops4 and kickp_loops6");
+  SOURCES.push("Extra loops, Inkling: data/runs/TML-d24-varloop-research/generations/grid_test{,_act} (3 passes) and grid_test5{,_act} (5 passes), ablate_hh_eoi_t2.l11_apply0-1-2 and actadd_hh_eoi_t2.l11_c-0.5_rel1_apply0-1-2; persona/steer_loops{,_loops5} and steer_ablate{,_mean}{,_loops5}; capability/math500/kickp and kickp_loops5");
 })();
 
 function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unsteered") {
@@ -2367,7 +2478,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
     if (ks.length === MODELS[m].loops) return MODELS[m].straight ? "All quarters" : "Every loop";
     return ks.map((k) => unitName(m, k)).join(" + ");
   };
-  chips($("pe-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
+  chips($("pe-models"), ORDER7.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: "dory", swatch: true,
     onChange: (m) => { st.m = m; st.trait = null; st.units = null; draw(true); } });
   function draw(animate) {
     const P = D.persona[st.m], traits = Object.keys(P.traits);
@@ -2379,7 +2490,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
       { value: st.trait, swatch: true, onChange: (t) => { st.trait = t; draw(true); } });
     $("pe-missing").textContent = missingNote(st.m, PTRAITS.filter((t) => !P.traits[t]), P);
     chips($("pe-units"), us.map((u) => ({ id: u, label: uLabel(st.m, u) })), { value: st.units, onChange: (u) => { st.units = u; draw(true); } });
-    if (trM !== st.m) { tr = new Track3($("pe-track"), { model: st.m, loops: MODELS[st.m].loops, trained: st.m === "dory4" ? 2 : MODELS[st.m].loops, meaning: traitMean("persona", st.trait), types: ["persona"], label: `${MODELS[st.m].full} with a persona vector` }); trM = st.m; }
+    if (trM !== st.m) { tr = new Track3($("pe-track"), { model: st.m, loops: MODELS[st.m].loops, trained: trainedLoops(st.m), meaning: traitMean("persona", st.trait), types: ["persona"], label: `${MODELS[st.m].full} with a persona vector` }); trM = st.m; }
     tr.o.meaning = traitMean("persona", st.trait); /* each trait has its own colour */
     const plan = personaPlan(st.m, st.trait, st.units);
     if (animate) tr.play(plan); else tr.show(plan);
@@ -2402,7 +2513,13 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
   }
   draw(false);
   SOURCES.push("Personas: data/runs/<model>/analysis/persona_loops*.csv, persona/steer_loops*.judged.parquet");
-  for (const m of ORDER5) {
+  { /* Inkling: one loop at a time against all three */
+    const g = (u) => personaGain("inkvar", u), one = ["0", "1", "2"].map(g), all = g("0,1,2"), sum = one.reduce((a, b) => a + b, 0);
+    ["pe-ink-1", "pe-ink-2", "pe-ink-3"].forEach((id, i) => { $(id).textContent = sgn(one[i]); });
+    $("pe-ink-all").textContent = sgn(all);
+    $("pe-ink-sum").textContent = all > 1.3 * sum ? `more than the three single loops add up to (${sgn(sum)})` : `about what the three single loops add up to (${sgn(sum)})`;
+  }
+  for (const m of ORDER6) {
     const us = order(m), box = h("div"); $("pe-multiples").append(box);
     const n = MODELS[m].loops;
     barChart(box, { title: MODELS[m].label, max: 55, fmt: (v) => `${v >= 0 ? "+" : ""}${r0(v)}`,
@@ -2420,7 +2537,7 @@ function gauge(el, label, val, ref, color, fmtv = (v) => r0(v), refName = "unste
 function halluNote(m) {
   const H = (k) => D.persona[k].traits.hallucinating, allU = (k) => Array.from({ length: MODELS[k].loops }, (_, i) => i).join(",");
   const g = (k) => H(k).by_units[allU(k)].gain, name = (k) => (k === "dory4" ? "Dory × 4" : MODELS[k].label.replace(" (dense)", ""));
-  const ks = ORDER5.filter((k) => D.persona[k].traits.hallucinating), weak = ks.filter((k) => g(k) < 15), strong = ks.filter((k) => g(k) >= 15);
+  const ks = ORDER6.filter((k) => D.persona[k].traits.hallucinating), weak = ks.filter((k) => g(k) < 15), strong = ks.filter((k) => g(k) >= 15);
   const c = H(m).clean;
   return `Every hallucination question asks about something that does not exist (a 2024 Mars mission, the Quantium X7 processor), and the unsteered score is already ${r0(c)}${c >= 70 ? ", which leaves little room to push" : ""}. ` +
     `Ouro mostly plays along, and the other models often say the thing does not exist in their first line and then pad the reply with invented names, places and findings, which the judge still counts as hallucination. ` +
@@ -2428,83 +2545,119 @@ function halluNote(m) {
 }
 
 /* ================================================================== 4b. erase a prompted persona */
+/* Two ways to erase: set the component along the trait vector to zero, or to the model's own unprompted mean. Per model and
+   trait the rule (Methods) picks one with gpt-oss-20b on the every-loop condition, before any single loop is read. */
 (function personaErase() {
-  const A = D.persona_ablate, MS = ORDER5;
-  const st = { m: "dory", trait: "humorous", cond: "ablate_1" };
+  const A = D.persona_ablate, MS = ORDER7.filter((m) => A[m]);
+  const st = { m: "dory", trait: "humorous", cond: "ablate_1", meth: null };
   let tr = null, trM = null;
   const every = (m) => (MODELS[m].straight ? "quarter" : "loop");
   const parse = (m, c) => (c === "ablate_all" || c === "random_all" ? Array.from({ length: MODELS[m].loops }, (_, i) => i + 1) : c.replace("ablate_", "").replace("q", "").split("").map(Number));
   const rank = (m, c) => (c === "random_all" ? 99 : c === "ablate_all" ? 90 : parse(m, c).length * 10 + parse(m, c)[0]);
-  const conds = (m) => Object.values(A[m].traits)[0].rows.map((r) => r.cond).filter((c) => c.startsWith("ablate") || c === "random_all").sort((a, b) => rank(m, a) - rank(m, b));
-  const cLabel = (m, c) => (c === "random_all" ? `Random, every ${every(m)}` : c === "ablate_all" ? `Every ${every(m)}` : parse(m, c).map((k) => unitName(m, k)).join(" + "));
-  const cShort = (m, c) => (c === "random_all" ? "rand" : c === "ablate_all" ? "all" : parse(m, c).map((k) => unitShort(m, k)).join("+"));
+  const conds = (m) => Object.values(A[m].methods.zero.traits)[0].rows.map((r) => r.cond).filter((c) => c.startsWith("ablate") || c === "random_all").sort((a, b) => rank(m, a) - rank(m, b));
+  const span = (m, c) => { const u = parse(m, c); return u.length > 2 && u.every((k, i) => !i || k === u[i - 1] + 1) ? `${u[0]}–${u[u.length - 1]}` : null; };
+  const cLabel = (m, c) => (c === "random_all" ? `Random, every ${every(m)}` : c === "ablate_all" ? `Every ${every(m)}` : span(m, c) ? `Loops ${span(m, c)}` : parse(m, c).map((k) => unitName(m, k)).join(" + "));
+  const cShort = (m, c) => (c === "random_all" ? "rand" : c === "ablate_all" ? "all" : span(m, c) ? `L${span(m, c)}` : parse(m, c).map((k) => unitShort(m, k)).join("+"));
   const rowOf = (T, c) => T.rows.find((r) => r.cond === c);
   const removed = (T, score) => clamp((T.prompted - score) / Math.max(5, T.prompted - T.noprompt), 0, 1);
+  const METH = { mean: "Unprompted mean", zero: "Zero" };
+  const NOUN = { hallucinating: "hallucination", apathetic: "apathy", impolite: "rudeness", humorous: "humour", optimistic: "optimism", sycophantic: "sycophancy", evil: "malice" };
+  const chosen = (m, t) => A[m].choice[t] && A[m].choice[t].chosen;
+  /* why a variant fails the rule (gpt-oss-20b, every loop): it raises the trait, removes under 15 points, or costs coherence */
+  const why = (c) => (c.eff < 0 ? `raises it by ${r0(-c.eff)} points` : c.eff < 15 ? `removes only ${r0(c.eff)} points` : `costs ${r0(c.coh_drop)} points of coherence`);
   function plan(m, T, c) {
     const n = MODELS[m].loops, vs = {};
     for (let k = 1; k <= n; k++) { const r = rowOf(T, MODELS[m].straight ? `ablate_q${k}` : `ablate_${k}`); vs[k] = r ? removed(T, r.score) : 0; }
     const v = removed(T, rowOf(T, c).score);
     return { events: parse(m, c).map((k) => ({ k, type: "erase" })), vExit: v, bite: c === "random_all" ? v : vs[n], vSingle: vs, tagText: c === "random_all" ? "RANDOM DIR." : null, random: c === "random_all" };
   }
-  chips($("pa-models"), MS.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: st.m, swatch: true, onChange: (m) => { st.m = m; draw(true); } });
+  chips($("pa-models"), MS.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: st.m, swatch: true, onChange: (m) => { st.m = m; st.meth = null; draw(true); } });
   function draw(animate) {
-    const m = st.m, P = A[m], traits = Object.keys(P.traits);
-    if (!P.traits[st.trait]) st.trait = traits.includes("humorous") ? "humorous" : traits[0];
+    const m = st.m, P = A[m], traits = PTRAITS.filter((t) => P.traits.includes(t));
+    if (!traits.includes(st.trait)) st.trait = traits.includes("humorous") ? "humorous" : traits[0];
+    const ch = chosen(m, st.trait);
+    if (!st.meth) st.meth = ch || "mean";
     const cs = conds(m);
     if (!cs.includes(st.cond)) st.cond = cs[0];
-    chips($("pa-traits"), PTRAITS.filter((t) => P.traits[t]).map((t) => ({ id: t, label: t, color: rgbCss(traitRGB(t)) })),
-      { value: st.trait, swatch: true, onChange: (t) => { st.trait = t; draw(true); } });
-    $("pa-missing").textContent = missingNote(m, PTRAITS.filter((t) => !P.traits[t]), P, true);
+    chips($("pa-traits"), traits.map((t) => ({ id: t, label: chosen(m, t) ? t : `${t}*`, color: rgbCss(traitRGB(t)) })),
+      { value: st.trait, swatch: true, onChange: (t) => { st.trait = t; st.meth = null; draw(true); } });
+    chips($("pa-meth"), Object.keys(METH).map((k) => ({ id: k, label: `${METH[k]}${k === ch ? " · chosen" : ""}` })), { value: st.meth, onChange: (k) => { st.meth = k; draw(true); } });
+    const miss = PTRAITS.filter((t) => !P.traits.includes(t)), none = traits.filter((t) => !chosen(m, t));
+    $("pa-missing").textContent = [missingNote(m, miss, { vector: P.vector, tune: {} }, true),
+      none.length ? `* Neither variant passes the rule for ${andList(none)} on ${m === "dory4" ? "Dory" : MODELS[m].label.replace(" (dense)", "")}, so ${none.length > 1 ? "they are" : "it is"} left out of the panels below.` : ""].filter(Boolean).join(" ");
     chips($("pa-units"), cs.map((c) => ({ id: c, label: cLabel(m, c) })), { value: st.cond, onChange: (c) => { st.cond = c; draw(true); } });
     if (trM !== m) {
-      tr = new Track3($("pa-track"), { model: m, loops: MODELS[m].loops, trained: m === "dory4" ? 2 : MODELS[m].loops, meaning: traitMean("perase", st.trait), types: ["erase"], label: `${MODELS[m].full}: a trait set by the system prompt, erased on some loops` });
+      tr = new Track3($("pa-track"), { model: m, loops: MODELS[m].loops, trained: trainedLoops(m), meaning: traitMean("perase", st.trait), types: ["erase"], label: `${MODELS[m].full}: a trait set by the system prompt, erased on some loops` });
       trM = m;
     }
     tr.o.meaning = traitMean("perase", st.trait);
     const tc = rgbCss(traitRGB(st.trait));
-    const T = P.traits[st.trait], r = rowOf(T, st.cond), pl = plan(m, T, st.cond);
+    const T = P.methods[st.meth].traits[st.trait], r = rowOf(T, st.cond), pl = plan(m, T, st.cond);
     if (animate) tr.play(pl); else tr.show(pl); /* the bar chart beside it holds the numbers */
     gauge($("pa-gauge-coh"), "Coherence", r.coh, rowOf(T, "prompted").coh, "var(--ink-3)", (v) => r0(v), "prompted");
     const el = $("pa-chart");
     el.innerHTML = "";
-    barChart(el, { title: `Trait score · ${st.trait}`, subtitle: "dashed: prompted, no erasing · dotted: no prompt", max: 100, w: 380, ht: 210, padR: 84, fmt: (v) => r0(v),
+    barChart(el, { title: `Trait score · ${st.trait} · erased to ${st.meth === "zero" ? "zero" : "the unprompted mean"}`, subtitle: "dashed: prompted, no erasing · dotted: no prompt", max: 100, w: 380, ht: 210, padR: 84, fmt: (v) => r0(v),
       items: cs.map((c) => { const x = rowOf(T, c); return { label: cShort(m, c), value: x.score, color: c === "random_all" ? "var(--neutral)" : tc, faded: c !== st.cond,
-        tip: `${MODELS[m].full}, ${st.trait}: erased on ${lc(cLabel(m, c))} → trait ${x.score}, coherence ${x.coh}` }; }),
+        tip: `${MODELS[m].full}, ${st.trait}, erased to ${st.meth === "zero" ? "zero" : "the unprompted mean"} on ${lc(cLabel(m, c))} → trait ${x.score}, coherence ${x.coh}` }; }),
       refs: [{ value: T.prompted, label: `prompted ${r0(T.prompted)}` }, { value: T.noprompt, label: `no prompt ${r0(T.noprompt)}`, dash: "2 3" }] });
     const share = r0(100 * (T.prompted - r.score) / Math.max(1e-9, T.prompted - T.noprompt));
+    const C = P.choice[st.trait], other = st.meth === "zero" ? "mean" : "zero";
+    const SEL = "scored by gpt-oss-20b, the judge that makes the choice";
+    const rule = ch === st.meth ? ` The rule picks this variant for ${NOUN[st.trait] || st.trait}: erased on every ${every(m)}, it removes ${r0(100 * C[ch].removed)}% of the trait and the other one ${C[other].ok ? `${r0(100 * C[other].removed)}%` : `fails (it ${why(C[other])})`} (${SEL}).`
+      : ch ? ` The rule picks the other variant for ${NOUN[st.trait] || st.trait}: erased on every ${every(m)}, this one ${C[st.meth].ok ? `removes ${r0(100 * C[st.meth].removed)}% of the trait against ${r0(100 * C[ch].removed)}%` : why(C[st.meth])} (${SEL}).`
+        : ` Neither variant passes the rule for ${NOUN[st.trait] || st.trait}: on every ${every(m)}, zero ${why(C.zero)} and the mean ${why(C.mean)} (${SEL}).`;
     $("pa-cap").textContent = `${MODELS[m].full}, system prompt for “${st.trait}”, ${st.cond === "random_all" ? `a random direction erased on every ${every(m)} (a control)` : `trait direction erased on ${lc(cLabel(m, st.cond))}`}: trait ${r0(r.score)}, ` +
-      `against ${r0(T.prompted)} with the prompt alone and ${r0(T.noprompt)} without it, so ${share}% of what the prompt added is gone.` +
-      (T.prompted - T.noprompt < 15 ? " The prompt barely raises this trait, so that share is noisy." : "") + " 100 replies per bar (20 questions × 5).";
+      `against ${r0(T.prompted)} with the prompt alone and ${r0(T.noprompt)} without it, so ${share}% of what the prompt added is gone.` + rule + " 100 replies per bar (20 questions × 5).";
   }
   draw(false);
-  SOURCES.push("Persona erasure: data/runs/<model>/analysis/persona_ablate.csv (Dory × 4 loops: persona_ablate_loops4.csv)");
+  SOURCES.push("Persona erasure: data/runs/<model>/persona/steer_ablate{,_mean}.judged_luna.parquet (Dory × 4 loops: _loops4; Inkling × 5 loops: _loops5); unprompted means from analysis/persona_ablation_means*.pt (scripts/persona_ablation_means.py)");
+  /* per loop, the share of the every-loop erasure it keeps on its own, averaged over the traits with a usable erasure */
+  const unitsOf = (m) => A[m].units.slice().sort((a, b) => rank(m, a) - rank(m, b));
+  const J1 = D.judge.name, J2 = D.judge.id === "v2" ? "gpt-oss-20b" : "gpt-6-luna";
   for (const m of MS) {
     const box = h("div"); $("pa-multiples").append(box);
-    const P = A[m], cs = conds(m).filter((c) => c !== "random_all" && (parse(m, c).length === 1 || c === "ablate_all"));
-    const coh = (c) => (P.rows.find((x) => x.cond === c) || {}).coherence;
-    barChart(box, { title: MODELS[m].label, max: 100, fmt: (v) => `${r0(v)}%`,
-      items: cs.map((c) => ({ label: cShort(m, c), value: P.removed[c], color: MODELS[m].color, faded: c === "ablate_all",
-        tip: `${MODELS[m].full}, erased on ${lc(cLabel(m, c))}: ${r0(P.removed[c])}% of the points the prompt adds are gone (summed over ${P.removed_traits.length} traits); coherence ${r0(coh(c))} (prompted ${r0(coh("prompted"))})` })) });
+    const P = A[m], R = P.recovery, n = R.chosen.n, us = unitsOf(m);
+    const per = (u) => P.chosen_traits.map((t) => `${NOUN[t] || t} ${pct(100 * P.per_trait[t].chosen[u])} (${P.per_trait[t].method})`).join(", ");
+    barChart(box, { title: MODELS[m].label, subtitle: `${n} trait${n === 1 ? "" : "s"}${runNote(m) ? ` · ${runNote(m)}` : ""}`, max: 100, fmt: (v) => `${r0(v)}%`, padR: us.length >= 5 ? 30 : 46, w: us.length >= 6 ? 270 : 230,
+      items: us.map((u) => ({ label: cShort(m, u), value: R.chosen[u], color: MODELS[m].color, faded: parse(m, u).length > 1,
+        tip: `${MODELS[m].full}, erased on ${lc(cLabel(m, u))} only: keeps <b>${pct(R.chosen[u])}</b> of what erasing every ${every(m)} removes<br>${per(u)}<br>every trait to zero: ${pct(R.zero[u])} · to the mean: ${pct(R.mean[u])}<br>${J2}: ${pct(P.recovery_alt.chosen[u])}` })),
+      refs: [{ value: 100, label: `every ${every(m)}`, dash: "2 3" }] });
   }
-  const R = (m, c) => r0(A[m].removed[c]);
-  const set = (id, v) => { $(id).textContent = v; };
-  set("pa-d4-1", `${R("dory4", "ablate_1")}%`); set("pa-d4-2", `${R("dory4", "ablate_2")}%`); set("pa-d4-3", `${R("dory4", "ablate_3")}%`);
-  set("pa-d4-4", `${R("dory4", "ablate_4")}%`); set("pa-d4-all", `${R("dory4", "ablate_all")}%`);
-  set("pa-d-1", `${R("dory", "ablate_1")}%`); set("pa-d-2", `${R("dory", "ablate_2")}%`);
-  set("pa-n-1", `${R("nanbeige", "ablate_1")}%`); set("pa-n-2", `${R("nanbeige", "ablate_2")}%`);
-  set("pa-o-1", `${R("ouro", "ablate_1")}%`); set("pa-o-4", `${R("ouro", "ablate_4")}%`);
-  const ot = (t, c) => rowOf(A.ouro.traits[t], c);
-  { /* optimism erased on loop 4: from the prompted score to where, against the score with no prompt */
-    const P = r0(A.ouro.traits.optimistic.prompted), X = r0(ot("optimistic", "ablate_4").score), Y = r0(A.ouro.traits.optimistic.noprompt);
-    $("pa-o-opt-clause").textContent = `Erasing optimism on loop 4 takes it from ${P} to ${X}, ` +
-      (X < Y - 1 ? `overshooting into gloom below the ${Y} it scores with no prompt` : X <= Y + 5 ? `close to the ${Y} it scores with no prompt` : `still above the ${Y} it scores with no prompt`);
+  const K = (m, u) => pct(A[m].recovery.chosen[u]);
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  set("pa-d4-12", K("dory4", "ablate_12")); set("pa-d4-3", K("dory4", "ablate_3")); set("pa-d4-4", K("dory4", "ablate_4"));
+  set("pa-d-1", K("dory", "ablate_1")); set("pa-d-2", K("dory", "ablate_2"));
+  set("pa-n-1", K("nanbeige", "ablate_1")); set("pa-n-2", K("nanbeige", "ablate_2"));
+  set("pa-o-1", K("ouro", "ablate_1")); set("pa-o-4", K("ouro", "ablate_4"));
+  [1, 2, 3, 4].forEach((q) => set(`pa-q-${q}`, K("qwen", `ablate_q${q}`)));
+  [1, 2, 3].forEach((k) => set(`pa-v-${k}`, K("inkvar", `ablate_${k}`)));
+  set("pa-v5-123", K("inkvar5", "ablate_123")); set("pa-v5-5", K("inkvar5", "ablate_5"));
+  set("pa-o-traits", andList(A.ouro.chosen_traits.map((t) => NOUN[t] || t)));
+  set("pa-o-n", String(A.ouro.traits.length));
+  set("pa-v-traits", andList(A.inkvar.chosen_traits.map((t) => NOUN[t] || t)));
+  { /* what zeroing does where the unprompted state is far from zero: Inkling rises, Nanbeige overshoots */
+    const z = (m, t, c) => rowOf(A[m].methods.zero.traits[t], c).score, ip = A.inkvar.methods.zero.traits.impolite;
+    set("pa-zero-ink", `${r0(ip.prompted)} to ${r0(z("inkvar", "impolite", "ablate_all"))}`);
+    const ih = A.inkvar.methods.zero.traits.hallucinating;
+    set("mr-ink-imp", `${r0(ip.prompted)} → ${r0(z("inkvar", "impolite", "ablate_all"))}`);
+    set("mr-ink-hal", `${r0(ih.prompted)} → ${r0(z("inkvar", "hallucinating", "ablate_all"))}`);
   }
-  set("pa-o-apa", `${r0(ot("apathetic", "prompted").coh)} to ${r0(ot("apathetic", "ablate_4").coh)}`);
-  set("pa-q-all", `${R("qwen", "ablate_all")}%`);
-  const ocoh = (c) => r0((A.ouro.rows.find((x) => x.cond === c) || {}).coherence);
+  { /* Nanbeige's first loop is where the two variants' averages differ most, and one trait makes the gap: apathy, whose
+       erasure to the mean on every loop barely clears the 15-point bar, so its single-loop share is far above 100% */
+    const N = A.nanbeige, pt = N.per_trait, ap = N.methods.mean.traits.apathetic, apAll = rowOf(ap, "ablate_all").score;
+    const others = N.chosen_traits.filter((t) => t !== "apathetic");
+    const avg = (v) => pct(100 * meanOf(others.map((t) => pt[t][v].ablate_1).filter((x) => x != null)));
+    for (const pre of ["pa", "mr"]) {
+      set(`${pre}-n-zero`, pct(N.recovery.zero.ablate_1)); set(`${pre}-n-mean`, pct(N.recovery.mean.ablate_1));
+      set(`${pre}-n-ap`, pct(100 * pt.apathetic.mean.ablate_1)); set(`${pre}-n-ap-eff`, `${r0(ap.prompted)} to ${r0(apAll)}`);
+      set(`${pre}-n-zero-x`, avg("zero")); set(`${pre}-n-mean-x`, avg("mean"));
+    }
+  }
+  const ocoh = (c) => r0((A.ouro.methods.mean.rows.find((x) => x.cond === c) || {}).coherence);
   set("pa-o-cohn", ocoh("noprompt")); set("pa-o-cohp", ocoh("prompted"));
   { /* the other models' coherence, with and without the system prompt, as ranges */
-    const co = (m, c) => (A[m] && (A[m].rows.find((x) => x.cond === c) || {}).coherence);
+    const co = (m, c) => (A[m] && (A[m].methods.mean.rows.find((x) => x.cond === c) || {}).coherence);
     const rng = (c) => { const v = ["nanbeige", "dory", "qwen"].map((m) => co(m, c)).filter((x) => x != null); return `${r0(Math.min(...v))} to ${r0(Math.max(...v))}`; };
     set("pa-coh-others-n", rng("noprompt")); set("pa-coh-others-p", rng("prompted"));
   }
@@ -2512,8 +2665,38 @@ function halluNote(m) {
 
 /* ================================================================== 5. kicks */
 const EPS = [0.5, 0.7, 1.0, 1.5];
+/* Inkling's kicks are partly normalised away (each layer reads a softmax mix of RMS-normalised blocks), so its runs go up
+   to size 8; the size slider and the grids follow each model's sizes, starting at the one that matches the others' size 1 */
+const EPS_OF = { inkling: [0.5, 0.7, 1.0, 1.5, 3, 5, 8], inkvar: [0.7, 1.0, 3, 5, 8], inkvar5: [0.7, 1.0, 3, 5, 8] };
+const epsOf = (m) => EPS_OF[m] || EPS;
+const EPS_START = { inkling: 3, inkvar: 8, inkvar5: 8 };
+/* responses cut off at the token limit (outcome codes 3 and up), and the share solved among those that finished */
+const kickCut = (r) => r.out.filter((c) => c >= 3).length;
+const kickFin = (r) => { const n = r.out.length - kickCut(r); return n ? pct((100 * r.out.filter((c) => c === 0).length) / n) : "none"; };
+/* one model's heat grid: MATH-500 accuracy after one kick, by loop (rows) and size (columns) */
+function kickGrid(box, m) {
+  const M = MODELS[m], c = kickClean(m).acc, E = epsOf(m);
+  const cw2 = E.length > 5 ? 26 : E.length > 4 ? 32 : 40, ch = 26, left = 34, top = runNote(m) ? 50 : 40;
+  const sv = s("svg", { viewBox: `0 0 ${Math.max(left + cw2 * E.length + 6, 200)} ${top + ch * M.loops + 8}`, role: "img", "aria-label": `${M.label} kick grid` }, box);
+  s("text", { x: 0, y: 15, class: "t-title", text: M.label }, sv);
+  if (runNote(m)) s("text", { x: 0, y: 28, text: `${runNote(m)} loops`, "font-size": 9.5 }, sv);
+  E.forEach((e, j) => s("text", { x: left + cw2 * j + cw2 / 2, y: top - 6, "text-anchor": "middle", text: String(e), "font-size": 10 }, sv));
+  for (let k = 1; k <= M.loops; k++) {
+    s("text", { x: 0, y: top + ch * (k - 1) + ch / 2 + 4, text: unitShort(m, k), "font-size": 10.5 }, sv);
+    E.forEach((e, j) => {
+      const r = kickFind(m, k, e);
+      if (!r) return;
+      const a = clamp(r.acc / c, 0, 1);
+      const rc = s("rect", { x: left + cw2 * j, y: top + ch * (k - 1), width: cw2 - 2, height: ch - 2, rx: 3, fill: M.color, "fill-opacity": (0.06 + 0.94 * a).toFixed(3) }, sv);
+      s("text", { x: left + cw2 * j + cw2 / 2 - 1, y: top + ch * (k - 1) + ch / 2 + 3, "text-anchor": "middle", text: r0(100 * r.acc),
+        "font-size": 10.5, fill: a > 0.55 ? "#fff" : "var(--ink)", style: "pointer-events:none" }, sv);
+      addTip(rc, `${M.full}<br>kick on ${unitName(m, k)}, size ${e}<br>accuracy ${pct(100 * r.acc)} (unkicked ${pct(100 * c)})<br>${kickCut(r)} of ${r.out.length} responses cut off at the token limit${r.kl != null ? `<br>KL ${r.kl.toFixed(3)}` : ""}`);
+    });
+  }
+}
 (function kicks() {
   const st = { m: "dory", unit: 1, every: false, eps: 2 };
+  const EPSM = () => epsOf(st.m);
   let tr, units = [];
   const board = new Board($("ki-board"), { title: "", color: "var(--ink)" });
   let cur = null, kiSeq = 0;
@@ -2524,33 +2707,39 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   function showReply() {
     dots.select(st.pick);
     if (!cur) { clearEl($("ki-ex")); return; }
-    const M = MODELS[st.m], eps = EPS[st.eps];
+    const M = MODELS[st.m], eps = EPSM()[st.eps];
     const where = cur.site == null ? "no kick" : st.every ? `size-${eps} kick on every ${M.straight ? "quarter" : "loop"}` : `size-${eps} kick on ${unitName(st.m, st.unit)}`;
     showKickReply($("ki-ex"), { run: st.m, cand: cur.cand, i: st.pick, code: cur.out ? cur.out[st.pick] : null, who: `${M.label} · ${where}`, seq: ++kiSeq, cur: () => kiSeq });
   }
-  chips($("ki-models"), ORDER5.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: st.m, swatch: true,
+  chips($("ki-models"), ORDER7.map((m) => ({ id: m, label: MODELS[m].label, color: MODELS[m].color })), { value: st.m, swatch: true,
     onChange: (m) => { st.m = m; st.unit = 1; st.every = false; build(); } });
   const epsEl = $("ki-eps");
   epsEl.addEventListener("input", () => { st.eps = +epsEl.value; show(false); });
   $("ki-go").addEventListener("click", () => show(true));
   function build() {
-    const M = MODELS[st.m];
-    tr = new Track3($("ki-track"), { model: st.m, loops: M.loops, trained: st.m === "dory4" ? 2 : M.loops, meaning: MEAN.kick, types: ["kick"], label: `${M.full} track` });
+    const M = MODELS[st.m], E = EPSM();
+    epsEl.max = String(E.length - 1);
+    st.eps = Math.max(0, E.indexOf(EPS_START[st.m] ?? 1.0));
+    epsEl.value = String(st.eps);
+    tr = new Track3($("ki-track"), { model: st.m, loops: M.loops, trained: trainedLoops(st.m), meaning: MEAN.kick, types: ["kick"], label: `${M.full} track` });
     const seg = $("ki-units"); seg.innerHTML = "";
     units = [];
     for (let k = 1; k <= M.loops; k++) {
-      const b = h("button", { type: "button" }, h("span", {}, unitName(st.m, k)), h("small", {}, M.straight ? `layer ${KLAYER.qwen[k - 1]}` : `layer ${GEO[st.m].site.kick}`));
+      const b = h("button", { type: "button" }, h("span", {}, unitName(st.m, k)), h("small", {}, M.straight ? `layer ${KLAYER.qwen[k - 1]}` : `layer ${GEO[st.m].kickLayer ?? GEO[st.m].site.kick}`));
       b.addEventListener("click", () => { st.unit = k; st.every = false; sync(); show(true); });
       seg.append(b); units.push(b);
     }
-    const ev = h("button", { type: "button" }, h("span", {}, "Every"), h("small", {}, "same kick each loop"));
-    ev.addEventListener("click", () => { st.every = true; sync(); show(true); });
-    seg.append(ev); units.push(ev);
+    if (kickRows(st.m).some((r) => r.every)) { /* only where every-loop kicks were run */
+      const ev = h("button", { type: "button" }, h("span", {}, "Every"), h("small", {}, "same kick each loop"));
+      ev.addEventListener("click", () => { st.every = true; sync(); show(true); });
+      seg.append(ev); units.push(ev);
+    }
     sync(); show(false);
   }
-  function sync() { units.forEach((b, i) => b.setAttribute("aria-pressed", String(st.every ? i === units.length - 1 : i + 1 === st.unit))); }
+  function sync() { units.forEach((b, i) => b.setAttribute("aria-pressed", String(st.every ? i === M_LOOPS() : i + 1 === st.unit))); }
+  const M_LOOPS = () => MODELS[st.m].loops;
   function show(animate) {
-    const M = MODELS[st.m], eps = EPS[st.eps], c = kickClean(st.m);
+    const M = MODELS[st.m], eps = EPSM()[st.eps], c = kickClean(st.m);
     $("ki-eps-label").textContent = `${eps} × the state's length`;
     const r = kickFind(st.m, st.unit, eps, st.every), plan = kickPlan(st.m, st.unit, eps, st.every);
     const done = () => {
@@ -2573,12 +2762,28 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   const oe = kickFind("ouro", 1, 0.5, true), oc = kickClean("ouro").acc;
   $("ki-all").textContent = pct(100 * oe.acc);
   $("ki-allmax").textContent = r0(100 * Math.max(...[1, 2, 3, 4].map((k) => oc - kickFind("ouro", k, 0.5).acc)));
+  { /* most of the lost accuracy is responses cut off at the token limit, not wrong answers */
+    const o = [1, 2, 3].map((k) => kickFind("ouro", k, 1.0)), d1 = kickFind("dory", 1, 1.0), n1 = kickFind("nanbeige", 1, 1.0);
+    const last = [kickFind("ouro", 4, 1.0), kickFind("dory", 2, 1.0), kickFind("nanbeige", 2, 1.0)].map(kickCut);
+    $("ki-cap").textContent = `Most of what a kick costs is responses that never finish. Every run gets 8,192 tokens, and a kicked model often spends them all without reaching an answer. After a size-1 kick, ${andList(o.map(kickCut).map(String))} of Ouro's 100 responses are cut off with the kick on loops 1, 2 and 3 (${kickCut(kickClean("ouro"))} unkicked), ${kickCut(d1)} of Dory's with it on loop 1 (${kickCut(kickClean("dory"))} unkicked) and ${kickCut(n1)} of Nanbeige's (${kickCut(kickClean("nanbeige"))} unkicked). The responses that do finish are mostly right: ${andList(o.map(kickFin))} solved for Ouro, ${kickFin(d1)} for Dory and ${kickFin(n1)} for Nanbeige. With the kick on the last loop almost nothing finishes: ${last[0]} of Ouro's responses are cut off, ${last[1]} of Dory's and ${last[2]} of Nanbeige's. So accuracy here means reaching the right answer within that budget; we have not tested whether a longer budget would bring the cut-off answers back.`;
+  }
+  { /* Inkling needs bigger kicks; at size 8 a first-loop kick is mostly undone and the two later loops are hurt about
+       equally; run with 5 loops it loses most on the last */
+    const kl = (m, k, e) => (kickFind(m, k, e) || {}).kl, acc = (m, k, e) => 100 * kickFind(m, k, e).acc;
+    const a1 = [1, 2, 3].map((k) => acc("inkvar", k, 1.0)), a8 = [1, 2, 3].map((k) => acc("inkvar", k, 8)), k8 = [1, 2, 3].map((k) => kl("inkvar", k, 8));
+    const c8 = [1, 2, 3].map((k) => kickCut(kickFind("inkvar", k, 8))), mid = [3, 5].map((e) => acc("inkvar", 2, e) - acc("inkvar", 3, e));
+    const v8 = [1, 2, 3, 4, 5].map((k) => acc("inkvar5", k, 8));
+    const fmt = (v) => v.toFixed(v < 0.1 ? 3 : 2);
+    $("ki-ink").textContent = `Inkling needs much bigger kicks, because each of its layers reads a softmax mix of RMS-normalised blocks, so much of a kick is normalised away. At size 1 it still solves ${andList(a1.map((v) => pct(v)))} with the kick on loops 1, 2 and 3, so its runs go up to size 8. Even there a kick moves its predictions by a KL of only ${andList(k8.map(fmt))}, about what a size-1 kick does on Ouro's and Dory's first loop (${fmt(kl("ouro", 1, 1.0))} and ${fmt(kl("dory", 1, 1.0))}). ` +
+      `At size 8 Inkling solves ${pct(a8[0])} with the kick on loop 1 and ${pct(a8[1])} and ${pct(a8[2])} with it on loops 2 and 3 (${andList(c8.map(String))} responses cut off; ${pct(100 * kickClean("inkvar").acc)} solved unkicked). A kick on the first loop costs least, and the two later loops are hurt about equally${mid.every((d) => d < 0) ? ` (at sizes 3 and 5 the middle loop is ${andList(mid.map((d) => String(r0(-d))))} points worse than the last)` : ""}. ` +
+      `Run with five loops it barely notices the same kick on its first three (${andList(v8.slice(0, 3).map((v) => pct(v)))}) and loses most on the last two (${pct(v8[3])} and ${pct(v8[4])}).`;
+  }
   SOURCES.push("Kicks: data/runs/<model>/capability/math500/kickp* and analysis/kick_kl/kickp*.parquet via scripts/kick_summary.py");
 
   /* where each model feels a kick: one row per run, every layer (Dory: sublayer) a cell, darker = bigger change in the
      next-token predictions (teacher-forced KL, size-1 kick). Each row spans the same width, so positions line up as a
      share of the forward pass. */
-  const SR = D.kicks.strips || {}, rowsK = ORDER5.filter((m) => SR[m]);
+  const SR = D.kicks.strips || {}, rowsK = ORDER6.filter((m) => SR[m]);
   /* median KL per loop (quarter, stack) of each run, for the labels and the paragraph above */
   const kmed = (m, stg, lp) => {
     const v = (SR[m]?.cells || []).filter((c) => c.stage === stg && (lp == null || c.loop === lp)).map((c) => c.kl).sort((a, b) => a - b);
@@ -2598,8 +2803,9 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
       const ks = cells.map((c) => Math.log10(Math.max(c.kl, 1e-3))).sort((a, b) => a - b);
       const [lo, hi] = mode === "row" ? [q(ks, 0.05), q(ks, 0.95)] : [-3, 1];
       const lv = (kl) => clamp((Math.log10(Math.max(kl, 1e-3)) - lo) / Math.max(1e-6, hi - lo), 0, 1);
-      const stages = m === "dory" || m === "dory4"
-        ? [["in", null, "entry"]].concat(Array.from({ length: M.loops }, (_, k) => ["loop", k + 1, `loop ${k + 1}`]), [["out", null, "exit"]])
+      const ends = { dory: ["entry", "exit"], dory4: ["entry", "exit"], inkling: ["prelude", "coda"] }[m];
+      const stages = ends
+        ? [["in", null, ends[0]]].concat(Array.from({ length: M.loops }, (_, k) => ["loop", k + 1, `loop ${k + 1}`]), [["out", null, ends[1]]])
         : Array.from({ length: M.loops }, (_, k) => ["loop", k + 1, unitName(m, k + 1).toLowerCase().replace(/^q/, "Q")]);
       const groups = stages.map(([stg, lp, lab]) => ({ lab, med: kmed(m, stg, lp), cs: cells.filter((c) => c.stage === stg && (lp == null || c.loop === lp)).sort((a, b) => a.layer - b.layer) })).filter((g) => g.cs.length);
       const n = groups.reduce((a, g) => a + g.cs.length, 0), cw = (W - mL - mR - gapS * (groups.length - 1)) / n;
@@ -2626,38 +2832,19 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   for (const m of rowsK) src(`Kick strip, ${MODELS[m].label}: ${SR[m].source}`);
   if (["dory", "dory4", "nanbeige", "ouro", "qwen"].every((m) => SR[m])) {
     const o13 = [1, 2, 3].map((l) => kmed("ouro", "loop", l)), q = [1, 2, 3, 4].map((l) => kmed("qwen", "loop", l));
-    $("strip-text").textContent = `Measured layer by layer, the looped models feel a kick most in their last loop. A kick on Dory's first loop moves its predictions by a median KL of ${fk(kmed("dory", "loop", 1))}, one on its second loop by ${fk(kmed("dory", "loop", 2))}. Run with four loops, Dory barely feels a kick on its first two (${fk(Math.max(kmed("dory4", "loop", 1), kmed("dory4", "loop", 2)))} or less). Ouro's first three loops sit between ${fk(Math.min(...o13))} and ${fk(Math.max(...o13))} and its fourth at ${fk(kmed("ouro", "loop", 4))}; Nanbeige's two loops at ${fk(kmed("nanbeige", "loop", 1))} and ${fk(kmed("nanbeige", "loop", 2))}. Qwen has no such slope: a kick hurts most in its middle quarters (${fk(q[1])} and ${fk(q[2])}) and least in its last (${fk(q[3])}). Dory's entry stack (${fk(kmed("dory", "in"))}) is felt more than its first loop because its output is fed into every loop.`;
+    $("strip-text").textContent = `Measured layer by layer, Dory, Nanbeige and Ouro feel a kick most in their last loop. A kick on Dory's first loop moves its predictions by a median KL of ${fk(kmed("dory", "loop", 1))}, one on its second loop by ${fk(kmed("dory", "loop", 2))}. Run with four loops, Dory barely feels a kick on its first two (${fk(Math.max(kmed("dory4", "loop", 1), kmed("dory4", "loop", 2)))} or less). Ouro's first three loops sit between ${fk(Math.min(...o13))} and ${fk(Math.max(...o13))} and its fourth at ${fk(kmed("ouro", "loop", 4))}; Nanbeige's two loops at ${fk(kmed("nanbeige", "loop", 1))} and ${fk(kmed("nanbeige", "loop", 2))}. Qwen has no such slope: a kick hurts most in its middle quarters (${fk(q[1])} and ${fk(q[2])}) and least in its last (${fk(q[3])}). Dory's entry stack (${fk(kmed("dory", "in"))}) is felt more than its first loop because its output is fed into every loop.`;
   }
-
-  /* small multiples heat grids */
-  for (const m of ORDER5) {
-    const M = MODELS[m], c = kickClean(m).acc, box = h("div"); $("kick-multiples").append(box);
-    const cw2 = 40, ch = 26, left = 34, top = 40;
-    const sv = s("svg", { viewBox: `0 0 ${left + cw2 * 4 + 6} ${top + ch * M.loops + 8}`, role: "img", "aria-label": `${M.label} kick grid` }, box);
-    s("text", { x: 0, y: 15, class: "t-title", text: M.label }, sv);
-    EPS.forEach((e, j) => s("text", { x: left + cw2 * j + cw2 / 2, y: top - 6, "text-anchor": "middle", text: String(e), "font-size": 10 }, sv));
-    for (let k = 1; k <= M.loops; k++) {
-      s("text", { x: 0, y: top + ch * (k - 1) + ch / 2 + 4, text: unitShort(m, k), "font-size": 10.5 }, sv);
-      EPS.forEach((e, j) => {
-        const r = kickFind(m, k, e);
-        if (!r) return;
-        const a = clamp(r.acc / c, 0, 1);
-        const rc = s("rect", { x: left + cw2 * j, y: top + ch * (k - 1), width: cw2 - 2, height: ch - 2, rx: 3, fill: M.color, "fill-opacity": (0.06 + 0.94 * a).toFixed(3) }, sv);
-        s("text", { x: left + cw2 * j + cw2 / 2 - 1, y: top + ch * (k - 1) + ch / 2 + 3, "text-anchor": "middle", text: r0(100 * r.acc),
-          "font-size": 10.5, fill: a > 0.55 ? "#fff" : "var(--ink)", style: "pointer-events:none" }, sv);
-        addTip(rc, `${M.full}<br>kick on ${unitName(m, k)}, size ${e}<br>accuracy ${pct(100 * r.acc)} (unkicked ${pct(100 * c)})${r.kl != null ? `<br>KL ${r.kl.toFixed(3)}` : ""}`);
-      });
-    }
-  }
+  /* small multiples heat grids (Inkling's columns run to size 8, so its grids are wider and use narrower cells) */
+  for (const m of ORDER7) { const box = h("div"); $("kick-multiples").append(box); kickGrid(box, m); }
 })();
 
 /* ================================================================== 6. verdict */
 (function verdict() {
   const st = { eps: 0.7 };
   chips($("vd-eps"), EPS.map((e) => ({ id: e, label: String(e) })), { value: 0.7, onChange: (v) => { st.eps = v; draw(); } });
-  const cols = ["dory4", "nanbeige", "ouro", "qwen"]; /* Dory with 4 loops: up to three loops after a steered one, like Ouro */
+  const cols = ["dory4", "nanbeige", "ouro", "inkvar", "qwen"]; /* Dory with 4 loops: up to three loops after a steered one, like Ouro */
   const rows = [
-    { label: "Erase refusal", sub: "487 prompts", get: (m) => Array.from({ length: grid(m).units }, (_, i) => shareKept(m, "erase", i + 1)) },
+    { label: "Erase refusal", sub: "487 prompts (Inkling 250)", get: (m) => Array.from({ length: grid(m).units }, (_, i) => shareKept(m, "erase", i + 1)) },
     { label: "Add a persona", sub: "100 replies × traits", get: (m) => { const all = personaGain(m, Array.from({ length: MODELS[m].loops }, (_, i) => i).join(",")); return Array.from({ length: MODELS[m].loops }, (_, i) => personaGain(m, String(i)) / all); } },
     { label: "Random kick", sub: "100 problems", get: (m, eps) => { const c = kickClean(m).acc, ev = kickFind(m, 1, eps, true); return Array.from({ length: MODELS[m].loops }, (_, i) => { const r = kickFind(m, i + 1, eps); return r && ev ? (c - r.acc) / (c - ev.acc) : null; }); } },
   ];
@@ -2681,6 +2868,7 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
         const yv = (v) => base - clamp(v, 0, 1.15) * hmax; /* tallest bar top: 83 px above the base, value label 14 px above that */
         s("line", { x1: x0, x2: x0 + cw - 24, y1: yv(1), y2: yv(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 3" }, svg);
         s("line", { x1: x0, x2: x0 + cw - 24, y1: base, y2: base, stroke: "var(--line)" }, svg);
+        if (vals.every((v) => v == null)) s("text", { x: x0 + (cw - 24) / 2, y: base - 30, "text-anchor": "middle", text: i === 2 ? "every-loop kick not run" : "not run", "font-size": 10, fill: "var(--ink-3)" }, svg);
         vals.forEach((v, k) => {
           const x = x0 + k * (bw + 6);
           if (v == null) return;
@@ -2699,14 +2887,14 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
 
 /* ================================================================== 6a. why later loops can repair: the answer settles early */
 (function settle() {
-  const R = D.readout, MS = ORDER5, dash = { dory: "5 4" };
-  const name = (m) => (m === "qwen" ? "Qwen (dense)" : m === "dory4" ? "Dory × 4" : m === "dory" ? "Dory × 2" : MODELS[m].label);
+  const R = D.readout, MS = ["dory", "dory4", "nanbeige", "ouro", "inkvar5", "qwen"], dash = { dory: "5 4" };
+  const name = (m) => (m === "qwen" ? "Qwen (dense)" : m === "dory4" ? "Dory × 4" : m === "dory" ? "Dory × 2" : m === "inkvar5" ? "Inkling × 5" : MODELS[m].label);
   const legend = $("st-legend");
   for (const m of MS) {
     const v = s("svg", { viewBox: "0 0 26 10", width: 26, height: 10, "aria-hidden": "true" });
     s("line", { x1: 1, x2: 25, y1: 5, y2: 5, stroke: MODELS[m].color, "stroke-width": m === "qwen" ? 2.8 : 2, "stroke-dasharray": dash[m] || null }, v);
     s("circle", { cx: 13, cy: 5, r: 3.2, fill: MODELS[m].color }, v);
-    legend.append(h("span", {}, v, m === "dory" ? "Dory (2 loops, as trained)" : m === "dory4" ? "Dory run with 4 loops" : m === "qwen" ? "Qwen3-8B (after each quarter)" : MODELS[m].full));
+    legend.append(h("span", {}, v, m === "dory" ? "Dory (2 loops, as trained)" : m === "dory4" ? "Dory run with 4 loops" : m === "qwen" ? "Qwen3-8B (after each quarter)" : m === "inkvar5" ? "Inkling run with 5 loops" : MODELS[m].full));
   }
   function draw() {
     const el = $("st-chart"); el.innerHTML = "";
@@ -2735,11 +2923,11 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
     }
     $("st-cap").textContent = kl
       ? `How far each loop's read-out prediction is from the final one (KL divergence, nats; lower is closer). Dory is within ${R.dory.kl[0].toFixed(2)} after loop 1, Ouro ${R.ouro.kl[0].toFixed(1)}, Nanbeige ${R.nanbeige.kl[0].toFixed(1)}, Qwen's first quarter ${R.qwen.kl[0].toFixed(1)}.`
-      : `After loop 1, Dory's read-out already matches its final next-token prediction ${pct(100 * R.dory.agree[0])} of the time, Ouro's ${pct(100 * R.ouro.agree[0])} and Nanbeige's ${pct(100 * R.nanbeige.agree[0])}. Qwen's quarters reach ${R.qwen.agree.slice(0, 3).map((a) => pct(100 * a)).join(", ")}: a dense model's answer only appears in its last layers.`;
+      : `After loop 1, Dory's read-out already matches its final next-token prediction ${pct(100 * R.dory.agree[0])} of the time, Ouro's ${pct(100 * R.ouro.agree[0])} and Nanbeige's ${pct(100 * R.nanbeige.agree[0])}; Inkling's, run with five loops, ${pct(100 * R.inkvar5.agree[0])}. Qwen's quarters reach ${R.qwen.agree.slice(0, 3).map((a) => pct(100 * a)).join(", ")}: a dense model's answer only appears in its last layers.`;
   }
   draw();
   /* settled after loop 1 vs how much of a loop-1 erase the later loops undo */
-  const pts = ["nanbeige", "ouro", "dory", "dory4"].map((m) => ({ m, x: 100 * R[m].agree[0], y: 100 * (1 - shareKept(m, "erase", 1)) }));
+  const pts = ["nanbeige", "ouro", "dory", "dory4", "inkvar5"].map((m) => ({ m, x: 100 * R[m].agree[0], y: 100 * (1 - shareKept(m, "erase", 1)) }));
   const W = 420, H = 300, mL = 50, mR = 20, top = 20, bot = H - 50;
   const X = (v) => mL + ((W - mL - mR) * v) / 100, Y = (v) => bot - ((bot - top) * clamp(v, 0, 105)) / 105;
   const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Settled after loop 1 against the share of a loop-1 erase that later loops undo" }, $("st-scatter"));
@@ -2754,7 +2942,7 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   for (const p of pts) {
     s("circle", { cx: X(p.x), cy: Y(p.y), r: 6.5, fill: p.m === "dory" ? "var(--panel)" : MODELS[p.m].color, stroke: p.m === "dory" ? MODELS[p.m].color : "var(--panel)", "stroke-width": p.m === "dory" ? 2.4 : 2 }, svg);
     const right = p.x < 80;
-    s("text", { x: X(p.x) + (right ? 11 : -11), y: Y(p.y) + (p.m === "dory" ? 14 : p.m === "dory4" ? -6 : 4), "text-anchor": right ? "start" : "end", text: name(p.m), "font-size": 11, class: "t-strong", fill: MODELS[p.m].color }, svg);
+    s("text", { x: X(p.x) + (right ? 11 : -11), y: Y(p.y) + (p.m === "dory" ? 14 : p.m === "dory4" ? -6 : p.m === "inkvar5" ? 17 : 4), "text-anchor": right ? "start" : "end", text: name(p.m), "font-size": 11, class: "t-strong", fill: MODELS[p.m].color }, svg);
     addTip(s("circle", { cx: X(p.x), cy: Y(p.y), r: 13, fill: "transparent" }, svg),
       `${MODELS[p.m].full}<br>after loop 1: ${pct(p.x)} of predictions already final<br>erase on loop 1 only: later loops undo ${pct(p.y)} of the effect`);
   }
@@ -2762,6 +2950,7 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   const undo = (m) => pct(100 * (1 - shareKept(m, "erase", 1)));
   set("st-nan", `${pct(100 * R.nanbeige.agree[0])} and ${undo("nanbeige")}`); set("st-ouro", `${pct(100 * R.ouro.agree[0])} and ${undo("ouro")}`);
   set("st-dory", `${pct(100 * R.dory.agree[0])} and ${undo("dory")}`);
+  set("st-ink", `${pct(100 * R.inkvar5.agree[0])} and ${undo("inkvar5")}`);
   SOURCES.push("Read-out: data/runs/<model>/analysis/loop_readout_*.csv (logit lens on clean reasoning traces)");
 })();
 
@@ -2872,6 +3061,22 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   set("ri-drop", `${r0(kept("abl12+drop34"))}%`); set("ri-nll-drop", C["abl12+drop34"].nll.toFixed(1)); set("ri-nll-flat", C["abl12+flat34"].nll.toFixed(1));
   set("ri-nll-clean", C.clean.nll.toFixed(2));
   set("ri-ouro", `${keepFirst("ouro")}%`); set("ri-nan", `${keepFirst("nanbeige")}%`);
+  { /* Inkling: every loop restarts from the prelude's output and hears the loops before only through gated messages.
+       Teacher-forced numbers are in the window the direction was built in (the end of the instruction), with the
+       reasoning-token window beside the headline ones */
+    const RB = D.inkling_rebuild, I3 = RB.inkvar.conds, I5 = RB.inkvar5.conds, gi = grid("inkvar"), g5 = grid("inkvar5");
+    const P = (c, k = "sep") => `${r0(c[k])}%`;
+    set("ri-ink-first", `${keepFirst("inkvar")}%`); set("ri-ink-clean", pct(gi.clean.r)); set("ri-ink-12", pct(gi.erase["12"].r)); set("ri-ink-all", pct(gi.erase["123"].r));
+    set("ri-ink-pre", pct(gi.closed["12"].r)); set("ri-v5-123", pct(g5.erase["123"].r)); set("ri-v5-pre", pct(g5.closed["123"].r));
+    set("ri-ink-sep", P(I3.early)); set("ri-ink-sep-cot", P(I3.early, "sep_cot")); set("ri-ink-sep5", P(I5.early)); set("ri-ink-sep5-cot", P(I5.early, "sep_cot"));
+    set("ri-ink-msgabl", P(I3["early+msgabl"]));
+    set("ri-ink-ux", `${P(I3["early+ux"])} and ${P(I3["early+smean"])}`); set("ri-ink-ux5", `${P(I5["early+ux"])} and ${P(I5["early+smean"])}`);
+    set("ri-ink-flat", P(I3["early+flat"])); set("ri-ink-flat-cot", P(I3["early+flat"], "sep_cot")); set("ri-ink-flat0", P(I3.flat));
+    set("ri-ink-flat5", P(I5["early+flat"])); set("ri-ink-nll-flat5", `${I5.clean.nll.toFixed(2)} to ${I5["early+flat"].nll.toFixed(2)}`);
+    set("ri-ink-msgzero", P(I3["early+msgzero"])); set("ri-ink-msgzero-cot", P(I3["early+msgzero"], "sep_cot"));
+    set("ri-ink-nll", `${I3.clean.nll.toFixed(2)} to ${I3.msgzero.nll.toFixed(2)}`);
+    src(`Re-injection, Inkling: data/runs/${MODELS.inkvar.dir}/${RB.inkvar.source}, ${RB.inkvar.site}; run with 5 loops: ${RB.inkvar5.source}, ${RB.inkvar5.site}`);
+  }
 })();
 
 /* ================================================================== 7. weight edits */
@@ -3087,7 +3292,7 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
       ["First-loop erase undone", `${keepFirst("dory")}%`], ["Two extra loops", `refusal back to ${pct(ex.dory.erase.at_extra.r)}`],
       ["Copy minus the erased direction", `rebuild ${r0((100 * D.reinject.conds["abl12+umean34"].curve.slice(96, 176).reduce((a, b) => a + b, 0)) / D.reinject.conds.clean.curve.slice(96, 176).reduce((a, b) => a + b, 0))}% of unsteered`],
       ["Weight edit", `refusal ${pct(E.dory.ortho.refusal.r)}, MATH ${r0(E.dory.clean.math500)} → ${r0(E.dory.ortho.math500)}`]],
-      text: "The strongest comeback of the three, but not because of the copy: stripping the refusal information out of it leaves the rebuild intact, and the models without a copy recover too." },
+      text: "The strongest comeback in extra loops, but not because of the copy: stripping the refusal information out of it leaves the rebuild intact, and the models without a copy recover too." },
     { m: "nanbeige", title: "No copy, no norm on the writes", who: "Nanbeige", rows: [
       ["First-loop erase undone", `${keepFirst("nanbeige")}%`], ["Two extra loops", "not testable"],
       ["Weight edit", `refusal ${pct(E.nanbeige.ortho.refusal.r)}, MATH ${r0(E.nanbeige.clean.math500)} → ${r0(E.nanbeige.ortho.math500)}`]],
@@ -3096,6 +3301,10 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
       ["First-loop erase undone", `${keepFirst("ouro")}%`], ["Two extra loops", `refusal stays at ${pct(ex.ouro.erase.at_extra.r)}`],
       ["Weight edit", `MATH ${r0(E.ouro.clean.math500)} → ${r0(E.ouro.ortho.math500)} (norm-aware ${r0(E.ouro.ortho_na.math500)})`]],
       text: "Learned norm gains rotate an erased direction back, and the shared norm amplifies it every loop. The standard edit destroys the model." },
+    { m: "inkvar", title: "Restart every loop, pass messages", who: "Inkling", rows: [
+      ["First-loop erase undone", `${keepFirst("inkvar")}%`], ["Last loop alone", `erase keeps ${r0(100 * shareKept("inkvar", "erase", 3))}% of every loop`],
+      ["Two extra loops", `refusal back to ${pct(ex.inkvar.erase.at_extra.r)}`], ["Weight edit", "not run"]],
+      text: "Each loop starts again from the prelude's output and hears the loop before it only through gated messages. A first-loop erase barely registers, and the last loop alone does about half of what erasing every loop does. Run two loops longer than it was trained for, it takes most of the refusal back." },
   ];
   for (const d of data) {
     $("lever-cards").append(h("div", { class: "lever", style: `--c:${MODELS[d.m].color}` },
@@ -3104,16 +3313,83 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
   }
 })();
 
+/* ================================================================== appendix: Inkling 2 Mini, fixed at three loops */
+/* The released model always runs three loops. The main text uses its variable-depth checkpoint; this section collects the
+   fixed model's results: one row of panels and a paragraph per experiment. */
+(function inklingFixed() {
+  const box = $("ax-multiples");
+  if (!box) return;
+  const m = "inkling", M = MODELS[m], g = grid(m);
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  const panel = (wide) => { const b = h("div", { class: wide ? "span2" : null }); box.append(b); return b; };
+  const subsetLabel = (k) => (k.length === g.units ? "all" : `L${k.split("").join("+")}`);
+  const subsetName = (k) => (k.length === g.units ? "every loop" : k.length === 1 ? `loop ${k}` : `loops ${andList(k.split(""))}`);
+  /* refusal by loop subset, erasing and adding */
+  const refusalPanel = (mode, title) => {
+    const keys = Object.keys(g[mode]).filter((k) => g[mode][k]).sort((a, b) => a.length - b.length || a.localeCompare(b));
+    const wide = keys.length > 5; /* seven subsets: two columns wide, as Qwen's panel under "flip the sign" */
+    barChart(panel(wide), { title, subtitle: "harmful prompts still refused", w: wide ? (window.innerWidth < 640 ? 300 : 470) : 230,
+      items: keys.map((k) => { const r = g[mode][k]; return { label: subsetLabel(k), value: r.r, lo: r.lo, hi: r.hi, color: M.color, faded: k.length === g.units,
+        tip: `${M.full}<br>${mode === "erase" ? "refusal erased" : "the addition against refusal"} on ${subsetName(k)}: <b>${pct(r.r, 1)}</b> refuse<br>95% CI ${pct(r.lo, 1)}–${pct(r.hi, 1)} · ${r.n} prompts` }; }),
+      refs: [{ value: g.clean.r, label: `none ${pct(g.clean.r)}` }] });
+  };
+  refusalPanel("erase", "Erase refusal");
+  refusalPanel("push", "Add against refusal");
+  /* the refusal direction added on harmless prompts, at the tuned strength */
+  const T = D.plus_harmless[m].tuned, c4 = T.c4;
+  barChart(panel(), { title: "Add refusal", subtitle: `harmless prompts · strength ${T.mult}×`, max: 20,
+    items: [["first", "L1", "loop 1"], ["l2", "L2", "loop 2"], ["last", "L3", "loop 3"], ["all", "all", "every loop"]].map(([k, lab, name]) => ({ label: lab, value: T[k], color: M.color, faded: k === "all",
+      tip: `${M.full}: refusal direction added on ${name} → ${pct(T[k], 1)} of harmless prompts refused<br>coherence ${r0(T.coh[k])} (unsteered ${r0(T.coh.clean)})` }))
+      .concat([{ label: "rand", value: T.random, color: "var(--neutral)", tip: `${M.full}: a random direction of the same size on every loop → ${pct(T.random, 1)} “refused”` }]),
+    refs: [{ value: T.clean, label: `none ${pct(T.clean)}` }] });
+  /* persona vectors: gain by loop, and the share of the every-loop erasure one loop keeps */
+  const one = ["0", "1", "2"].map((u) => personaGain(m, u)), allGain = personaGain(m, "0,1,2");
+  barChart(panel(), { title: "Add a persona", subtitle: "mean trait gain", max: 55, fmt: (v) => `${v >= 0 ? "+" : ""}${r0(v)}`,
+    items: one.map((v, i) => ({ label: `L${i + 1}`, value: v, color: M.color, tip: `${M.full}: persona vector on loop ${i + 1} → mean trait gain ${v.toFixed(1)}` }))
+      .concat([{ label: "all", value: allGain, color: M.color, faded: true, tip: `${M.full}: persona vector on every loop → mean trait gain ${allGain.toFixed(1)}` }]) });
+  const A = D.persona_ablate[m], R = A.recovery, NOUN = { humorous: "humour", apathetic: "apathy", impolite: "rudeness", sycophantic: "sycophancy" };
+  const traits = andList(A.chosen_traits.map((t) => NOUN[t] || t));
+  barChart(panel(), { title: "Erase a persona", subtitle: `share kept · ${traits} only`, max: 100, fmt: (v) => `${r0(v)}%`,
+    items: ["ablate_1", "ablate_2", "ablate_3", "ablate_12"].map((u) => ({ label: u === "ablate_12" ? "L1+2" : `L${u.slice(-1)}`, value: R.chosen[u], color: M.color, faded: u === "ablate_12",
+      tip: `${M.full}, erased on ${u === "ablate_12" ? "loops 1 and 2" : `loop ${u.slice(-1)}`} only: keeps <b>${pct(R.chosen[u])}</b> of what erasing every loop removes<br>erased to zero: ${pct(R.zero[u])} · to the unprompted mean: ${pct(R.mean[u])}` })),
+    refs: [{ value: 100, label: "every loop", dash: "2 3" }] });
+  kickGrid(panel(), m);
+
+  /* the paragraphs */
+  const e = (k) => pct(g.erase[k].r), a = (k) => pct(g.push[k].r), undo1 = r0(100 * (1 - shareKept(m, "erase", 1)));
+  set("ax-refusal", `Erasing refusal on loop 1 alone leaves ${e("1")} of harmful prompts refused, against ${pct(g.clean.r)} unsteered, so the later loops undo ${undo1}% of it, as in the other looped models. Its last loop is where it differs: neither of the last two loops does the job alone (${e("2")} and ${e("3")}), and erased together they leave ${e("23")}, close to the ${e("123")} of erasing all three. Loops 1 and 2 together leave ${e("12")}, and ${pct(g.closed["12"].r)} with the prelude erased as well. The addition against refusal is weak on any one loop (${a("1")}, ${a("2")} and ${a("3")}) and reaches ${a("123")} on all three.`);
+  set("ax-plus", `Adding the refusal direction to harmless prompts barely moves it at a strength that keeps it coherent: ${pct(T.all, 1)} refused with the addition on every loop, against ${pct(T.clean, 1)} unsteered (250 prompts).` +
+    (c4 ? ` At four times its erasing strength it refuses ${pct(c4.all)} with the addition on every loop, but coherence falls from ${r0(T.coh.clean)} to ${r0(c4.coh.all)}, so part of that is broken output, which the judge's rubric counts as a refusal. On its last loop alone it refuses ${pct(c4.last, 1)}, on its first ${pct(c4.first, 1)}.` : ""));
+  const ip = A.methods.zero.traits.impolite, ipAll = ip.rows.find((r) => r.cond === "ablate_all").score;
+  set("ax-persona", `A persona vector on one loop adds ${sgn(one[0])} on loop 1, ${sgn(one[1])} on loop 2 and ${sgn(one[2])} on loop 3, against ${sgn(allGain)} on all three. For erasing a prompted persona only ${traits} passes the rule: erased on loop 1 alone it keeps ${pct(R.chosen.ablate_1)} of the full erasure, on loop 2 ${pct(R.chosen.ablate_2)} and on loop 3 ${pct(R.chosen.ablate_3)}. Its middle loop is where the two erasing variants differ most in size: ${pct(R.zero.ablate_2)} kept when erased to zero, ${pct(R.mean.ablate_2)} when erased to the unprompted mean. Zeroing can also push it toward a trait: erased to zero on every loop, its rudeness goes from ${r0(ip.prompted)} to ${r0(ipAll)}.`);
+  { /* kicks: sizes up to 8; at size 3 the middle loop is hit hardest, mostly through responses that never finish */
+    const K = (k, eps) => kickFind(m, k, eps), fmt = (v) => v.toFixed(v < 0.1 ? 3 : 2), L = [1, 2, 3];
+    const ie = kickFind(m, 1, 0.5, true), ic = kickClean(m).acc;
+    const cells = (D.kicks.strips[m] || { cells: [] }).cells, med = (v) => { v = v.slice().sort((x, y) => x - y); return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2; };
+    const ik = L.map((l) => med(cells.filter((c) => c.stage === "loop" && c.loop === l).map((c) => c.kl))), top = ik.indexOf(Math.max(...ik)) + 1, low = ik.indexOf(Math.min(...ik)) + 1;
+    const pre0 = cells.find((c) => c.stage === "in" && c.layer === 0);
+    set("ax-kicks", `Like the checkpoint it needs bigger kicks than the other models, and the effect levels off: at size 8 a kick moves its predictions by a KL of ${andList(L.map((k) => fmt(K(k, 8).kl)))} on loops 1 to 3. At size 3 it solves ${pct(100 * K(1, 3).acc)} with the kick on loop 1, ${pct(100 * K(2, 3).acc)} on loop 2 and ${pct(100 * K(3, 3).acc)} on loop 3 (${pct(100 * ic)} unkicked), so its middle loop is hit hardest, not its last. Most of that is responses cut off at the token limit (${andList(L.map((k) => String(kickCut(K(k, 3)))))} of 100); of the ones that finish, ${andList(L.map((k) => kickFin(K(k, 3))))} are solved. The change in its next-token predictions, which the limit cannot affect, is also largest for the middle loop (KL ${andList(L.map((k) => fmt(K(k, 3).kl)))}). ` +
+      `Kicking every loop at size 0.5 leaves ${pct(100 * ie.acc)}, where one kick costs at most ${r0(100 * Math.max(...L.map((k) => ic - K(k, 0.5).acc)))} points.` +
+      (cells.length ? ` Layer by layer, a size-1 kick moves its predictions most in loop ${top} (median KL ${fmt(ik[top - 1])}) and least in loop ${low} (${fmt(ik[low - 1])}); its first prelude layer (${fmt(pre0.kl)}) stands out, since every loop restarts from the prelude's output.` : ""));
+  }
+  { /* teacher-forced re-injection controls and the read-out */
+    const C = D.inkling_rebuild[m].conds, P = (k, w = "sep") => `${r0(C[k][w])}%`, R2 = D.readout[m];
+    set("ax-reinject", `Teacher-forced on its own reasoning traces with loops 1 and 2 erased, loop 3's refusal signal at the erased layer ends at ${P("early")} of its unsteered level over the reasoning tokens, the window its direction was built in (${P("early", "sep_eoi")} at the end of the instruction). On top of that erase: stripping the erased direction from the messages gives ${P("early+msgabl")}; erasing it in the prelude too, ${P("early+pre")}; setting the prelude state's own refusal directions to their average, ${P("early+ux")} and ${P("early+smean")}; replacing that state with its average over every token, so that loop 3 learns about the prompt only through the messages, ${P("early+flat")}; zeroing the messages, ${P("early+msgzero")}, with next-token loss rising from ${C.clean.nll.toFixed(2)} to ${C.msgzero.nll.toFixed(2)}. No single source carries the rebuild. In free generation, erasing the prelude as well as loops 1 and 2 moves refusal from ${e("12")} to ${pct(g.closed["12"].r)}.`);
+    set("ax-settle", `After loop 1 only ${pct(100 * R2.agree[0])} of its next-token predictions already match the final one (${pct(100 * R2.agree[1])} after loop 2), yet its later loops undo ${undo1}% of a loop-1 erase. So it does not fit the association in the main text between settling early and repairing more. Loop 2 restarts from the prelude's output, and a loop-1 erase reaches it only through the gated messages.`);
+    src(`Appendix, Inkling 2 Mini: data/runs/${M.dir}/generations/grid_test{,_b} (ablate_v4_cot_t2.l11_apply*, actadd_v4_cot_t2.l11_c-1.0_rel1_apply*), plus_harmless{,_b}, persona/steer_loops and steer_ablate{,_mean}, capability/math500/kickp, analysis/kick_kl/kickp_sites.parquet, ${D.inkling_rebuild[m].source}, ${R2.source}`);
+  }
+})();
+
 /* ================================================================== addendum: a second judge */
 (function secondJudge() {
   const J = D.judge2;
   if (!J || !$("j2-table")) return;
-  const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => J.rows[m]), R = ms.map((m) => J.rows[m]);
+  const ms = ["dory", "nanbeige", "ouro", "inkling", "qwen"].filter((m) => J.rows[m]), R = ms.map((m) => J.rows[m]);
   const f1 = (x) => x.toFixed(1), f3 = (x) => x.toFixed(3), lo = (k) => Math.min(...R.map((r) => r[k])), hi = (k) => Math.max(...R.map((r) => r[k]));
   const head = ["Model", "Answers", "Same verdict", "Refusal, gpt-oss-20b", "Refusal, luna", "Direction cosine, luna vs ours", "Held-out AUC, ours → luna"];
   $("j2-table").append(h("thead", {}, h("tr", {}, head.map((t) => h("th", {}, t)))),
     h("tbody", {}, ms.map((m) => { const r = J.rows[m];
-      return h("tr", {}, h("td", {}, MODELS[m].label + (m === "dory" ? " *" : "")), h("td", {}, r.answers.toLocaleString("en-US")), h("td", {}, `${f1(r.agree)}%`),
+      return h("tr", {}, h("td", {}, MODELS[m].label + (m === "dory" ? " *" : m === "inkling" ? " †" : "")), h("td", {}, r.answers.toLocaleString("en-US")), h("td", {}, `${f1(r.agree)}%`),
         h("td", {}, `${f1(r.ref_a)}%`), h("td", {}, `${f1(r.ref_b)}%`), h("td", {}, f3(r.cos)), h("td", { style: "white-space:nowrap" }, `${f3(r.auc_cur)} → ${f3(r.auc_ref)}`)); })));
   const o = J.rows.ouro;
   $("j2-agree").textContent = `${r0(lo("agree"))}–${r0(hi("agree"))}%`;
@@ -3167,8 +3443,8 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
     $("j2s-intro").textContent = `That is ${fmtN(S.answers)} answers across ${C.length} steering settings, on harmful prompts and, for the flip-sign runs, harmless ones.`;
     /* legend: models, then filled vs ring */
     const lg = $("j2s-legend");
-    const ms = ["dory", "nanbeige", "ouro", "qwen"].filter((m) => C.some((x) => x.model === m));
-    for (const m of ms) lg.append(h("span", { class: "row", style: "gap:.35rem;align-items:center" }, h("span", { style: `width:10px;height:10px;border-radius:50%;background:${MODELS[m].color};display:inline-block` }), MODELS[m].label));
+    const ms = ["dory", "nanbeige", "ouro", "inkvar", "qwen"].filter((m) => C.some((x) => x.model === m));
+    for (const m of ms) lg.append(h("span", { class: "row", style: "gap:.35rem;align-items:center" }, h("span", { style: `width:10px;height:10px;border-radius:50%;background:${MODELS[m].color};display:inline-block` }), m === "inkvar" && C.some((x) => x.model === "inkling") ? "Inkling and Inkling 2 Mini" : MODELS[m].label));
     lg.append(h("span", { class: "row", style: "gap:.35rem;align-items:center;color:var(--ink-2)" }, h("span", { style: "width:10px;height:10px;border-radius:50%;background:var(--ink-3);display:inline-block" }), "harmful prompts"),
       h("span", { class: "row", style: "gap:.35rem;align-items:center;color:var(--ink-2)" }, h("span", { style: "width:10px;height:10px;border-radius:50%;border:1.5px solid var(--ink-3);box-sizing:border-box;display:inline-block" }), "harmless prompts (flip sign)"));
     /* the scatter */
@@ -3195,7 +3471,8 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
     $("j2s-chart").append(svg);
     const pm = Object.entries(S.by_model).map(([m, v]) => `${MODELS[m].label} ${(100 * v.agree / v.answers).toFixed(1)}%`).join(", ");
     $("j2s-cap").textContent = `Each dot is one steering setting; on the dashed line both judges give the same rate. They give the same verdict on ${(100 * S.agree / S.answers).toFixed(1)}% of answers (${pm}). The median gap between the two rates is ${med.toFixed(1)} points; the largest is ${Math.abs(worst.luna - worst.oss).toFixed(1)} (${MODELS[worst.model].label}, ${worst.label}).`;
-    $("j2-blocked-note").textContent = S.blocked ? `OpenAI's biology filter refused to score ${fmtN(S.blocked)} of the steered answers (and 1–4 training replies per model); those keep gpt-oss-20b's verdict.` : "";
+    $("j2-blocked-note").textContent = (S.blocked ? `OpenAI's biology filter refused to score ${fmtN(S.blocked)} of the steered answers (and 1–4 training replies per model); those keep gpt-oss-20b's verdict.` : "") +
+      (D.judge2.rows.inkling ? ` † Inkling 2 Mini is the fixed three-loop model of the appendix; its row compares the directions at loop 2, layer 12, and at every layer, its steering site (loop 3, layer 11) included, the cosine is ${(Math.floor(D.judge2.rows.inkling.cos_min * 1000) / 1000).toFixed(3)} or more. The direction of the variable-depth checkpoint used in the main text is built from harmful minus harmless prompts, like Dory's, and needs no judge.` : "");
     /* the headline cells */
     const rows = [
       ["Dory · no steering", "dory", "grid", "none"], ["Dory · erase loop 1", "dory", "grid", "ablate_hh_eoi_t0.l26_apply0"],
@@ -3206,6 +3483,11 @@ const EPS = [0.5, 0.7, 1.0, 1.5];
       ["Ouro · no steering", "ouro", "grid", "none"], ["Ouro · erase loop 1", "ouro", "grid", "ablate_v4_baseline_t3.l16_apply0"],
       ["Ouro · erase loop 4", "ouro", "grid", "ablate_v4_baseline_t3.l16_apply3"], ["Ouro · erase every loop", "ouro", "grid", "ablate_v4_baseline_t3.l16"],
       ["Ouro · erase loops 1–4, run with 6 loops", "ouro", "grid6", "ablate_v4_baseline_t3.l16_apply0-1-2-3"],
+      ["Inkling · no steering", "inkvar", "grid", "none"], ["Inkling · erase loop 1", "inkvar", "grid", "ablate_hh_eoi_t2.l11_apply0"],
+      ["Inkling · erase loop 3", "inkvar", "grid", "ablate_hh_eoi_t2.l11_apply2"], ["Inkling · erase every loop", "inkvar", "grid", "ablate_hh_eoi_t2.l11_apply0-1-2"],
+      ["Inkling · erase loops 1–3, run with 5 loops", "inkvar", "grid5", "ablate_hh_eoi_t2.l11_apply0-1-2"],
+      ["Inkling 2 Mini · no steering", "inkling", "grid", "none"], ["Inkling 2 Mini · erase loop 1", "inkling", "grid", "ablate_v4_cot_t2.l11_apply0"],
+      ["Inkling 2 Mini · erase loop 3", "inkling", "grid", "ablate_v4_cot_t2.l11_apply2"], ["Inkling 2 Mini · erase every loop", "inkling", "grid", "ablate_v4_cot_t2.l11_apply0-1-2"],
       ["Qwen · no steering", "qwen", "grid", "none"], ["Qwen · erase every layer", "qwen", "grid", "ablate_v4_baseline_l21"],
       ["Dory · weight edit", "dory", "ortho", "ortho_hh_eoi_t0.l26"], ["Nanbeige · weight edit", "nanbeige", "grid", "ortho_v4_baseline_t1.l15"],
       ["Ouro · weight edit", "ouro", "grid", "ortho_v4_baseline_t3.l16"], ["Ouro · norm-aware weight edit", "ouro", "grid", "ortho_v4_baseline_t3.l16_na1"],

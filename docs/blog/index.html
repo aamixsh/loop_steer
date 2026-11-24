@@ -273,7 +273,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="eyebrow">Steering looped language models · <b>interactive draft</b></div>
   <h1>Later loops <span>undo</span> steering</h1>
   <p class="lede col" style="margin-inline:0">A looped language model runs every token through the same stack of layers several times. Steer it on an early loop and the loops that follow undo the edit. Steer the last loop, or bake the edit into the weights, and it sticks, except in one model, where the weight edit wrecks everything.</p>
-  <div class="byline"><span id="gen-stamp">Data: test-set runs</span><span>Models: Dory 1.0 4B · Nanbeige4.2-3B · Ouro-1.4B-Thinking · Qwen3-8B</span></div>
+  <div class="byline"><span id="gen-stamp">Data: test-set runs</span><span>Models: Dory 1.0 4B · Nanbeige4.2-3B · Ouro-1.4B-Thinking · Inkling 2 Mini (variable-depth checkpoint) · Qwen3-8B</span></div>
 
   <div class="fig">
     <div class="trackbox" id="hero-track"></div>
@@ -282,11 +282,11 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   </div>
 
   <div class="tldr col" style="margin-inline:0">
-    <p>In all three looped models, erasing the refusal direction on the first loop barely matters, because the later loops bring refusal back. Erasing it on the last loop alone does most of the job.</p>
+    <p>In all four looped models, erasing the refusal direction on the first loop barely matters, because the later loops bring refusal back. In three of them, erasing it on the last loop alone does most of the job. In the fourth, Inkling, which restarts every loop from its first layers, the last loop alone does about half.</p>
     <p>A dense model behaves differently. Qwen3-8B ignores edits to its first and last quarter and collapses when a middle quarter is edited.</p>
-    <p>Persona vectors and random kicks show the same pattern. Weight edits act on every loop, so no later loop can undo them. They abliterate two looped models cleanly and break the third.</p>
+    <p>Persona vectors, erased personas and random kicks mostly show the same pattern. Run longer than they were trained for, Dory and Inkling take most of the erased refusal back. Weight edits act on every loop, so no later loop can undo them. They abliterate two looped models cleanly and break a third.</p>
   </div>
-  <p class="note col" id="credit" style="margin:1rem 0 0">Concurrent work: a <a href="https://www.lesswrong.com/posts/rzcJMpnehFBD686gj/a-recurrent-llm-is-quite-easy-to-interpret-but-complex-to">LessWrong post on Ouro</a> (September 2026) found that steering Ouro works best on its last loop and that steering on earlier loops gets neutralised. Here the same question is asked of three looped models and a dense control, with refusal scored by a judge, and followed into extra loops, random kicks and weight edits.</p>
+  <p class="note col" id="credit" style="margin:1rem 0 0">Concurrent work: a <a href="https://www.lesswrong.com/posts/rzcJMpnehFBD686gj/a-recurrent-llm-is-quite-easy-to-interpret-but-complex-to">LessWrong post on Ouro</a> (September 2026) found that steering Ouro works best on its last loop and that steering on earlier loops gets neutralised. Here the same question is asked of four looped models and a dense control, with refusal scored by a judge, and followed into extra loops, random kicks and weight edits.</p>
 </header>
 
 <main>
@@ -294,7 +294,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="eyebrow">Setup</div>
   <h2>Same layers, run again</h2>
   <p>A standard transformer passes each token through its layers once. A looped model has a shorter stack and runs each token's state through it several times, with the same weights every time. A loop is not a new thought or a new token: it is the same token's state, processed again by the same layers.</p>
-  <p>In the drawings below, each loop of the tube is one loop of the model. The three looped models differ in how one loop hands over to the next and in where they normalise the stream. <em class="m m-dory">Dory</em> adds its input back before every loop and keeps the whole stream at unit length. <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-ouro">Ouro</em> pass the previous loop's output through a shared norm. Every model, Qwen included, normalises what each layer reads. Under each drawing: how one layer updates the stream <i>h</i>, and what happens between loops. The last card is a fourth looped model whose runs are still going: <em class="m m-inkling">Inkling 2 Mini</em>, a mixture of experts that restarts every pass from its first layers and passes only gated messages from one pass to the next.</p>
+  <p>In the drawings below, each loop of the tube is one loop of the model. The four looped models differ in how one loop hands over to the next and in where they normalise the stream. <em class="m m-dory">Dory</em> adds its input back before every loop and keeps the whole stream at unit length. <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-ouro">Ouro</em> pass the previous loop's output through a shared norm. Every model, Qwen included, normalises what each layer reads. <em class="m m-inkling">Inkling</em>, a mixture of experts, starts every loop (its makers call them passes) again from the output of its first layers; the only link from one loop to the next is a gated message that every layer of the next loop reads from the finished loop. We use the variable-depth research checkpoint of Inkling 2 Mini, trained to answer after one, two or three loops, because it can also be run for longer than that; the released model, which always runs three, is in the <a href="#inkling-fixed">appendix</a>. Under each drawing: how one layer updates the stream <i>h</i>, and what happens between loops.</p>
 </section>
 <div class="wide">
   <div class="cards models" id="model-cards"></div>
@@ -335,7 +335,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 <section class="col" id="dense">
   <div class="eyebrow">Experiment 1 · <b>looped vs dense</b></div>
   <h2>Last loop, or middle layers</h2>
-  <p>Erase refusal on one stretch of the forward pass at a time and the looped models disagree with the dense one about where it matters. In Qwen the middle quarters do almost everything and its first and last quarters do little. In a looped model the first loop is the weakest place to erase, and the last loop alone does most of the job.</p>
+  <p>Erase refusal on one stretch of the forward pass at a time and the looped models disagree with the dense one about where it matters. In Qwen the middle quarters do almost everything and its first and last quarters do little. In a looped model the first loop is the weakest place to erase, and the last loop alone does most of the job. Inkling is the partial exception: its last loop alone takes refusal from <span class="num" id="ink-clean"></span> to <span class="num" id="ink-l3"></span>, about halfway to the <span class="num" id="ink-all"></span> left when every loop is erased.</p>
 </section>
 <div class="wide fig">
   <h3>Where one stretch of erasing matters</h3>
@@ -352,17 +352,17 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <p class="fig-cap">The same runs as refusal rates. Dashed line: no steering. Dotted line: every loop (every quarter). Hover for 95% prompt-bootstrap intervals.</p>
 </div>
 <section class="col">
-  <p>With the sign flipped, the first loop is again the wrong place. We add the refusal direction to harmless prompts, as strongly as each model takes without losing coherence, and adding it on a looped model's first loop barely moves it. <span id="plus-dory"></span> <span id="plus-ouro"></span> <span id="plus-qwen"></span></p>
+  <p>With the sign flipped, the first loop is again the wrong place. We add the refusal direction to harmless prompts, as strongly as each model takes without losing coherence, and adding it on a looped model's first loop barely moves it. <span id="plus-dory"></span> <span id="plus-ouro"></span> <span id="plus-inkling"></span> <span id="plus-qwen"></span></p>
 </section>
 <div class="wide fig">
   <h3>Flip the sign: add refusal to harmless prompts</h3>
   <div class="chart" id="plus-chart"></div>
-  <p class="fig-cap">Share of 100 harmless test prompts refused after adding the refusal direction on one loop or on all of them (Qwen: at the start of one quarter, or of all four), at the strength chosen for each model in the figure below. Faded bar: every loop at once. Grey bar: a random direction of the same size on every loop, as a control. Hover a bar for the coherence of the replies and the share of reasoning traces that never close.</p>
+  <p class="fig-cap">Share of 100 harmless test prompts refused after adding the refusal direction on one loop or on all of them (Qwen: at the start of one quarter, or of all four), at the strength chosen for each model in the figure below (Inkling: 250 prompts). Faded bar: every loop at once. Grey bar: a random direction of the same size on every loop, as a control. Hover a bar for the coherence of the replies and the share of reasoning traces that never close.</p>
 </div>
 <div class="wide fig">
   <h3>How hard to push</h3>
   <div class="chart" id="plus-tune"></div>
-  <p class="fig-cap">Choosing the strength of the addition for each model, on 50 harmless prompts held out from the test set, with the addition on every loop (Qwen: every quarter) at 0.5 to 4 times the strength tuned for the opposite sign, plus three strengths in between where coherence starts to fall. Red: share of harmless prompts refused. Grey: coherence of the replies, 0 to 100, judged by gpt-oss-20b<span id="plus-tune-judge"></span>. We take the strongest addition that keeps coherence within 10 points of the unsteered model (above the dashed line) and does not raise the share of reasoning traces that never close by more than 10 points; hollow dots fail that rule. The ringed strength is the one used above.</p>
+  <p class="fig-cap">Choosing the strength of the addition for each model, on 50 harmless prompts held out from the test set, with the addition on every loop (Qwen: every quarter) at 0.5 to 4 times the strength tuned for the opposite sign, plus a few strengths in between where coherence starts to fall. Red: share of harmless prompts refused. Grey: coherence of the replies, 0 to 100, judged by gpt-oss-20b<span id="plus-tune-judge"></span>. We take the strongest addition that keeps coherence within 10 points of the unsteered model (above the dashed line) and does not raise the share of reasoning traces that never close by more than 10 points; hollow dots fail that rule. The ringed strength is the one used above.</p>
 </div>
 
 <section class="col" id="personas">
@@ -394,12 +394,17 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <p class="fig-cap">Gain in trait score over the unsteered model, averaged over traits, at each model's tuned strength. The last bar in each panel is every loop (every quarter) at once.</p>
 </div>
 <section class="col">
+  <p><em class="m m-inkling">Inkling</em> needs every loop at once: a persona vector on one loop adds <span class="num" id="pe-ink-1"></span> on loop 1, <span class="num" id="pe-ink-2"></span> on loop 2 and <span class="num" id="pe-ink-3"></span> on loop 3, and on all three <span class="num" id="pe-ink-all"></span>, <span id="pe-ink-sum"></span>. As in the other looped models, the first loop does least.</p>
+</section>
+<section class="col">
   <h3>Erase a prompted persona</h3>
   <p>The reverse test: give the model a system prompt that sets a trait, then erase that trait's vector on some loops. This time the trait builds up on its own, so the stream turns from blue to the trait's own colour without any steering, the way it turned red for refusal. Does a filter on one loop clear it for good?</p>
+  <p>Erasing means setting the stream's component along the vector to some value. Zero is the obvious one, but a model with no system prompt does not sit at zero along the vector, and where it sits differs by model. Zeroing pushes <em class="m m-inkling">Inkling</em> toward the trait (erased to zero on every loop, its rudeness goes from <span class="num" id="pa-zero-ink"></span>) and pushes <em class="m m-nanbeige">Nanbeige</em> past the point where it sits with no prompt. So we try two values, zero and the model's own average with no prompt, and for each model and trait use whichever removes more of the trait when erased on every loop. That choice is made before looking at any single loop (<a href="#erase-rule">Methods</a>).</p>
 </section>
 <div class="wide fig">
   <div class="row" id="pa-models"></div>
   <div class="row" id="pa-traits"></div>
+  <div class="row"><span class="label">Erase to</span><span class="row" id="pa-meth"></span></div>
   <div class="row"><span class="label">Erase on</span><span class="row" id="pa-units"></span></div>
   <div class="trackbox" id="pa-track"></div>
   <div class="fig-grid">
@@ -413,19 +418,21 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <p class="note miss" id="pa-missing"></p>
 </div>
 <div class="wide fig">
-  <h3>Share of the prompted trait erased, by loop</h3>
+  <h3>How much of the full erasure one loop keeps</h3>
   <div class="multiples chart" id="pa-multiples"></div>
-  <p class="fig-cap">How much of what the system prompt adds is gone after erasing the trait on one loop (or quarter). For each trait <i>t</i>, the judge's trait score with the prompt is <i>P<sub>t</sub></i>, without it <i>N<sub>t</sub></i>, and with the prompt and the erasure <i>E<sub>t</sub></i>; the bar is Σ<sub><i>t</i></sub>(<i>P<sub>t</sub></i> − <i>E<sub>t</sub></i>) ÷ Σ<sub><i>t</i></sub>(<i>P<sub>t</sub></i> − <i>N<sub>t</sub></i>): the points the erasure takes away over the points the prompt adds, summed over every trait the model has a vector for. 100% means the erasure undoes the prompt exactly; above 100% would mean it pushes the trait below where the model sits with no prompt. A trait the prompt barely raises adds little to either sum, so it cannot swing the bar. The last bar in each panel is every loop at once. Hover for coherence.</p>
+  <p class="fig-cap">For each trait with a usable erasure, how much of the effect of erasing on every loop is still there when only one loop (or the loops shown) is erased. With the trait score <i>P</i> under the prompt alone, <i>E</i><sub>all</sub> after erasing on every loop and <i>E</i><sub>loop</sub> after erasing on that loop only, the bar is (<i>P</i> − <i>E</i><sub>loop</sub>) ÷ (<i>P</i> − <i>E</i><sub>all</sub>), averaged over the traits. 100% means that loop alone does everything the full erasure does; 0% means the later loops undo it completely. Each trait uses the variant the rule picks. A trait counts only if erasing it on every loop removes at least 15 points without costing more than 10 points of coherence; the number of such traits is under each panel's title. Faded bars: several loops at once. In Dory and Inkling, erasing on every loop also covers the layers that run once, outside the loops (entry and exit stacks; prelude and coda), which a single loop's erasure leaves alone; that can only understate a single loop's share. Hover for each trait, each variant on its own and the second judge.</p>
 </div>
 <section class="col">
-  <p>Early erasures wash out again. Run <em class="m m-dory">Dory</em> with four loops and erase the trait on loop 1, 2 or 3: <span class="num" id="pa-d4-1"></span>, <span class="num" id="pa-d4-2"></span> and <span class="num" id="pa-d4-3"></span> of the prompted trait is gone. Loop 4 alone takes away <span class="num" id="pa-d4-4"></span>, the same as every loop (<span class="num" id="pa-d4-all"></span>). With its trained two loops the split is <span class="num" id="pa-d-1"></span> for loop 1 against <span class="num" id="pa-d-2"></span> for loop 2, and <em class="m m-nanbeige">Nanbeige</em> shows <span class="num" id="pa-n-1"></span> against <span class="num" id="pa-n-2"></span>.</p>
-  <p><em class="m m-ouro">Ouro</em> starts from weak replies: it is a reasoning model, and with its reasoning turned off for these tests it often drifts off topic or garbles words, so its replies score <span class="num" id="pa-o-cohn"></span> for coherence with no system prompt and <span class="num" id="pa-o-cohp"></span> with one (the other models: <span id="pa-coh-others-n"></span> and <span id="pa-coh-others-p"></span>). It also erases more on later loops (<span class="num" id="pa-o-1"></span> on loop 1, <span class="num" id="pa-o-4"></span> on loop 4), but less cleanly. <span id="pa-o-opt-clause">Erasing optimism on loop 4 overshoots into gloom</span>, and erasing apathy wrecks its replies (coherence <span class="num" id="pa-o-apa"></span>), which the judge then scores as more apathetic. <em class="m m-qwen">Qwen</em> barely responds to the erasure anywhere: <span class="num" id="pa-q-all"></span> with all four quarters.</p>
+  <p>Early erasures wash out again. Run <em class="m m-dory">Dory</em> with four loops and erase the trait on loops 1 and 2: <span class="num" id="pa-d4-12"></span> of the full erasure is left. Loop 3 alone keeps <span class="num" id="pa-d4-3"></span> and loop 4 alone <span class="num" id="pa-d4-4"></span>. With its trained two loops, loop 1 keeps <span class="num" id="pa-d-1"></span> against <span class="num" id="pa-d-2"></span> for loop 2, and <em class="m m-nanbeige">Nanbeige</em> <span class="num" id="pa-n-1"></span> against <span class="num" id="pa-n-2"></span>. <em class="m m-ouro">Ouro</em> climbs from <span class="num" id="pa-o-1"></span> on loop 1 to <span class="num" id="pa-o-4"></span> on loop 4. <em class="m m-qwen">Qwen</em> has the same dip as for refusal: its first quarter keeps <span class="num" id="pa-q-1"></span>, its middle quarters <span class="num" id="pa-q-2"></span> and <span class="num" id="pa-q-3"></span>, and its last <span class="num" id="pa-q-4"></span>.</p>
+  <p><em class="m m-inkling">Inkling</em> can be tested on <span id="pa-v-traits"></span> only: its system prompts move the other traits too little, or erasing raises them. Erased on loop 1 alone, <span class="num" id="pa-v-1"></span> of the full erasure is left; on loop 2, <span class="num" id="pa-v-2"></span>; on loop 3, <span class="num" id="pa-v-3"></span>. Run with five loops and erased on the three loops it was trained with, it keeps <span class="num" id="pa-v5-123"></span> of the effect of erasing all five; loop 5 alone keeps <span class="num" id="pa-v5-5"></span>.</p>
+  <p><em class="m m-ouro">Ouro</em> starts from weak replies: it is a reasoning model, and with its reasoning turned off for these tests it often drifts off topic or garbles words, so its replies score <span class="num" id="pa-o-cohn"></span> for coherence with no system prompt and <span class="num" id="pa-o-cohp"></span> with one (the other models: <span id="pa-coh-others-n"></span> and <span id="pa-coh-others-p"></span>). Only <span id="pa-o-traits"></span> of its <span id="pa-o-n"></span> traits can be erased under the rule.</p>
+  <p>The two variants give the same pattern. Their averages differ most on <em class="m m-nanbeige">Nanbeige</em>'s first loop, which keeps <span class="num" id="pa-n-zero"></span> of the full effect when every trait is erased to zero and <span class="num" id="pa-n-mean"></span> when erased to the unprompted mean, and one trait makes that gap. Erasing apathy to the mean on every loop barely clears the 15-point bar (its score goes from <span id="pa-n-ap-eff"></span>), so loop 1's share of that small effect comes out at <span class="num" id="pa-n-ap"></span>. Without apathy the two variants give <span class="num" id="pa-n-zero-x"></span> and <span class="num" id="pa-n-mean-x"></span>. Neither variant passes the rule for hallucination on any model we tested. A likely reason: where a model sits along that vector with no prompt depends on how plainly made-up the question is, so no single value suits every question.</p>
 </section>
 
 <section class="col" id="kicks">
   <div class="eyebrow">Experiment 3 · <b>random kicks</b></div>
   <h2>Random kicks wear off</h2>
-  <p>A kick adds a random direction to every token's state at one layer, sized as a fraction of that state's length. It carries no meaning at all. We kick in the middle of one loop and grade 100 MATH-500 problems.</p>
+  <p>A kick adds a random direction to every token's state at one layer, sized as a fraction of that state's length. It carries no meaning at all. We kick in the middle of one loop and grade 100 MATH-500 problems, each with a budget of 8,192 tokens.</p>
 </section>
 <div class="wide fig">
   <div class="row" id="ki-models"></div>
@@ -452,20 +459,22 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   </div>
 </div>
 <section class="col">
+  <p id="ki-cap"></p>
   <p>The cleanest comparison in the post is the same kick at the same site. <span id="ki-same"></span></p>
   <p>Kick every loop at once and nothing recovers. <em class="m m-ouro">Ouro</em> falls to <span class="num" id="ki-all"></span> at size 0.5, where a single kick on any loop costs at most <span class="num" id="ki-allmax"></span> points.</p>
+  <p id="ki-ink"></p>
   <p id="strip-text"></p>
 </section>
 <div class="wide fig">
   <h3>Where each model feels a kick</h3>
   <div class="row"><span class="label">Colour scale</span><span id="strip-scale"></span></div>
   <div class="chart scroll-x" id="strip-chart"></div>
-  <p class="fig-cap">A size-1 kick at one layer at a time (Dory: one sublayer), on the first 30 MATH-500 problems: a random direction added to the stream at that layer, on every token, as long as the stream itself there. A random direction is nearly at right angles to the stream, so the kick turns what the layer reads by about 45° and makes it about 1.4 times longer. Colour is how much it changes the model's next-token predictions on its own unkicked replies (KL divergence from the unkicked run, log scale), and the number under each loop is its median. "Each row" stretches every run's colours over its own range, so the pattern inside a run shows; "Shared" uses one range for all, which shows that Dory's loops differ by far more than any other model's. Each row is stretched to the same width, so the columns line up as a share of the forward pass. Hover a cell for its value.</p>
+  <p class="fig-cap">A size-1 kick at one layer at a time (Dory: one sublayer), on the first 30 MATH-500 problems: a random direction added to the stream at that layer, on every token, as long as the stream itself there. A random direction is nearly at right angles to the stream, so the kick turns what the layer reads by about 45° and makes it about 1.4 times longer. Colour is how much it changes the model's next-token predictions on its own unkicked replies (KL divergence from the unkicked run, log scale), and the number under each loop is its median. "Each row" stretches every run's colours over its own range, so the pattern inside a run shows; "Shared" uses one range for all, which shows that Dory's loops differ by far more than any other model's. Each row is stretched to the same width, so the columns line up as a share of the forward pass. Inkling was not run layer by layer. Hover a cell for its value.</p>
 </div>
 <div class="wide fig">
   <h3>Every kick, every model</h3>
   <div class="multiples chart" id="kick-multiples"></div>
-  <p class="fig-cap">MATH-500 accuracy after one kick, by loop (rows) and size (columns). Darker is more accurate. The top row of each grid is the first loop.</p>
+  <p class="fig-cap">MATH-500 accuracy after one kick, by loop (rows) and size (columns). Darker is more accurate. The top row of each grid is the first loop. Inkling's grids run to size 8, since much of a kick is normalised away inside it. Hover a cell for how many of its responses were cut off at the token limit.</p>
 </div>
 
 <section class="col" id="extra">
@@ -491,7 +500,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="stack" id="ex-ex" style="gap:.6rem"></div>
 </div>
 <section class="col">
-  <p><em class="m m-dory">Dory</em> heals completely in every experiment. <em class="m m-ouro">Ouro</em> recovers from random kicks with two extra loops but not from refusal steering.<span id="ex-gains"></span> Nanbeige cannot be tested this way, since beyond two loops it produces gibberish even without steering.</p>
+  <p><em class="m m-dory">Dory</em> heals completely in every experiment. <em class="m m-ouro">Ouro</em> recovers from random kicks with two extra loops but not from refusal steering.<span id="ex-gains"></span> Nanbeige cannot be tested this way, since beyond two loops it produces gibberish even without steering. <em class="m m-inkling">Inkling</em>, trained to answer after one to three loops, behaves more like Dory than Ouro: run with five, it takes back most of the erased refusal and most of the addition against refusal (from <span class="num" id="ex-i-push3"></span> to <span class="num" id="ex-i-push5"></span>). A persona vector on its three trained loops gains <span class="num" id="ex-i-pers3"></span> when they are the whole run and <span class="num" id="ex-i-pers5"></span> when two more follow. Erasing a prompted persona on loop 3 removes <span class="num" id="ex-i-pe3"></span> points of the trait with three loops and <span class="num" id="ex-i-pe5"></span> with five. A size-1 kick barely hurts it (<span class="num" id="ex-i-kick1"></span> with the kick on loop 3, against <span class="num" id="ex-i-kick0"></span> unkicked), so its kick test uses size 8: <span class="num" id="ex-i-kick"></span> solved when loop 3 is the last loop, <span class="num" id="ex-i-kick5"></span> when two more follow.<span id="ex-i-plus"></span></p>
 </section>
 
 <section class="col" id="verdict">
@@ -502,16 +511,16 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 <div class="wide fig">
   <div class="row"><span class="label">Kick size in the bottom row</span><span id="vd-eps"></span></div>
   <div class="chart scroll-x" id="vd-matrix"></div>
-  <p class="fig-cap">Share of the full effect kept when only one loop (or quarter) is steered. Refusal and kicks: drop from the unsteered model, divided by the drop when every loop is steered. Personas: trait gain divided by the gain when every loop is steered. Dashed line in each cell: 100%, the effect of steering every loop. Dory runs 4 loops here, two more than it was trained with, so each of its bars has up to three loops after it. Looped models rise towards the last loop; Qwen peaks in the middle.</p>
+  <p class="fig-cap">Share of the full effect kept when only one loop (or quarter) is steered. Refusal and kicks: drop from the unsteered model, divided by the drop when every loop is steered. Personas: trait gain divided by the gain when every loop is steered. Dashed line in each cell: 100%, the effect of steering every loop. Dory runs 4 loops here, two more than it was trained with, so each of its bars has up to three loops after it. Dory, Nanbeige and Ouro rise towards the last loop. Inkling rises too, but its last loop carries about half of the refusal effect and less of a persona's, and its every-loop kick was not run. Qwen peaks in the middle.</p>
 </div>
 <section class="col">
-  <p>It is not a defence. Steer the last loop, or every loop, and all three models fall the way a dense model does. Dense models also recompute an erased direction in their later layers. What they lack is a second pass through the layers that read it.</p>
+  <p>It is not a defence. Steer every loop (in Dory, Nanbeige and Ouro the last loop alone comes close) and all four models fall the way a dense model does. Dense models also recompute an erased direction in their later layers. What they lack is a second pass through the layers that read it.</p>
 </section>
 
 <section class="col" id="reinject">
   <div class="eyebrow">Why · <b>the first suspect</b></div>
   <h2>Is it the re-injected input?</h2>
-  <p>Why would a later loop rebuild what an earlier one lost? Start with the model that does it most. <em class="m m-dory">Dory</em> recovers most strongly, and it is the one model that adds its input back before every loop (the shortcut under its loops). That makes the copy a natural suspect: a later loop could rebuild refusal by re-reading the prompt as the entry stack saw it. <em class="m m-ouro">Ouro</em> and <em class="m m-nanbeige">Nanbeige</em> have no copy; each loop only gets the previous loop's output.</p>
+  <p>Why would a later loop rebuild what an earlier one lost? Start with the model that does it most. <em class="m m-dory">Dory</em> recovers most strongly, and it adds its input back before every loop (the shortcut under its loops). That makes the copy a natural suspect: a later loop could rebuild refusal by re-reading the prompt as the entry stack saw it. <em class="m m-ouro">Ouro</em> and <em class="m m-nanbeige">Nanbeige</em> have no copy; each loop only gets the previous loop's output.</p>
   <p>We tested this on Dory run with four loops. Erase the refusal direction on loops 1 and 2, change what is added back before loops 3 and 4, and measure the refusal signal the stream carries at every sublayer. The reasoning traces are fixed (teacher-forced), so this measures the stream rather than new behaviour. Here the stream's colour follows that measured signal.</p>
 </section>
 <div class="wide fig">
@@ -528,6 +537,9 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <p>With the usual copy, loops 3 and 4 rebuild <span class="num" id="ri-usual"></span> of the unsteered signal within a few sublayers. The most direct test strips the erased direction from the copy itself, so nothing added back before loops 3 and 4 tells refusing traces from complying ones along it (the difference shrinks <span id="ri-shrink"></span>). The loops still rebuild <span class="num" id="ri-umean"></span>. The copy only sets where each loop starts: without it the first sublayer or two sit lower, and the loop catches up a few sublayers in. Stripping the entry stack's own refusal direction too gives <span class="num" id="ri-uxmean"></span>; that direction alone, <span class="num" id="ri-mean"></span>; all 17 of the entry stack's refusal directions, <span class="num" id="ri-smean"></span>; the random controls, <span class="num" id="ri-rand"></span>. Stripping the copy on all four loops, the erased ones included, gives <span class="num" id="ri-all"></span>. The model barely notices any of these edits (next-token loss <span class="num" id="ri-nll"></span>).</p>
   <p>The copy's refusal information is small even when nothing is erased: stripping the erased direction from it in an unsteered run still leaves loops 3 and 4 at <span class="num" id="ri-umean-only"></span>. Only removing the copy altogether dents the rebuild, to <span class="num" id="ri-drop"></span>, and that breaks the model: loss jumps from <span class="num" id="ri-nll-clean"></span> to <span class="num" id="ri-nll-drop"></span>. A flat copy breaks it completely (<span class="num" id="ri-nll-flat"></span>).</p>
   <p>The models without a copy point the same way: <em class="m m-ouro">Ouro</em> and <em class="m m-nanbeige">Nanbeige</em> still undo <span class="num" id="ri-ouro"></span> and <span class="num" id="ri-nan"></span> of a first-loop erase. So the comeback does not need re-injection, and it does not need refusal to be copied forward. The likelier source is the loops themselves: they work out again that the request should be refused, and write the refusal direction anew.</p>
+  <p><em class="m m-inkling">Inkling</em> takes the copy to its limit. Every loop starts again from the prelude's output, so loop 3 begins exactly as it would without steering; it hears loop 2 only through gated messages, and loop 1 only by way of loop 2. It undoes <span class="num" id="ri-ink-first"></span> of a first-loop erase. Erasing loops 1 and 2 together does carry over through the messages: refusal falls from <span class="num" id="ri-ink-clean"></span> to <span class="num" id="ri-ink-12"></span> (<span class="num" id="ri-ink-all"></span> with all three loops erased). Erasing the prelude as well, so that loop 3 also restarts from an erased state, takes off a few points more (<span class="num" id="ri-ink-pre"></span>). Run with five loops and erased on loops 1 to 3 it still refuses <span class="num" id="ri-v5-123"></span>, and <span class="num" id="ri-v5-pre"></span> with the prelude erased too. So the erased direction in the prelude accounts for a few points of the comeback, not for most of it.</p>
+  <p>Teacher-forced as above, loop 3's refusal signal at the erased layer is back at <span class="num" id="ri-ink-sep"></span> of its unsteered level after loops 1 and 2 are erased, measured at the end of the instruction, where Inkling's direction was built (<span class="num" id="ri-ink-sep-cot"></span> over the reasoning tokens). With five loops and loops 1 to 3 erased, loop 5 reaches <span class="num" id="ri-ink-sep5"></span> (<span class="num" id="ri-ink-sep5-cot"></span>). Stripping the erased direction from the messages as well leaves <span class="num" id="ri-ink-msgabl"></span>, so the direction itself is not what carries over. Refusal can also be taken out of the state each loop restarts from, by setting to their average either the erased direction together with the prelude's main refusal direction, or all of the prelude's refusal directions: loop 3 still reaches <span class="num" id="ri-ink-ux"></span> (<span class="num" id="ri-ink-ux5"></span> with five loops).</p>
+  <p>What does matter is the content of that state. Replace it with its average over every token, so that loop 3 learns about the prompt only through the messages, and the signal falls to <span class="num" id="ri-ink-flat"></span> (<span class="num" id="ri-ink-flat-cot"></span> over the reasoning tokens); it falls about as far with nothing erased (<span class="num" id="ri-ink-flat0"></span>). With five loops the flat state leaves <span class="num" id="ri-ink-flat5"></span> and breaks the model (next-token loss <span class="num" id="ri-ink-nll-flat5"></span>). Zeroing the messages instead is harder to read: the signal falls to <span class="num" id="ri-ink-msgzero"></span> at the end of the instruction and rises to <span class="num" id="ri-ink-msgzero-cot"></span> over the reasoning tokens, and the model's predictions suffer (loss <span class="num" id="ri-ink-nll"></span>). As in Dory, no refusal direction copied forward explains the comeback; the later loops need what the prompt says and work refusal out again from that. These measurements use at most 40 refusing and 40 complying reasoning traces per run, so read their sizes loosely.</p>
   <p class="note">What this does not rule out: the copy still carries what the prompt says, and a loop could work out refusal from that, just as it can from the carried state. Removing that content means removing the copy, which breaks the model, so this test cannot tell the two apart.</p>
 </section>
 
@@ -543,16 +555,16 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 </div>
 <section class="col">
   <p>A looped model has a usable answer after its first loop; a dense model has none until its last layers. So the later loops of a looped model mostly take a state that is already close to its answer and run the same layers over it again. Whatever computed refusal on loop 1 sees almost the same input on loop 2, and computes it again. On this reading, self-correction needs no repair mechanism: it is the same function applied to a state that has nearly settled, and an erase on an early loop is a small push that the next pass undoes.</p>
-  <p>If that is right, the more settled a model is after loop 1, the more of a loop-1 erase it should undo. The three looped models line up that way (predictions final after loop 1, then share of a loop-1 erase undone): <em class="m m-nanbeige">Nanbeige</em> <span class="num" id="st-nan"></span>, <em class="m m-ouro">Ouro</em> <span class="num" id="st-ouro"></span>, <em class="m m-dory">Dory</em> <span class="num" id="st-dory"></span>.</p>
+  <p>If that is right, the more settled a model is after loop 1, the more of a loop-1 erase it should undo. The looped models line up that way (predictions final after loop 1, then share of a loop-1 erase undone): <em class="m m-nanbeige">Nanbeige</em> <span class="num" id="st-nan"></span>, <em class="m m-ouro">Ouro</em> <span class="num" id="st-ouro"></span>, <em class="m m-dory">Dory</em> <span class="num" id="st-dory"></span>, and <em class="m m-inkling">Inkling</em>, run with five loops, <span class="num" id="st-ink"></span>. The released Inkling 2 Mini is the exception (<a href="#inkling-fixed">appendix</a>): little of its answer is final after loop 1, yet its later loops undo nearly all of a loop-1 erase.</p>
 </section>
 <div class="wide fig">
   <div class="fig-grid">
     <div class="chart" id="st-scatter"></div>
     <div class="stack">
       <h3>Settled early, repaired more</h3>
-      <p class="fig-cap">Horizontal: next-token predictions already final after loop 1. Vertical: how much of a loop-1 erase the later loops undo, 1 − (unsteered − loop-1 erase) ÷ (unsteered − every-loop erase). Dory appears twice: as trained (2 loops, hollow dot) and run with 4 loops.</p>
+      <p class="fig-cap">Horizontal: next-token predictions already final after loop 1. Vertical: how much of a loop-1 erase the later loops undo, 1 − (unsteered − loop-1 erase) ÷ (unsteered − every-loop erase). Dory appears twice: as trained (2 loops, hollow dot) and run with 4 loops. Inkling is shown run with 5 loops, the only depth its read-out was measured at.</p>
       <p class="fig-cap">Qwen is left out. Its first quarter has almost no answer yet (1%), and erasing there does little for a different reason: refusal has not formed yet, and its middle layers build it from scratch.</p>
-      <p class="note" style="font-size:.9rem">Three models that differ in many ways, so this is an association, not a test. It fits the other results: Ouro, the least settled after loop 1 of the four-loop runs, is also the one whose extra loops do not bring refusal back.</p>
+      <p class="note" style="font-size:.9rem">Five runs of four models that differ in many ways, so this is an association, not a test, and Inkling 2 Mini with its fixed three loops does not fit it (appendix). It fits the other results: Ouro, the least settled after loop 1 of the four-loop runs, is also the one whose extra loops do not bring refusal back.</p>
     </div>
   </div>
 </div>
@@ -564,7 +576,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 </section>
 <div class="wide cards" id="edit-cards"></div>
 <section class="col">
-  <p><em class="m m-qwen">Qwen</em>, <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-dory">Dory</em> stop refusing and keep their maths. <em class="m m-ouro">Ouro</em>'s standard edit wipes out its maths, and the same happens with a random direction, so the damage has nothing to do with refusal. Its refusal rate after the edit (<span id="ed-o-ref"></span>) counts that broken output as well: the judge scores a reply that gives no usable help as a refusal. A norm-aware edit brings refusal down to <span class="num" id="ed-na-r"></span> but costs nearly half of MATH-500 and most of MMLU-Pro. Hooks still remove Ouro's refusal at no cost, so it resists a recipe, not an attacker who can run code.</p>
+  <p><em class="m m-qwen">Qwen</em>, <em class="m m-nanbeige">Nanbeige</em> and <em class="m m-dory">Dory</em> stop refusing and keep their maths. <em class="m m-ouro">Ouro</em>'s standard edit wipes out its maths, and the same happens with a random direction, so the damage has nothing to do with refusal. Its refusal rate after the edit (<span id="ed-o-ref"></span>) counts that broken output as well: the judge scores a reply that gives no usable help as a refusal. A norm-aware edit brings refusal down to <span class="num" id="ed-na-r"></span> but costs nearly half of MATH-500 and most of MMLU-Pro. Hooks still remove Ouro's refusal at no cost, so it resists a recipe, not an attacker who can run code. We have not run a weight edit on Inkling.</p>
 </section>
 
 <section class="col" id="leak">
@@ -616,7 +628,7 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
 <section class="col" id="levers">
   <div class="eyebrow">Takeaways</div>
   <h2>Design levers</h2>
-  <p>Each looped model bundles several design choices, so most of this is association across three models. Two choices were tested directly: Ouro's norms explain why its weight edit fails, and Dory's re-injected input does not explain its comeback.</p>
+  <p>Each looped model bundles several design choices, so most of this is association across four models. Two choices were tested directly: Ouro's norms explain why its weight edit fails, and Dory's re-injected input does not explain its comeback.</p>
 </section>
 <div class="wide levers" id="lever-cards"></div>
 <section class="col">
@@ -625,9 +637,29 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
     <ul class="plain">
       <li>For interpretability: probe, patch and steer the last loop first. A null result on an early loop says little about the model.</li>
       <li>For safety evaluations: none of this stops an attacker who hooks the last loop. A model that resists one weight-editing recipe is not tamper resistant. Fine-tuning attacks are untested here.</li>
-      <li>For architecture: self-correction appears with and without re-injecting the input, and stripping the refusal information from Dory's copy does not stop it. Norm placement decides whether naive weight edits survive.</li>
+      <li>For architecture: self-correction appears with and without re-injecting the input, and with loops that restart from the first layers (Inkling); stripping the refusal information from Dory's copy does not stop it. Norm placement decides whether naive weight edits survive.</li>
     </ul>
   </div>
+</section>
+
+<hr class="lane">
+<section class="col" id="inkling-fixed">
+  <div class="eyebrow">Appendix</div>
+  <h2>Inkling 2 Mini, fixed at three loops</h2>
+  <p>Thinking Machines released <em class="m m-inkling">Inkling 2 Mini</em> as a model that always runs three loops. The main text uses its variable-depth research checkpoint instead: the same layers, trained to answer after one, two or three loops, which is what lets us run it for longer than it was trained. This appendix collects the released model's results. Its refusal direction comes from refusing minus complying reasoning at loop 3, layer 11, and it samples at temperature 1.0 like the checkpoint. It agrees with the checkpoint about the first loop and differs in three places: its last loop alone does not carry the refusal effect, a kick hurts it most on its middle loop, and it repairs a loop-1 erase without having settled early.</p>
+  <p id="ax-refusal"></p>
+</section>
+<div class="wide fig">
+  <h3>Inkling 2 Mini, every experiment</h3>
+  <div class="multiples chart" id="ax-multiples"></div>
+  <p class="fig-cap">In order: the share of 487 harmful prompts still refused after erasing the refusal direction on the loops shown, and after adding its opposite there; the share of 250 harmless prompts refused after adding the refusal direction (grey: a random direction on every loop); the mean trait gain from a persona vector; the share of the every-loop persona erasure that one loop keeps; MATH-500 accuracy after one kick, by loop and size. Dashed lines: no steering, or every loop. Faded bars: several loops at once. Hover for intervals and details.</p>
+</div>
+<section class="col">
+  <p id="ax-plus"></p>
+  <p id="ax-persona"></p>
+  <p id="ax-kicks"></p>
+  <p id="ax-reinject"></p>
+  <p id="ax-settle"></p>
 </section>
 
 <hr class="lane">
@@ -635,13 +667,29 @@ details summary { cursor: pointer; font-family: var(--font-mono); font-size: .78
   <div class="eyebrow">Fine print</div>
   <h2>Methods and limits</h2>
   <ul class="plain">
-    <li><b>Refusal.</b> 487 harmful test prompts (250 for some loop subsets), 3 reasoning traces per prompt and 3 answers per trace at temperature 0.6, each answer scored as described under <a href="#scoring">How we score</a>. Intervals resample prompts.</li>
-    <li><b>Directions.</b> One direction per model, extracted at one site and reused everywhere: Ouro loop 4 layer 16, Nanbeige loop 2 layer 15, Dory loop 1 sublayer 26 (harmful minus harmless prompts), Qwen layer 21.</li>
+    <li><b>Refusal.</b> 487 harmful test prompts (250 for some loop subsets and for Inkling, run with 3 and with 5 loops), 3 reasoning traces per prompt and 3 answers per trace at temperature 0.6 (Inkling: 1.0 with its chat template), each answer scored as described under <a href="#scoring">How we score</a>. Intervals resample prompts.</li>
+    <li><b>Directions.</b> One direction per model, extracted at one site and reused everywhere: Ouro loop 4 layer 16, Nanbeige loop 2 layer 15, Dory loop 1 sublayer 26 (harmful minus harmless prompts), Inkling loop 3 layer 11 (harmful minus harmless prompts, at the end of the instruction), Qwen layer 21. Inkling 2 Mini (appendix): loop 3 layer 11, refusing minus complying reasoning.</li>
     <li><b>Kicks.</b> A random unit direction per problem, times a fraction of the state's norm, added at each loop's middle layer. 100 MATH-500 problems, one sample each, reasoning up to 8192 tokens.</li>
-    <li><b>Personas.</b> Persona-vector method of Chen et al. (2025), 20 questions × 5 samples per setting with thinking turned off, trait and coherence scored as below. Strengths tuned per model so coherence stays within 10 points of clean.</li>
-    <li><b>Limits.</b> Single runs. <span id="judge-limits">One judge scores every figure, with no human calibration; a stronger second judge was run on every refusal answer for comparison (<a href="#judge2">addendum</a>).</span> Extra-loop tests run models past their trained loop count. Three looped models, each with several design differences. Leak mechanism on 8 traces.</li>
+    <li><b>Personas.</b> Persona-vector method of Chen et al. (2025), 20 questions × 5 samples per setting with thinking turned off (Inkling cannot turn it off; only its answer is scored), trait and coherence scored as below. Strengths tuned per model so coherence stays within 10 points of clean. Erasing a prompted persona: see <a href="#erase-rule">below</a>.</li>
+    <li><b>Limits.</b> Single runs. <span id="judge-limits">One judge scores every figure, with no human calibration; a stronger second judge was run on every refusal answer for comparison (<a href="#judge2">addendum</a>).</span> Extra-loop tests run models past their trained loop count. Four looped models, each with several design differences. Inkling is a research checkpoint, run with its 4-bit weights as shipped and on fewer settings than the others: no loops 1 + 3 or 2 + 3, no every-loop or layer-by-layer kicks, no read-out at three loops and no weight edit. Kick accuracy is capped by the 8,192-token budget, and most kicked failures are responses cut off there. Leak mechanism on 8 traces.</li>
     <li><b>Concurrent work.</b> A <a href="https://www.lesswrong.com/posts/rzcJMpnehFBD686gj/a-recurrent-llm-is-quite-easy-to-interpret-but-complex-to">LessWrong post on Ouro</a> (24 Sep 2026, "A recurrent LLM is quite easy to interpret but complex to steer") also finds steering works best on the last loop. <a href="https://arxiv.org/abs/2610.15218">arXiv 2610.15218</a> and <a href="https://arxiv.org/abs/2610.10625">arXiv 2610.10625</a> link refusal and jailbreaks to the number of loops.</li>
   </ul>
+  <h3 id="erase-rule" style="margin-top:1.6rem">Erasing a persona</h3>
+  <p style="font-size:1rem">A persona set by a system prompt is erased by removing its vector <i>u</i> from every layer's input and output on the chosen loops. Two variants:</p>
+  <ul class="plain">
+    <li><b>Zero</b> sets the component along <i>u</i> to 0.</li>
+    <li><b>Unprompted mean</b> sets it to the model's own average with no system prompt: one value per site, the same for every test question. It is measured on the model's unprompted answers to the persona-vectors repository's 20 extraction questions per trait, which are separate from the 20 test questions, so nothing from the test enters the erasure. Measuring it on the test questions instead gave the same numbers within sampling noise.</li>
+  </ul>
+  <p style="font-size:1rem"><b>Why one variant is not enough.</b> Zero erases the trait only if the model's unprompted states sit at 0 along <i>u</i>. They do not, and the offset differs by model. Inkling's sit far below 0, so zeroing pushes toward the trait (rudeness <span id="mr-ink-imp"></span>, hallucination <span id="mr-ink-hal"></span>, prompted against zeroed on every loop). Nanbeige's sit on the trait side, so zeroing overshoots past the unprompted level into the opposite trait. In Qwen zeroing barely erases anything, and raises rudeness and sycophancy. The mean removes only what the system prompt added along <i>u</i>.</p>
+  <p style="font-size:1rem"><b>The rule.</b> The claim under test is recovery: later loops undo an intervention made on earlier loops. Any intervention that removes the trait when applied on every loop can test it; what the component is set to is a means, not the object of study. So:</p>
+  <ol style="font-size:1rem">
+    <li>For each model and trait, use the variant whose erasure on every loop removes more of the prompted trait while keeping coherence within 10 points of the prompted run.</li>
+    <li>The choice is made with gpt-oss-20b, the judge that chose the directions and strengths. It looks only at the every-loop condition and is fixed before any single-loop result is read. Single-loop results are reported under both judges.</li>
+    <li><b>Guard:</b> a variant whose every-loop erasure raises the trait, or removes less than 15 points, is not used, since the share of an effect that one loop keeps is undefined without an effect to share. This rules out zero for Inkling's rudeness, and both variants for hallucination on every model we tested. A likely reason for hallucination: where a model sits along <i>u</i> with no prompt depends on how plainly made-up the question is, so no single value suits every question.</li>
+    <li><b>Robustness:</b> the other variant's single-loop numbers are shown beside the chosen one (hover the panels). Where they disagree, that is reported, not averaged away. The largest gap between the variants' averages is Nanbeige's first loop: <span id="mr-n-zero"></span> of the full effect kept with every trait erased to zero, <span id="mr-n-mean"></span> with the mean. One trait makes it: apathy erased to the mean on every loop barely clears the 15-point guard (its score goes from <span id="mr-n-ap-eff"></span>), and loop 1's share of that small effect is <span id="mr-n-ap"></span>. Without apathy the variants give <span id="mr-n-zero-x"></span> and <span id="mr-n-mean-x"></span>. Elsewhere the variants agree on the pattern and can differ in size, most on the middle loop of Inkling 2 Mini (<a href="#inkling-fixed">appendix</a>). These are differences in size, not in which loops undo the erasure.</li>
+    <li><b>Scope:</b> erasing on every loop also erases in the layers that run once, outside the loops (Dory's entry and exit stacks, Inkling's prelude and coda); erasing on named loops does not. Within one run that can only understate a single loop's share. Across depths we therefore compare the same single loop, the last one the model was trained with, in both runs (<a href="#extra">Run two more loops</a>).</li>
+  </ol>
+  <p style="font-size:1rem"><b>What the rule cannot rule out.</b> The choice uses the every-loop effect on the same test questions. That is a mild selection on the denominator, not on which loops carry the effect. A share is also unstable when the every-loop effect is small, as Nanbeige's apathy shows, which is why each trait is listed on hover. The recovery pattern (first loop undone, last loop kept, middle quarters in the dense model) is the same under both variants.</p>
   <h3 id="scoring" style="margin-top:1.6rem">How we score</h3>
   <p style="font-size:1rem" id="judge-lead">One judge, gpt-oss-20b at a fixed snapshot with greedy decoding, scores every reply that needs a judgment. Accuracy and kick damage need no judge.</p>
   <ul class="plain">
